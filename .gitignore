@@ -1,0 +1,22 @@
+node_modules/
+bun.lock
+package-lock.json
+
+# Secrets and credentials
+*.secret
+*.key
+.env
+.env.*
+
+# Runtime state (not part of config)
+workflows/active/*.org
+workflows/hook.log
+
+# Editor/OS files
+.DS_Store
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+/.projectile
