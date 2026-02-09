@@ -2,6 +2,8 @@
 
 A collection of agents, commands, skills, plugins, tools, and workflow templates for [OpenCode](https://github.com/sst/opencode).
 
+> **Note:** Plans and workflow state are stored as [org-mode](https://orgmode.org/) files. While any text editor can read them, you'll get the best experience with Emacs — collapsible headings, TODO state cycling, timestamps, and native org support. VS Code users can install the [Org Mode extension](https://marketplace.visualstudio.com/items?itemName=vscode-org-mode.org-mode) for basic support.
+
 ## Installation
 
 ### Prerequisites
