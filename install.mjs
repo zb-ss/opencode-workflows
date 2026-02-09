@@ -305,30 +305,34 @@ function install(modules, mode, dryRun) {
     }
   }
 
-  // opencode.json — copy only if it doesn't exist
-  const opconfigTarget = path.join(configDir, "opencode.json");
-  const opconfigSource = path.join(REPO_ROOT, "opencode.json.template");
-  if (!fs.existsSync(opconfigTarget) && fs.existsSync(opconfigSource)) {
+  // opencode.jsonc — copy only if neither .jsonc nor .json exists
+  const opconfigJsonc = path.join(configDir, "opencode.jsonc");
+  const opconfigJson = path.join(configDir, "opencode.json");
+  const opconfigTarget = fs.existsSync(opconfigJsonc) ? opconfigJsonc : opconfigJson;
+  const opconfigExists = fs.existsSync(opconfigJsonc) || fs.existsSync(opconfigJson);
+  const opconfigSource = path.join(REPO_ROOT, "opencode.jsonc.template");
+  if (!opconfigExists && fs.existsSync(opconfigSource)) {
+    const newTarget = path.join(configDir, "opencode.jsonc");
     if (dryRun) {
       allActions.push({
         action: "copy",
         source: opconfigSource,
-        target: opconfigTarget,
+        target: newTarget,
         dryRun: true,
-        note: "opencode.json (from template, first install only)",
+        note: "opencode.jsonc (from template, first install only)",
       });
     } else {
-      fs.mkdirSync(path.dirname(opconfigTarget), { recursive: true });
-      fs.copyFileSync(opconfigSource, opconfigTarget);
+      fs.mkdirSync(path.dirname(newTarget), { recursive: true });
+      fs.copyFileSync(opconfigSource, newTarget);
       allActions.push({
         action: "copy",
         source: opconfigSource,
-        target: opconfigTarget,
-        note: "opencode.json (from template, first install only)",
+        target: newTarget,
+        note: "opencode.jsonc (from template, first install only)",
       });
-      installedTargets.push(opconfigTarget);
+      installedTargets.push(newTarget);
     }
-  } else if (fs.existsSync(opconfigTarget)) {
+  } else if (opconfigExists) {
     allActions.push({
       action: "skip",
       target: opconfigTarget,
@@ -402,9 +406,9 @@ function uninstall(dryRun) {
   else console.log();
 
   for (const target of manifest.files) {
-    // Never remove opencode.json
-    if (path.basename(target) === "opencode.json") {
-      skipped.push({ target, reason: "opencode.json is never removed" });
+    // Never remove opencode config
+    if (path.basename(target) === "opencode.jsonc" || path.basename(target) === "opencode.json") {
+      skipped.push({ target, reason: "opencode config is never removed" });
       continue;
     }
 
@@ -513,7 +517,7 @@ function printSummary(actions, modules, mode, dryRun) {
   console.log("\n─".repeat(50));
   if (!dryRun) {
     console.log("Next steps:");
-    console.log(`  1. Review/edit ${path.join(getConfigDir(), "opencode.json")}`);
+    console.log(`  1. Review/edit ${path.join(getConfigDir(), "opencode.jsonc")}`);
     console.log("  2. Set up API keys in ~/.secrets/ as needed");
     console.log("  3. Start OpenCode and verify agents are available");
     if (mode === "symlink") {

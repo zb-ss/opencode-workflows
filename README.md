@@ -53,7 +53,7 @@ node install.mjs --help
 
 ### Post-Install
 
-1. Review and edit `~/.config/opencode/opencode.json` — configure API keys and MCP servers
+1. Review and edit `~/.config/opencode/opencode.jsonc` — configure MCP servers and API keys
 2. Set up API keys in `~/.secrets/` as needed (GitHub, Figma, Slack, etc.)
 3. Start OpenCode and verify agents are available
 
@@ -68,7 +68,7 @@ node install.mjs --help
 node install.mjs --uninstall
 ```
 
-This removes all installed symlinks/copies and the manifest file. Your `opencode.json` is never removed.
+This removes all installed symlinks/copies and the manifest file. Your `opencode.jsonc` is never removed.
 
 ---
 

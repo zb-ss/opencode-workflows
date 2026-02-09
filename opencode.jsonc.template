@@ -1,0 +1,55 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "instructions": [
+    "CONVENTIONS.md"
+  ],
+
+  // MCP servers - add your own here
+  // See: https://opencode.ai/docs/config/mcp
+  //
+  // "mcp": {
+  //   "github": {
+  //     "type": "local",
+  //     "enabled": true,
+  //     "command": ["docker", "run", "-i", "--rm", "-e", "GITHUB_PERSONAL_ACCESS_TOKEN", "ghcr.io/github/github-mcp-server"],
+  //     "environment": { "GITHUB_PERSONAL_ACCESS_TOKEN": "your-token-here" }
+  //   },
+  //   "playwright": {
+  //     "type": "local",
+  //     "enabled": true,
+  //     "command": ["npx", "@playwright/mcp@latest"]
+  //   },
+  //   "context7": {
+  //     "type": "local",
+  //     "enabled": true,
+  //     "command": ["npx", "-y", "@upstash/context7-mcp"]
+  //   }
+  // },
+  "mcp": {},
+
+  "permission": {
+    "bash": {
+      "git commit*": "ask",
+      "*": "allow"
+    }
+  },
+
+  // Disable MCP tools globally, then enable per-agent below
+  // Example: "github_*": false
+  "tools": {},
+
+  // Per-agent tool access and permission overrides
+  //
+  // "agent": {
+  //   "discussion": {
+  //     "tools": { "github_*": true }
+  //   },
+  //   "web-tester": {
+  //     "tools": { "playwright_*": true, "chrome-devtools_*": true }
+  //   },
+  //   "commit": {
+  //     "permission": { "bash": { "git commit*": "allow" } }
+  //   }
+  // }
+  "agent": {}
+}
