@@ -99,5 +99,5 @@ if [[ "$IN_WORKFLOW" == "true" ]]; then
     done
 fi
 
-# For all other commands, let Claude Code's normal permission system handle it
+# For all other commands, let  OpenCode's normal permission system handle it
 exit 0

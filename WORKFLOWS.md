@@ -95,7 +95,7 @@ Start a new automated workflow.
 **Behavior:**
 1. Validates workflow type
 2. Asks about branch strategy (current/new/specify)
-3. Creates workflow state file in `~/.claude/workflows/active/`
+3. Creates workflow state file in `workflows/active/`
 4. Executes steps sequentially
 5. Updates state file after each step
 6. Sends notifications on completions/failures
@@ -134,11 +134,10 @@ Show status of active workflows.
 
 ### Location
 ```
-~/.claude/workflows/
+workflows/
 ├── active/          # Currently running workflows
 ├── completed/       # Archived finished workflows
 
-# Templates are in the repo:
 templates/               # Workflow type definitions
 ├── bug-fix.org
 ├── feature-development.org
@@ -156,7 +155,7 @@ Each workflow creates an org-mode file with:
 
 **Example:**
 ```
-~/.claude/workflows/active/2025-12-06-user-auth.org
+workflows/active/2025-12-06-user-auth.org
 ```
 
 You can open this file in any text editor to see detailed progress.
@@ -243,7 +242,7 @@ git commit
 ### Viewing Workflow Progress
 ```bash
 # Open the workflow state file
-vim ~/.claude/workflows/active/2025-12-06-my-feature.org
+vim workflows/active/2025-12-06-my-feature.org
 
 # Or use workflow-status
 /workflow-status
@@ -303,48 +302,15 @@ You can customize these templates to modify workflow steps, add new steps, or ch
 2. Verify API keys are configured in `~/.secrets/`
 3. Check agent has tool permissions in `opencode.json`
 
-## Configuration Files
+## Related Files
 
-### opencode.json
-Agent tool configurations:
-```json
-{
-  "agent": {
-    "supervisor": {
-      "tools": {
-        "github_*": true,
-        "asana_*": true,
-        "context7_*": true
-      }
-    },
-    "test-writer": {
-      "tools": {
-        "context7_*": true,
-        "github_*": true
-      }
-    },
-    "security-auditor": {
-      "tools": {
-        "context7_*": true,
-        "github_*": true
-      }
-    }
-  }
-}
-```
-
-### Agent Files
-- `~/.config/opencode/agent/supervisor.md` - Workflow orchestrator
-- `~/.config/opencode/agent/test-writer.md` - Test creation
-- `~/.config/opencode/agent/security-auditor.md` - Security auditing
-
-### Command Files
-- `~/.config/opencode/command/workflow.md` - Start workflows
-- `~/.config/opencode/command/workflow-resume.md` - Resume workflows
-- `~/.config/opencode/command/workflow-status.md` - Check status
-
-### Plugin Files
-- `~/.config/opencode/plugin/workflow-notifications.ts` - Desktop notifications
+### In this repo
+- `agent/supervisor.md` — Workflow orchestrator agent
+- `command/workflow.md` — Start workflows
+- `command/workflow-resume.md` — Resume workflows
+- `command/workflow-status.md` — Check status
+- `plugin/workflow-notifications.ts` — Desktop notifications
+- `templates/` — Workflow type templates (org-mode)
 
 ## Examples
 
@@ -441,20 +407,8 @@ git add docs/development-log/2025-12-06-my-feature.org
 git commit -m "docs: Add development log for user auth feature"
 ```
 
-## Future Enhancements
-
-Planned additions to the workflow system:
-- Bug-fix workflow template
-- Refactoring workflow template
-- Asana/GitHub issue integration
-- Parallel step execution
-- Slack notifications option
-- Workflow composition (workflows calling other workflows)
-- CI/CD pipeline integration
-
 ## See Also
 
-- [CONVENTIONS.md](./CONVENTIONS.md) - Coding standards used by agents
-- [Implementation Plan](plans/2025-12-06-opencode-automated-workflows.org) - Detailed technical plan
-- [OpenCode Agents Documentation](https://opencode.ai/docs/agents/)
-- [OpenCode Commands Documentation](https://opencode.ai/docs/commands/)
+- [AGENTS.md](./AGENTS.md) — Detailed agent documentation
+- [CONVENTIONS.md](./CONVENTIONS.md) — Coding standards used by agents
+- [OpenCode Docs](https://opencode.ai/docs)
