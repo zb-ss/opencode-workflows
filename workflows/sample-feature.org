@@ -1,0 +1,87 @@
+#+TITLE: Sample Feature Development Workflow
+#+WORKFLOW_ID: 20260101-feature-sample
+#+TYPE: feature
+#+MODE: autonomous
+#+STYLE: full
+#+CREATED: 2026-01-01
+#+STATUS: in_progress
+
+* Overview
+:PROPERTIES:
+:WORKFLOW_ID: 20260101-feature-sample
+:CREATED_AT: 2026-01-01 00:00:00
+:UPDATED_AT: 2026-01-01 00:00:00
+:STATUS: in_progress
+:BRANCH: feature/sample-feature
+:BASE_BRANCH: main
+:END:
+
+** Description
+Add a new feature to the application. Describe the feature requirements,
+acceptance criteria, and any design decisions.
+
+** Architecture Notes
+- Key architectural decisions
+- Components affected
+- Dependencies
+
+* Steps
+
+** TODO Step 0: Planning
+:PROPERTIES:
+:AGENT: org-planner
+:STARTED_AT:
+:COMPLETED_AT:
+:END:
+
+Create detailed implementation plan.
+
+** TODO Step 1: Implementation
+:PROPERTIES:
+:AGENT: focused-build
+:STARTED_AT:
+:COMPLETED_AT:
+:END:
+
+Implement the feature according to the plan.
+
+** TODO Step 2: Code Review
+:PROPERTIES:
+:AGENT: review
+:STARTED_AT:
+:COMPLETED_AT:
+:END:
+
+Review implementation against the plan. Check for:
+- Correctness
+- Code quality
+- Security
+- Performance
+
+** TODO Step 3: Testing
+:PROPERTIES:
+:AGENT: test-writer
+:STARTED_AT:
+:COMPLETED_AT:
+:END:
+
+Write tests for the new feature.
+
+** TODO Step 4: Security Audit
+:PROPERTIES:
+:AGENT: security-auditor
+:STARTED_AT:
+:COMPLETED_AT:
+:END:
+
+OWASP Top 10 security review.
+
+* Decision Log
+
+| Date | Decision | Rationale |
+|------+----------+-----------|
+|      |          |           |
+
+* Completion Summary
+
+(Filled in when workflow completes)

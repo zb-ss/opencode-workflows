@@ -1,0 +1,45 @@
+#+TITLE: Sample Bugfix Workflow
+#+WORKFLOW_ID: 20260101-sample
+#+TYPE: bugfix
+#+MODE: standard
+#+STYLE: full
+#+CREATED: 2026-01-01
+#+STATUS: completed
+#+COMPLETED_AT: 2026-01-01
+
+* Problem Statement
+
+Description of the bug being fixed. Include reproduction steps and
+observable symptoms.
+
+** Console Evidence
+- Any relevant error messages or logs
+
+* Investigation Log
+
+** Step 1: Analyze Root Cause
+:LOGBOOK:
+- STARTED_AT: [2026-01-01]
+- STATUS: completed
+:END:
+
+Investigated the issue and found the root cause.
+
+* Findings
+
+** Root Cause
+Explanation of what was causing the bug.
+
+* Solution
+
+** Fix Applied
+Description of the code changes made to fix the bug.
+
+* Files Changed
+
+- =path/to/changed/file.ext=
+  - Description of changes made
+
+* Completion Summary
+
+Summary of what was fixed and why the solution works.

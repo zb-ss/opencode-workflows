@@ -8,8 +8,18 @@ package-lock.json
 .env
 .env.*
 
-# Runtime state (not part of config)
+# Runtime state - plans
+plans/*.org
+plans/**/*.org
+!plans/.gitkeep
+
+# Runtime state - workflows
 workflows/active/*.org
+workflows/active/*.json
+workflows/active/*/
+!workflows/active/.gitkeep
+workflows/completed/*.org
+!workflows/completed/.gitkeep
 workflows/hook.log
 
 # Editor/OS files

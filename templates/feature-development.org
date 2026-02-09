@@ -1,0 +1,304 @@
+#+TITLE: Workflow Template: Feature Development
+#+AUTHOR: OpenCode Workflow System
+#+WORKFLOW_TYPE: feature
+#+FILETAGS: :template:feature:
+
+* Template Information
+:PROPERTIES:
+:TEMPLATE_VERSION: 1.0
+:DESCRIPTION: Complete feature development workflow with planning, implementation, review, testing, and security audit
+:ESTIMATED_DURATION: 2-8 hours depending on complexity
+:END:
+
+This template is used by the supervisor agent to orchestrate feature development.
+
+* Steps
+
+** TODO [#A] Step 1: Planning                                      :planning:
+:PROPERTIES:
+:STEP_ID: planning
+:AGENT: org-planner
+:REQUIRED: yes
+:OUTPUTS: plan_file
+:END:
+
+*** Description
+Create a comprehensive development plan for the feature.
+
+*** Agent Prompt Template
+#+begin_src markdown
+Create a comprehensive development plan for the following feature.
+
+## Feature Request
+{DESCRIPTION}
+
+## Repository Context
+Path: {REPOSITORY}
+Branch: {BRANCH}
+
+## Requirements
+1. Save the plan to plans/{DATE}-{SLUG}.org
+2. Break down into specific, actionable implementation tasks
+3. Consider:
+   - Database schema changes if needed
+   - API endpoints required
+   - Frontend components needed
+   - Testing requirements
+   - Documentation updates
+   - Security considerations
+4. Include acceptance criteria for each major task
+5. Estimate effort for each task
+
+After creating the plan, confirm the file path where it was saved.
+#+end_src
+
+*** Success Criteria
+- Plan file created at specified path
+- Contains clear implementation steps
+- Includes testing and security considerations
+
+** TODO [#A] Step 2: Implementation                          :implementation:
+:PROPERTIES:
+:STEP_ID: implementation
+:AGENT: editor
+:REQUIRED: yes
+:DEPENDS_ON: planning
+:INPUTS: plan_file
+:END:
+
+*** Description
+Implement the feature according to the plan. The editor agent will auto-invoke @review for each significant change.
+
+*** Agent Prompt Template
+#+begin_src markdown
+Implement the development plan located at:
+{PLAN_FILE}
+
+## Context
+- Repository: {REPOSITORY}
+- Branch: {BRANCH}
+- This is part of workflow: {WORKFLOW_ID}
+
+## Instructions
+1. Read the plan carefully
+2. Implement tasks in order
+3. Follow project conventions (CONVENTIONS.md)
+4. Your built-in @review cycle will handle code review
+5. After all implementation and reviews pass, report back
+
+Focus on implementing the plan accurately and completely.
+#+end_src
+
+*** Success Criteria
+- All planned tasks implemented
+- Code follows project conventions
+- Auto-review cycles passed
+
+** TODO [#B] Step 3: Broad Review                                   :review:
+:PROPERTIES:
+:STEP_ID: broad-review
+:AGENT: review
+:REQUIRED: yes
+:DEPENDS_ON: implementation
+:INPUTS: plan_file
+:END:
+
+*** Description
+Comprehensive review of ALL changes against the original plan.
+
+*** Agent Prompt Template
+#+begin_src markdown
+Perform a comprehensive review of all changes made in this workflow.
+
+## Original Plan
+{PLAN_FILE}
+
+## Workflow Context
+- Repository: {REPOSITORY}
+- Branch: {BRANCH}
+- Workflow: {WORKFLOW_ID}
+
+## Review Focus
+1. Verify ALL planned features are implemented
+2. Check code quality against CONVENTIONS.md
+3. Identify any security concerns
+4. Verify test coverage is adequate
+5. Check for any missing edge cases
+6. Ensure documentation is updated where needed
+
+Provide a detailed review with:
+- Compliance status (compliant/partial/non-compliant)
+- List of any issues found
+- Recommendations for fixes if needed
+#+end_src
+
+*** Success Criteria
+- Review completed
+- All planned features confirmed implemented
+- No critical issues found (or flagged for resolution)
+
+** TODO [#B] Step 4: Test Writing                                  :testing:
+:PROPERTIES:
+:STEP_ID: testing
+:AGENT: test-writer
+:REQUIRED: yes
+:DEPENDS_ON: broad-review
+:INPUTS: plan_file
+:END:
+
+*** Description
+Write comprehensive unit and integration tests for the new functionality.
+
+*** Agent Prompt Template
+#+begin_src markdown
+Write comprehensive tests for the features implemented in this workflow.
+
+## Implementation Summary
+Review the changes on branch: {BRANCH}
+
+## Plan Reference
+{PLAN_FILE}
+
+## Testing Requirements
+1. Unit tests for all new functions/methods/classes
+2. Integration tests for API endpoints (if applicable)
+3. Test edge cases identified in the plan
+4. Test error handling scenarios
+5. Aim for meaningful coverage (80%+ on new code)
+
+## Test Framework
+Use the project's existing test framework and conventions.
+
+Report:
+- Number of tests written
+- Coverage metrics
+- Any implementation bugs discovered during testing
+#+end_src
+
+*** Success Criteria
+- Tests written for new functionality
+- Tests pass
+- Coverage meets standards
+
+** TODO [#B] Step 5: E2E Testing (if frontend)                  :e2e:optional:
+:PROPERTIES:
+:STEP_ID: e2e-testing
+:AGENT: web-tester
+:REQUIRED: conditional
+:CONDITION: frontend_changes_detected
+:DEPENDS_ON: testing
+:END:
+
+*** Description
+End-to-end tests for frontend changes.
+
+*** Agent Prompt Template
+#+begin_src markdown
+Create end-to-end tests for the frontend features implemented.
+
+## Features
+Review frontend changes on branch: {BRANCH}
+
+## Test Scenarios
+1. Happy path user flows
+2. Error state handling
+3. Form validation
+4. Responsive behavior (if applicable)
+5. Accessibility checks
+
+## Framework
+Use Playwright or the project's existing E2E framework.
+
+Report:
+- Tests created
+- Screenshots captured
+- Any issues found
+#+end_src
+
+*** Success Criteria
+- E2E tests written
+- Tests pass
+- Screenshots captured for visual baseline
+
+** TODO [#B] Step 6: Security Audit                               :security:
+:PROPERTIES:
+:STEP_ID: security-audit
+:AGENT: security-auditor
+:REQUIRED: yes
+:DEPENDS_ON: testing
+:END:
+
+*** Description
+Security review of all changes.
+
+*** Agent Prompt Template
+#+begin_src markdown
+Perform a security audit of the changes made in this workflow.
+
+## Scope
+Branch: {BRANCH}
+Changes since workflow started.
+
+## Focus Areas
+1. New API endpoints - authentication/authorization
+2. Input validation
+3. Data handling and storage
+4. Dependency security (if new deps added)
+5. Configuration security
+6. OWASP Top 10 considerations
+
+## Required
+- Full audit report with findings
+- Severity ratings
+- Remediation steps for any issues
+
+CRITICAL or HIGH severity issues will pause the workflow.
+#+end_src
+
+*** Success Criteria
+- Audit completed
+- No CRITICAL issues
+- HIGH issues documented with remediation plan
+
+** TODO [#A] Step 7: Final Commit                                   :commit:
+:PROPERTIES:
+:STEP_ID: final-commit
+:AGENT: supervisor
+:REQUIRED: yes
+:DEPENDS_ON: security-audit
+:END:
+
+*** Description
+Supervisor handles final commit and workflow completion.
+
+*** Actions
+1. Verify all previous steps are DONE
+2. Run final test suite to ensure nothing broken
+3. Generate commit message summarizing changes
+4. Create commit (or prompt user)
+5. Archive workflow to completed/
+6. Send completion notification
+
+*** Success Criteria
+- All tests pass
+- Commit created
+- Workflow archived
+- User notified
+
+* Workflow Configuration
+
+** Notifications
+- On step completion: notify-send with step name
+- On workflow completion: notify-send with summary
+- On failure: notify-send with urgency=critical
+
+** Error Handling
+- FAILED step: Pause workflow, notify user, wait for /workflow-resume
+- Missing dependency: Report and suggest installation
+- Git conflict: Report and instruct user to resolve
+
+** Branch Strategy
+Ask user at start:
+1. Use current branch
+2. Create new branch (feature/{slug})
+3. Specify branch name

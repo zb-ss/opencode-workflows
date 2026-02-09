@@ -1,0 +1,329 @@
+#+TITLE: Workflow Template: Bug Fix
+#+AUTHOR: OpenCode Workflow System
+#+WORKFLOW_TYPE: bug-fix
+#+FILETAGS: :template:bug-fix:
+
+* Template Information
+:PROPERTIES:
+:TEMPLATE_VERSION: 1.0
+:DESCRIPTION: Bug investigation and fix workflow with debugging, planning, implementation, and verification
+:ESTIMATED_DURATION: 1-4 hours depending on complexity
+:END:
+
+This template is used by the supervisor agent to orchestrate bug fix workflows.
+
+* Steps
+
+** TODO [#A] Step 1: Investigation                              :investigation:
+:PROPERTIES:
+:STEP_ID: investigation
+:AGENT: debug
+:REQUIRED: yes
+:OUTPUTS: investigation_report
+:END:
+
+*** Description
+Investigate the bug to understand root cause, reproduction steps, and affected areas.
+
+*** Agent Prompt Template
+#+begin_src markdown
+Investigate the following bug report.
+
+## Bug Report
+{DESCRIPTION}
+
+## Repository Context
+Path: {REPOSITORY}
+Branch: {BRANCH}
+
+## Investigation Tasks
+1. Understand the reported symptoms
+2. Reproduce the issue (if possible)
+3. Trace the code path to identify root cause
+4. Identify all affected areas/components
+5. Check for related issues or regressions
+6. Document findings
+
+## Required Output
+Provide a detailed investigation report including:
+- Reproduction steps (if reproducible)
+- Root cause analysis
+- Affected files/components
+- Potential fix approaches (at least 2 if possible)
+- Risk assessment for each approach
+- Recommended approach with justification
+
+Save findings to the workflow state when complete.
+#+end_src
+
+*** Success Criteria
+- Root cause identified
+- Affected areas documented
+- At least one fix approach proposed
+
+** TODO [#A] Step 2: Fix Planning                                  :planning:
+:PROPERTIES:
+:STEP_ID: fix-planning
+:AGENT: org-planner
+:REQUIRED: yes
+:DEPENDS_ON: investigation
+:INPUTS: investigation_report
+:OUTPUTS: plan_file
+:END:
+
+*** Description
+Create a focused plan for implementing the bug fix.
+
+*** Agent Prompt Template
+#+begin_src markdown
+Create a bug fix plan based on the investigation findings.
+
+## Investigation Summary
+{INVESTIGATION_REPORT}
+
+## Repository Context
+Path: {REPOSITORY}
+Branch: {BRANCH}
+
+## Requirements
+1. Save the plan to plans/{DATE}-{SLUG}-bugfix.org
+2. Focus on minimal, targeted changes to fix the issue
+3. Include:
+   - Specific files to modify
+   - Exact changes needed
+   - Test cases to add/modify
+   - Regression test considerations
+   - Rollback plan if fix causes issues
+4. Avoid scope creep - fix the bug, don't refactor
+
+After creating the plan, confirm the file path where it was saved.
+#+end_src
+
+*** Success Criteria
+- Plan file created
+- Clear, focused fix steps defined
+- Test requirements specified
+
+** TODO [#A] Step 3: Implementation                            :implementation:
+:PROPERTIES:
+:STEP_ID: implementation
+:AGENT: editor
+:REQUIRED: yes
+:DEPENDS_ON: fix-planning
+:INPUTS: plan_file
+:END:
+
+*** Description
+Implement the bug fix according to the plan.
+
+*** Agent Prompt Template
+#+begin_src markdown
+Implement the bug fix plan located at:
+{PLAN_FILE}
+
+## Context
+- Repository: {REPOSITORY}
+- Branch: {BRANCH}
+- Workflow: {WORKFLOW_ID}
+
+## Instructions
+1. Read the plan carefully
+2. Make minimal, focused changes
+3. Follow project conventions
+4. Your built-in @review cycle will handle code review
+5. Do NOT expand scope beyond the bug fix
+
+## Important
+- Keep changes minimal and targeted
+- Don't refactor surrounding code
+- Document any surprising findings
+
+Report back when implementation is complete.
+#+end_src
+
+*** Success Criteria
+- Bug fix implemented
+- Changes are minimal and focused
+- Auto-review cycles passed
+
+** TODO [#B] Step 4: Review                                          :review:
+:PROPERTIES:
+:STEP_ID: review
+:AGENT: review
+:REQUIRED: yes
+:DEPENDS_ON: implementation
+:INPUTS: plan_file
+:END:
+
+*** Description
+Review the bug fix for correctness and potential regressions.
+
+*** Agent Prompt Template
+#+begin_src markdown
+Review the bug fix implementation.
+
+## Original Plan
+{PLAN_FILE}
+
+## Investigation Context
+{INVESTIGATION_REPORT}
+
+## Repository Context
+- Repository: {REPOSITORY}
+- Branch: {BRANCH}
+- Workflow: {WORKFLOW_ID}
+
+## Review Focus
+1. Verify the fix addresses the root cause (not just symptoms)
+2. Check for potential regressions
+3. Ensure changes are minimal and focused
+4. Verify no new issues introduced
+5. Check edge cases related to the bug
+
+Provide review with:
+- Fix correctness assessment
+- Regression risk evaluation
+- Any concerns or recommendations
+#+end_src
+
+*** Success Criteria
+- Fix addresses root cause
+- No obvious regressions
+- Changes are appropriately scoped
+
+** TODO [#B] Step 5: Test Writing                                   :testing:
+:PROPERTIES:
+:STEP_ID: testing
+:AGENT: test-writer
+:REQUIRED: yes
+:DEPENDS_ON: review
+:INPUTS: plan_file, investigation_report
+:END:
+
+*** Description
+Write tests to verify the fix and prevent regression.
+
+*** Agent Prompt Template
+#+begin_src markdown
+Write tests for the bug fix.
+
+## Bug Details
+{INVESTIGATION_REPORT}
+
+## Plan Reference
+{PLAN_FILE}
+
+## Testing Requirements
+1. Write a test that reproduces the original bug (should fail without fix)
+2. Verify the test passes with the fix
+3. Add regression tests for related edge cases
+4. Update any affected existing tests
+
+## Test Categories
+- Unit test for the specific fix
+- Integration test if applicable
+- Edge case tests identified during investigation
+
+Report:
+- Tests written
+- Confirmation that tests pass
+- Coverage of the fix
+#+end_src
+
+*** Success Criteria
+- Regression test written
+- Test verifies the fix
+- All tests pass
+
+** TODO [#A] Step 6: Verification                               :verification:
+:PROPERTIES:
+:STEP_ID: verification
+:AGENT: debug
+:REQUIRED: yes
+:DEPENDS_ON: testing
+:END:
+
+*** Description
+Verify the bug is actually fixed using original reproduction steps.
+
+*** Agent Prompt Template
+#+begin_src markdown
+Verify the bug fix using the original reproduction steps.
+
+## Original Bug
+{DESCRIPTION}
+
+## Reproduction Steps from Investigation
+{INVESTIGATION_REPORT}
+
+## Tasks
+1. Follow original reproduction steps
+2. Confirm the bug no longer occurs
+3. Test related scenarios for regressions
+4. Document verification results
+
+Report:
+- Verification status (FIXED / NOT FIXED / PARTIAL)
+- Any remaining issues
+- Observations about related behavior
+#+end_src
+
+*** Success Criteria
+- Bug confirmed fixed
+- No regressions observed
+
+** TODO [#A] Step 7: Final Commit                                    :commit:
+:PROPERTIES:
+:STEP_ID: final-commit
+:AGENT: supervisor
+:REQUIRED: yes
+:DEPENDS_ON: verification
+:END:
+
+*** Description
+Supervisor handles final commit and workflow completion.
+
+*** Actions
+1. Verify all previous steps are DONE
+2. Run full test suite
+3. Generate commit message with bug reference
+4. Create commit (or prompt user)
+5. Archive workflow to completed/
+6. Send completion notification
+
+*** Commit Message Format
+#+begin_example
+fix: <brief description>
+
+Fixes: <bug reference if available>
+
+Root cause: <one line explanation>
+
+Changes:
+- <change 1>
+- <change 2>
+#+end_example
+
+*** Success Criteria
+- All tests pass
+- Commit created with proper format
+- Workflow archived
+- User notified
+
+* Workflow Configuration
+
+** Notifications
+- On step completion: notify-send with step name
+- On workflow completion: notify-send "Bug fix complete"
+- On failure: notify-send with urgency=critical
+
+** Error Handling
+- Investigation fails: May indicate unclear bug report, ask for more info
+- Fix doesn't work: Return to investigation with new findings
+- Tests fail: Review fix and adjust
+
+** Branch Strategy
+Ask user at start:
+1. Use current branch
+2. Create new branch (fix/{bug-id} or fix/{slug})
+3. Specify branch name

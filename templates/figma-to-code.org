@@ -1,0 +1,387 @@
+#+TITLE: Workflow Template: Figma to Code
+#+AUTHOR: OpenCode Workflow System
+#+WORKFLOW_TYPE: figma
+#+FILETAGS: :template:figma:frontend:
+
+* Template Information
+:PROPERTIES:
+:TEMPLATE_VERSION: 1.0
+:DESCRIPTION: Build pixel-perfect frontend components from Figma designs
+:ESTIMATED_DURATION: 1-4 hours depending on complexity
+:END:
+
+This template orchestrates the process of converting Figma designs into production-ready code.
+
+* Required Parameters
+
+| Parameter   | Description                          | Example                                      |
+|-------------+--------------------------------------+----------------------------------------------|
+| FIGMA_URL   | URL to Figma design                  | https://figma.com/file/xxx/design?node-id=1:2 |
+| DESCRIPTION | Brief description of what to build  | "Dashboard header with navigation"           |
+
+* Steps
+
+** TODO [#A] Step 1: Design Analysis & Planning                    :planning:
+:PROPERTIES:
+:STEP_ID: design-planning
+:AGENT: org-planner
+:REQUIRED: yes
+:OUTPUTS: plan_file
+:END:
+
+*** Description
+Analyze the Figma design and create a component implementation plan.
+
+*** Agent Prompt Template
+#+begin_src markdown
+Analyze the Figma design and create a detailed component implementation plan.
+
+## Figma Design
+URL: {FIGMA_URL}
+
+## Description
+{DESCRIPTION}
+
+## Repository Context
+Path: {REPOSITORY}
+Branch: {BRANCH}
+
+## Analysis Required
+1. Use Figma REST API to fetch design data:
+   - Extract file ID and node ID from URL
+   - GET /v1/files/{file_key}/nodes?ids={node_id}
+   - GET /v1/images/{file_key}?ids={node_id} for screenshots
+
+2. Analyze the design for:
+   - Component hierarchy
+   - Design tokens (colors, typography, spacing)
+   - Existing design system components that can be reused
+   - New components needed
+   - Responsive behavior
+   - Accessibility requirements
+
+3. Create implementation plan in plans/{DATE}-{SLUG}.org including:
+   - Component breakdown with hierarchy
+   - Design tokens mapping to project's design system
+   - List of assets to export from Figma
+   - Accessibility checklist
+   - Test scenarios
+
+## Requirements
+- Match Figma design exactly (pixel-perfect)
+- Reuse existing design system components
+- Note any ambiguities that need clarification
+
+After creating the plan, confirm the file path and summarize the component structure.
+#+end_src
+
+*** Success Criteria
+- Plan file created
+- Component hierarchy defined
+- Design tokens identified
+- Assets listed for export
+
+** TODO [#A] Step 2: Implementation                          :implementation:
+:PROPERTIES:
+:STEP_ID: figma-implementation
+:AGENT: figma-builder
+:REQUIRED: yes
+:DEPENDS_ON: design-planning
+:INPUTS: plan_file, figma_url
+:END:
+
+*** Description
+Build the components according to the plan, matching Figma design exactly.
+
+*** Agent Prompt Template
+#+begin_src markdown
+Build the UI components from the Figma design according to the plan.
+
+## Figma Design
+URL: {FIGMA_URL}
+
+## Component Plan
+{PLAN_FILE}
+
+## Repository Context
+- Path: {REPOSITORY}
+- Branch: {BRANCH}
+- Workflow: {WORKFLOW_ID}
+
+## Implementation Requirements
+1. Follow the component breakdown from the plan
+2. Use Figma REST API for accurate design data:
+   - Fetch node structure and properties
+   - Export images/icons as needed
+   - Get screenshots for visual comparison
+
+3. Implementation standards:
+   - Match Figma design pixel-perfectly
+   - Use project's design system tokens (no hardcoded values)
+   - Semantic HTML structure
+   - Full accessibility (WCAG AA)
+   - Responsive across breakpoints
+   - TypeScript for type safety
+
+4. Component structure:
+   - Vue.js: Composition API with <script setup>
+   - React: Functional components with TypeScript
+   - Follow existing project patterns
+
+## Deliverables
+- Component files created
+- Styles using design tokens
+- Assets exported and optimized
+- Basic component documentation
+
+Report what was built and any design decisions made.
+#+end_src
+
+*** Success Criteria
+- Components created per plan
+- Design tokens used (no hardcoded values)
+- Responsive implementation
+- Accessibility attributes added
+
+** TODO [#B] Step 3: Design Review                                  :review:
+:PROPERTIES:
+:STEP_ID: design-review
+:AGENT: review
+:REQUIRED: yes
+:DEPENDS_ON: figma-implementation
+:INPUTS: plan_file, figma_url
+:END:
+
+*** Description
+Review implementation against Figma design and plan.
+
+*** Agent Prompt Template
+#+begin_src markdown
+Review the Figma implementation against the original design and plan.
+
+## Original Design
+Figma URL: {FIGMA_URL}
+
+## Implementation Plan
+{PLAN_FILE}
+
+## Review Focus
+
+### Design Fidelity
+1. Compare implementation to Figma screenshots
+2. Verify spacing, typography, colors match exactly
+3. Check component hierarchy matches design
+4. Verify responsive behavior
+
+### Code Quality
+1. Design tokens used (no magic numbers)
+2. Components are reusable
+3. Follows project conventions
+4. TypeScript types proper
+
+### Accessibility
+1. Semantic HTML structure
+2. ARIA labels present
+3. Keyboard navigation works
+4. Color contrast adequate
+
+### Performance
+1. Images optimized
+2. No unnecessary re-renders
+3. Bundle size reasonable
+
+Provide:
+- Compliance rating (matches/partial/needs-work)
+- List of any visual discrepancies
+- Code quality issues
+- Recommendations
+#+end_src
+
+*** Success Criteria
+- Design matches Figma
+- Code quality verified
+- Accessibility confirmed
+
+** TODO [#B] Step 4: E2E & Visual Testing                          :testing:
+:PROPERTIES:
+:STEP_ID: visual-testing
+:AGENT: web-tester
+:REQUIRED: yes
+:DEPENDS_ON: design-review
+:END:
+
+*** Description
+Write E2E tests and capture visual baselines.
+
+*** Agent Prompt Template
+#+begin_src markdown
+Create E2E tests and visual testing for the new UI components.
+
+## Components Built
+Review changes on branch: {BRANCH}
+
+## Testing Requirements
+
+### Functional Tests
+1. User interactions work correctly
+2. Forms validate properly
+3. Navigation functions
+4. Error states display correctly
+
+### Visual Tests
+1. Capture baseline screenshots at:
+   - Mobile (375px)
+   - Tablet (768px)
+   - Desktop (1440px)
+2. Save to tests/visual/ or project's visual test directory
+
+### Accessibility Tests
+1. Keyboard navigation
+2. Screen reader compatibility
+3. Focus management
+4. ARIA labels working
+
+### Responsive Tests
+1. Layout adapts correctly at breakpoints
+2. No overflow issues
+3. Touch targets adequate on mobile
+
+## Output
+- Test files created
+- Screenshots captured
+- Any issues found
+#+end_src
+
+*** Success Criteria
+- E2E tests passing
+- Visual baselines captured
+- Accessibility verified
+- Responsive behavior tested
+
+** TODO [#B] Step 5: Accessibility Audit                      :accessibility:
+:PROPERTIES:
+:STEP_ID: a11y-audit
+:AGENT: web-tester
+:REQUIRED: yes
+:DEPENDS_ON: visual-testing
+:END:
+
+*** Description
+Dedicated accessibility audit of the new components.
+
+*** Agent Prompt Template
+#+begin_src markdown
+Perform a comprehensive accessibility audit of the new UI components.
+
+## Scope
+Components built on branch: {BRANCH}
+
+## Audit Checklist
+
+### Semantic Structure
+- [ ] Proper heading hierarchy (h1 → h2 → h3)
+- [ ] Meaningful landmarks (<nav>, <main>, <aside>)
+- [ ] Lists used appropriately
+- [ ] Tables have proper headers
+
+### Keyboard Accessibility
+- [ ] All interactive elements focusable
+- [ ] Logical tab order
+- [ ] Focus visible at all times
+- [ ] Keyboard traps avoided
+- [ ] Shortcuts documented (if any)
+
+### Screen Reader Support
+- [ ] Images have alt text
+- [ ] Icons have accessible names
+- [ ] Form fields have labels
+- [ ] Error messages announced
+- [ ] Dynamic content announced (aria-live)
+
+### Visual Accessibility
+- [ ] Color contrast ≥ 4.5:1 (text)
+- [ ] Color contrast ≥ 3:1 (UI components)
+- [ ] Color not sole means of conveying info
+- [ ] Text resizable to 200%
+- [ ] No content loss at zoom
+
+### Motion & Animation
+- [ ] Respects prefers-reduced-motion
+- [ ] No auto-playing video/audio
+- [ ] Animations can be paused
+
+## Tools to Use
+- aXe DevTools
+- Lighthouse accessibility audit
+- Manual keyboard testing
+- Screen reader testing (if possible)
+
+## Report Format
+- Issues found with severity (A, AA, AAA violations)
+- Specific element locations
+- Remediation steps
+#+end_src
+
+*** Success Criteria
+- WCAG AA compliance verified
+- No critical a11y issues
+- Keyboard navigation works
+- Screen reader compatible
+
+** TODO [#A] Step 6: Final Commit                                   :commit:
+:PROPERTIES:
+:STEP_ID: final-commit
+:AGENT: supervisor
+:REQUIRED: yes
+:DEPENDS_ON: a11y-audit
+:END:
+
+*** Description
+Complete the workflow with final commit.
+
+*** Actions
+1. Verify all previous steps completed
+2. Run final test suite
+3. Generate commit message:
+   - feat(ui): Add [component name] from Figma design
+   - List components created
+   - Note design system tokens used
+4. Create commit
+5. Archive workflow
+6. Notify completion
+
+*** Success Criteria
+- Tests pass
+- Commit created
+- Workflow archived
+
+* Workflow Configuration
+
+** Special Handling
+
+*** Figma URL Parsing
+Extract from URL patterns:
+- https://www.figma.com/file/FILE_ID/Name?node-id=NODE_ID
+- https://www.figma.com/design/FILE_ID/Name?node-id=NODE_ID
+- https://www.figma.com/proto/FILE_ID/Name?node-id=NODE_ID
+
+Node IDs are formatted as "1234:5678" - URL-encode if needed.
+
+*** Asset Export
+For images and icons from Figma:
+1. Use Images API: GET /v1/images/{file_key}?ids={node_ids}&format=svg&scale=2
+2. Download to project's assets directory
+3. Optimize (svgo for SVGs, imagemin for rasters)
+4. DO NOT import external icon libraries - export from Figma
+
+** Notifications
+- On step completion: notify-send with step name
+- On design discrepancy found: notify-send with details
+- On workflow completion: notify-send with component list
+- On failure: notify-send with urgency=critical
+
+** Error Handling
+- Figma API errors: Retry once, then pause with instructions
+- Design ambiguity: Pause and ask user for clarification
+- Missing design tokens: Flag for user decision
+- A11y issues: Report severity, CRITICAL blocks workflow

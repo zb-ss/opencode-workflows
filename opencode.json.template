@@ -1,0 +1,177 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "instructions": [
+    "CONVENTIONS.md"
+  ],
+  "mcp": {
+    "github": {
+      "type": "local",
+      "enabled": true,
+      "command": [
+        "docker",
+        "run",
+        "-i",
+        "--rm",
+        "-e",
+        "GITHUB_PERSONAL_ACCESS_TOKEN",
+        "ghcr.io/github/github-mcp-server"
+      ],
+      "environment": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "{file:~/.secrets/github-token}"
+      }
+    },
+    "playwright": {
+      "type": "local",
+      "enabled": true,
+      "command": [
+        "npx",
+        "@playwright/mcp@latest"
+      ]
+    },
+    "context7": {
+      "type": "local",
+      "enabled": true,
+      "command": [
+        "npx",
+        "-y",
+        "@upstash/context7-mcp",
+        "--api-key",
+        "{file:~/.secrets/context7-api-key}"
+      ]
+    },
+    "chrome-devtools": {
+      "type": "local",
+      "enabled": true,
+      "command": [
+        "npx",
+        "chrome-devtools-mcp@latest"
+      ]
+    },
+    "asana": {
+      "type": "local",
+      "enabled": true,
+      "command": [
+        "npx",
+        "mcp-remote",
+        "https://mcp.asana.com/sse"
+      ],
+      "environment": {}
+    },
+    "slack": {
+      "type": "local",
+      "enabled": true,
+      "command": [
+        "npx",
+        "-y",
+        "@modelcontextprotocol/server-slack"
+      ],
+      "environment": {
+        "SLACK_BOT_TOKEN": "{file:~/.secrets/slack-bot-token}",
+        "SLACK_TEAM_ID": "{file:~/.secrets/slack-team-id}"
+      }
+    }
+  },
+  "permission": {
+    "bash": {
+      "git commit*": "ask",
+      "*": "allow"
+    }
+  },
+  "tools": {
+    "github_*": false,
+    "playwright_*": false,
+    "context7_*": false,
+    "chrome-devtools_*": false,
+    "asana_*": false,
+    "slack_*": false
+  },
+  "agent": {
+    "build": {
+      "tools": {
+        "asana_*": true,
+        "context7_*": true
+      }
+    },
+    "org-planner": {
+      "tools": {
+        "asana_*": true,
+        "context7_*": true
+      }
+    },
+    "discussion": {
+      "tools": {
+        "asana_*": true,
+        "github_*": true,
+        "context7_*": true,
+        "slack_*": true
+      }
+    },
+    "editor": {
+      "tools": {
+        "github_*": true,
+        "context7_*": true
+      }
+    },
+    "web-tester": {
+      "tools": {
+        "playwright_*": true,
+        "chrome-devtools_*": true,
+        "context7_*": true
+      }
+    },
+    "commit": {
+      "permission": {
+        "bash": {
+          "git commit*": "allow"
+        }
+      }
+    }
+  },
+  "provider": {
+    "ollama": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Ollama (local)",
+      "options": {
+        "baseURL": "http://localhost:11434/v1"
+      },
+      "models": {
+        "qwen3-coder:30b": {
+          "name": "qwen3-coder:30b"
+        },
+        "gpt-oss:120b": {
+          "name": "gpt-oss:120b"
+        },
+        "gpt-oss:20b": {
+          "name": "gpt-oss:20b"
+        },
+        "qwen3:30b-a3b": {
+          "name": "qwen3:30b-a3b"
+        },
+        "qwen3:235b-a22b": {
+          "name": "qwen3:235b-a22b"
+        },
+        "devstral:24b-small-2505-q8_0": {
+          "name": "devstral:24b-small-2505-q8_0"
+        },
+        "gemma3:27b": {
+          "name": "gemma3:27b"
+        },
+        "glm-4.6:cloud": {
+          "name": "glm-4.6:cloud"
+        },
+        "qwen3-vl:235b-cloud": {
+          "name": "qwen3-vl:235b-cloud"
+        },
+        "kimi-k2:1t-cloud": {
+          "name": "kimi-k2:1t-cloud"
+        },
+        "minimax-m2:cloud": {
+          "name": "minimax-m2:cloud"
+        },
+        "qwen3-coder:480b-cloud": {
+          "name": "qwen3-coder:480b-cloud"
+        }
+      }
+    }
+  }
+}

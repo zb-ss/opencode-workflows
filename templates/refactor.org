@@ -1,0 +1,393 @@
+#+TITLE: Workflow Template: Refactor
+#+AUTHOR: OpenCode Workflow System
+#+WORKFLOW_TYPE: refactor
+#+FILETAGS: :template:refactor:
+
+* Template Information
+:PROPERTIES:
+:TEMPLATE_VERSION: 1.0
+:DESCRIPTION: Code refactoring workflow with analysis, planning, incremental implementation, and verification
+:ESTIMATED_DURATION: 2-6 hours depending on scope
+:END:
+
+This template is used by the supervisor agent to orchestrate code refactoring workflows.
+
+* Steps
+
+** TODO [#A] Step 1: Analysis                                       :analysis:
+:PROPERTIES:
+:STEP_ID: analysis
+:AGENT: review
+:REQUIRED: yes
+:OUTPUTS: analysis_report
+:END:
+
+*** Description
+Analyze the code to understand current state, issues, and refactoring opportunities.
+
+*** Agent Prompt Template
+#+begin_src markdown
+Analyze the following code/area for refactoring.
+
+## Refactoring Request
+{DESCRIPTION}
+
+## Repository Context
+Path: {REPOSITORY}
+Branch: {BRANCH}
+
+## Analysis Tasks
+1. Understand current code structure and patterns
+2. Identify code smells and technical debt
+3. Map dependencies and coupling
+4. Assess test coverage of affected areas
+5. Identify risks and constraints
+6. Document current behavior for regression testing
+
+## Required Output
+Provide a detailed analysis including:
+- Current state assessment
+- Identified issues (code smells, violations, debt)
+- Dependency map of affected components
+- Test coverage status
+- Constraints and risks
+- Recommended refactoring approach
+- Success metrics for the refactor
+
+Document findings thoroughly - this will guide the refactoring plan.
+#+end_src
+
+*** Success Criteria
+- Current state documented
+- Issues identified and prioritized
+- Dependencies mapped
+- Refactoring approach recommended
+
+** TODO [#A] Step 2: Planning                                       :planning:
+:PROPERTIES:
+:STEP_ID: planning
+:AGENT: org-planner
+:REQUIRED: yes
+:DEPENDS_ON: analysis
+:INPUTS: analysis_report
+:OUTPUTS: plan_file
+:END:
+
+*** Description
+Create a detailed, incremental refactoring plan.
+
+*** Agent Prompt Template
+#+begin_src markdown
+Create a refactoring plan based on the analysis.
+
+## Analysis Summary
+{ANALYSIS_REPORT}
+
+## Repository Context
+Path: {REPOSITORY}
+Branch: {BRANCH}
+
+## Requirements
+1. Save the plan to plans/{DATE}-{SLUG}-refactor.org
+2. Break refactoring into small, safe increments
+3. Each increment should:
+   - Be independently committable
+   - Maintain all tests passing
+   - Not change external behavior
+4. Include:
+   - Specific transformations for each step
+   - Test verification points
+   - Rollback strategy for each increment
+5. Order steps to minimize risk (safest first)
+
+## Refactoring Principles
+- Small, incremental changes
+- Tests pass after every change
+- No behavior changes (unless explicitly requested)
+- Preserve public interfaces where possible
+
+After creating the plan, confirm the file path where it was saved.
+#+end_src
+
+*** Success Criteria
+- Plan file created
+- Incremental steps defined
+- Each step is safe and verifiable
+
+** TODO [#A] Step 3: Pre-Refactor Testing                      :pre-testing:
+:PROPERTIES:
+:STEP_ID: pre-testing
+:AGENT: test-writer
+:REQUIRED: yes
+:DEPENDS_ON: planning
+:INPUTS: analysis_report
+:END:
+
+*** Description
+Ensure adequate test coverage before refactoring begins.
+
+*** Agent Prompt Template
+#+begin_src markdown
+Ensure test coverage for the code being refactored.
+
+## Analysis Reference
+{ANALYSIS_REPORT}
+
+## Repository Context
+- Repository: {REPOSITORY}
+- Branch: {BRANCH}
+
+## Tasks
+1. Review existing test coverage for affected code
+2. Add characterization tests for untested behavior
+3. Add tests for edge cases identified in analysis
+4. Ensure all public interfaces have tests
+5. Create a test baseline for regression detection
+
+## Important
+These tests must capture CURRENT behavior, even if it seems wrong.
+The refactor should not change behavior - tests verify this.
+
+Report:
+- Current coverage percentage
+- Tests added
+- Confidence level for refactoring safety
+#+end_src
+
+*** Success Criteria
+- Adequate test coverage exists
+- All tests pass
+- Baseline established
+
+** TODO [#A] Step 4: Implementation                            :implementation:
+:PROPERTIES:
+:STEP_ID: implementation
+:AGENT: editor
+:REQUIRED: yes
+:DEPENDS_ON: pre-testing
+:INPUTS: plan_file
+:END:
+
+*** Description
+Implement the refactoring incrementally according to the plan.
+
+*** Agent Prompt Template
+#+begin_src markdown
+Implement the refactoring plan located at:
+{PLAN_FILE}
+
+## Context
+- Repository: {REPOSITORY}
+- Branch: {BRANCH}
+- Workflow: {WORKFLOW_ID}
+
+## Instructions
+1. Follow the plan step by step
+2. After EACH increment:
+   - Run tests to verify no regression
+   - Verify behavior unchanged
+   - Commit if stable (or note for final commit)
+3. If tests fail, stop and investigate
+4. Your built-in @review cycle will handle code review
+
+## Refactoring Rules
+- No behavior changes
+- Tests must pass after every increment
+- If unsure, make smaller steps
+- Document any deviations from plan
+
+Report progress after each major increment.
+#+end_src
+
+*** Success Criteria
+- Refactoring complete
+- All tests pass
+- No behavior changes
+- Code improved per plan
+
+** TODO [#B] Step 5: Review                                          :review:
+:PROPERTIES:
+:STEP_ID: review
+:AGENT: review
+:REQUIRED: yes
+:DEPENDS_ON: implementation
+:INPUTS: plan_file, analysis_report
+:END:
+
+*** Description
+Review the refactored code for quality and correctness.
+
+*** Agent Prompt Template
+#+begin_src markdown
+Review the refactoring implementation.
+
+## Original Analysis
+{ANALYSIS_REPORT}
+
+## Refactoring Plan
+{PLAN_FILE}
+
+## Repository Context
+- Repository: {REPOSITORY}
+- Branch: {BRANCH}
+- Workflow: {WORKFLOW_ID}
+
+## Review Focus
+1. Verify all planned refactorings completed
+2. Check that identified issues are resolved
+3. Verify no behavior changes (compare with analysis)
+4. Assess code quality improvement
+5. Check for new issues introduced
+6. Verify SOLID principles and clean code practices
+
+Provide review with:
+- Refactoring completeness assessment
+- Quality improvement evaluation
+- Any remaining concerns
+- Suggestions for future improvements (out of scope)
+#+end_src
+
+*** Success Criteria
+- Refactoring complete per plan
+- Quality improved
+- No regressions
+
+** TODO [#B] Step 6: Post-Refactor Testing                     :post-testing:
+:PROPERTIES:
+:STEP_ID: post-testing
+:AGENT: test-writer
+:REQUIRED: yes
+:DEPENDS_ON: review
+:END:
+
+*** Description
+Update tests for the refactored code structure.
+
+*** Agent Prompt Template
+#+begin_src markdown
+Update tests for the refactored code.
+
+## Plan Reference
+{PLAN_FILE}
+
+## Repository Context
+- Repository: {REPOSITORY}
+- Branch: {BRANCH}
+
+## Tasks
+1. Update tests that reference renamed/moved code
+2. Add unit tests for new abstractions
+3. Remove tests for eliminated code
+4. Improve test quality where refactoring enables it
+5. Verify coverage maintained or improved
+
+## Important
+- All existing behavior tests must still pass
+- Test improvements should not change what's being tested
+
+Report:
+- Tests updated
+- New tests added
+- Coverage comparison (before/after)
+#+end_src
+
+*** Success Criteria
+- All tests updated
+- Tests pass
+- Coverage maintained or improved
+
+** TODO [#B] Step 7: Documentation                             :documentation:
+:PROPERTIES:
+:STEP_ID: documentation
+:AGENT: editor
+:REQUIRED: conditional
+:CONDITION: significant_api_changes
+:DEPENDS_ON: post-testing
+:END:
+
+*** Description
+Update documentation to reflect refactored code.
+
+*** Agent Prompt Template
+#+begin_src markdown
+Update documentation for the refactored code.
+
+## Refactoring Summary
+Review changes on branch: {BRANCH}
+
+## Tasks
+1. Update code comments if structure changed significantly
+2. Update README if public interfaces changed
+3. Update API documentation if applicable
+4. Update architecture docs if patterns changed
+
+## Guidelines
+- Only update docs that are now incorrect
+- Don't add excessive documentation
+- Focus on "why" not "what"
+
+Report what documentation was updated.
+#+end_src
+
+*** Success Criteria
+- Relevant docs updated
+- No stale documentation
+
+** TODO [#A] Step 8: Final Commit                                    :commit:
+:PROPERTIES:
+:STEP_ID: final-commit
+:AGENT: supervisor
+:REQUIRED: yes
+:DEPENDS_ON: post-testing
+:END:
+
+*** Description
+Supervisor handles final commit and workflow completion.
+
+*** Actions
+1. Verify all previous steps are DONE
+2. Run full test suite
+3. Generate commit message summarizing refactoring
+4. Create commit (or prompt user)
+5. Archive workflow to completed/
+6. Send completion notification
+
+*** Commit Message Format
+#+begin_example
+refactor: <brief description>
+
+Improvements:
+- <improvement 1>
+- <improvement 2>
+
+No behavior changes. All tests pass.
+#+end_example
+
+*** Success Criteria
+- All tests pass
+- Commit created with proper format
+- Workflow archived
+- User notified
+
+* Workflow Configuration
+
+** Notifications
+- On step completion: notify-send with step name
+- On workflow completion: notify-send "Refactoring complete"
+- On failure: notify-send with urgency=critical
+
+** Error Handling
+- Tests fail during refactoring: Stop, investigate, possibly rollback increment
+- Behavior change detected: Stop, review changes, revert if needed
+- Complex dependency: May need to adjust plan
+
+** Branch Strategy
+Ask user at start:
+1. Use current branch
+2. Create new branch (refactor/{slug})
+3. Specify branch name
+
+** Safety Checks
+- Run tests after every increment
+- Compare behavior before/after
+- Keep increments small and reversible

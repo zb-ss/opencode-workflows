@@ -1,0 +1,48 @@
+✓ FIGMA-BUILDER AGENT UPDATE COMPLETE
+
+═══════════════════════════════════════════════════════════════════════
+
+📁 FILES MODIFIED:
+  ✓ agent/figma-builder.md - Updated to use REST API workflow
+  ✓ README.md - Updated figma-builder section
+
+📁 FILES CREATED:
+  ✓ figma-api-helper.sh - Helper script for API calls
+  ✓ FIGMA-REST-API-SETUP.md - Complete setup guide
+  ✓ FIGMA-BUILDER-UPDATE-SUMMARY.md - Detailed change log
+  ✓ FIGMA-QUICK-START.md - Quick reference card
+  ✓ figma-builder-summary.txt - This file
+
+═══════════════════════════════════════════════════════════════════════
+
+🔧 CONFIGURATION:
+  ✓ Figma REST API: Uses Personal Access Token
+  ✓ Token location: ~/.secrets/figma-access-token
+  ✓ Authentication: X-Figma-Token header
+  ✓ No MCP server required
+  ✓ No desktop app required
+
+═══════════════════════════════════════════════════════════════════════
+
+🚀 USAGE:
+
+# Quick test
+~/.config/opencode/figma-api-helper.sh all "FIGMA_URL"
+
+# Build from Figma
+opencode run --agent figma-builder "implement this design: FIGMA_URL"
+
+═══════════════════════════════════════════════════════════════════════
+
+📚 DOCUMENTATION:
+  • Quick Start: FIGMA-QUICK-START.md
+  • Full Setup: FIGMA-REST-API-SETUP.md
+  • Change Log: FIGMA-BUILDER-UPDATE-SUMMARY.md
+
+═══════════════════════════════════════════════════════════════════════
+
+✅ STATUS: READY TO USE
+✅ TESTED: YES
+✅ WORKING: YES
+
+═══════════════════════════════════════════════════════════════════════

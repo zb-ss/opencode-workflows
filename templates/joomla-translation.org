@@ -1,0 +1,489 @@
+#+TITLE: Workflow Template: Joomla Translation v3.0
+#+AUTHOR: OpenCode Workflow System
+#+WORKFLOW_TYPE: translate
+#+FILETAGS: :template:translation:joomla:
+
+* Template Information
+:PROPERTIES:
+:TEMPLATE_VERSION: 3.0
+:DESCRIPTION: Joomla component translation - processes ONE VIEW AT A TIME to ensure completeness
+:ESTIMATED_DURATION: 15-30 minutes per view
+:END:
+
+This template processes Joomla components VIEW BY VIEW to ensure:
+- Complete hardcode detection (nothing missed)
+- Thorough conversion of all strings
+- Accurate translations
+- No LLM context overflow
+
+* KEY PRINCIPLE: ONE VIEW AT A TIME
+
+**CRITICAL**: The LLM MUST process only ONE view file at a time.
+Do NOT attempt to process multiple views in a single session.
+
+The workflow creates a queue of views and processes them sequentially:
+1. Scan component → Create view queue
+2. Process view 1 → Mark complete
+3. Process view 2 → Mark complete
+4. ... continue until all views done
+5. Final review and commit
+
+* Parameters
+- COMPONENT_PATH: Path to the Joomla component (required)
+- TARGET_LANGUAGE: Target language code, e.g., fr-CA (required)
+- SOURCE_LANGUAGE: Source language code (default: en-GB)
+
+* Custom Tools Used
+| Tool | Purpose |
+|------|---------|
+| file_chunker | Split large files into processable chunks |
+| chunk_reader | Read specific chunks from chunked files |
+| chunk_state | Track chunk processing progress |
+| i18n_extract | Extract existing translated strings |
+| i18n_hardcode_finder | Find hardcoded strings needing translation |
+| i18n_convert | Convert hardcoded strings to i18n calls |
+| ini_builder | Build/validate/compare Joomla INI files |
+
+* Steps
+
+** TODO [#A] Step 0: Component Scan & View Queue                   :analysis:
+:PROPERTIES:
+:STEP_ID: component-scan
+:AGENT: translation-planner
+:REQUIRED: yes
+:OUTPUTS: view_queue
+:END:
+
+*** Description
+Scan component and create a queue of views to process ONE AT A TIME.
+
+*** Agent Prompt Template
+#+begin_src markdown
+Scan the Joomla component and create a view processing queue.
+
+## Component Information
+Path: {COMPONENT_PATH}
+Source Language: {SOURCE_LANGUAGE}
+Target Language: {TARGET_LANGUAGE}
+
+## Tasks
+
+### 1. Find All View Files
+Scan these locations:
+- `views/*/tmpl/*.php` (admin views)
+- `tmpl/*.php` (component root templates)
+- `View/*/tmpl/*.php` (Joomla 4+ style)
+- Site component equivalent paths
+
+### 2. Categorize Files by Size
+For each file, record:
+- File path
+- Line count
+- Needs chunking? (>500 lines)
+- Priority (main views first)
+
+### 3. Check Existing Translations
+Use `i18n_extract` on language files to get:
+- Existing key count
+- Already translated strings
+
+### 4. Create View Queue File
+
+Save to: workflows/active/{WORKFLOW_ID}/view-queue.org
+
+Format:
+```org
+#+TITLE: View Queue: com_{component}
+#+WORKFLOW_ID: {WORKFLOW_ID}
+
+* Queue Status
+- Total Views: {N}
+- Completed: 0
+- Remaining: {N}
+
+* View Queue
+
+** PENDING views/lot/tmpl/edit.php
+:PROPERTIES:
+:LINES: 3705
+:NEEDS_CHUNKING: yes
+:PRIORITY: 1
+:END:
+
+** PENDING views/lot/tmpl/default.php
+:PROPERTIES:
+:LINES: 450
+:NEEDS_CHUNKING: no
+:PRIORITY: 2
+:END:
+
+** PENDING views/lots/tmpl/default.php
+:PROPERTIES:
+:LINES: 280
+:NEEDS_CHUNKING: no
+:PRIORITY: 3
+:END:
+
+... (all views listed)
+```
+
+### 5. Report Summary
+- Total views found
+- Estimated processing time (15-30 min per view)
+- Views requiring chunking
+#+end_src
+
+*** Success Criteria
+- All view files discovered
+- View queue file created
+- Files categorized by size
+- Processing order established
+
+** TODO [#A] Step 1: Process Single View (REPEAT FOR EACH VIEW)      :process:
+:PROPERTIES:
+:STEP_ID: process-view
+:AGENT: translation-coder
+:REQUIRED: yes
+:DEPENDS_ON: component-scan
+:INPUTS: view_queue
+:OUTPUTS: view_completion_status
+:REPEATABLE: yes
+:END:
+
+*** Description
+Process ONE view file completely before moving to the next.
+
+*** Agent Prompt Template
+#+begin_src markdown
+Process the NEXT PENDING view from the queue.
+
+## CRITICAL RULES
+1. Process ONLY ONE view file
+2. Do NOT skip to the next view until this one is 100% complete
+3. For large files, process ALL chunks before marking complete
+
+## View Queue File
+{VIEW_QUEUE_PATH}
+
+## Steps for This View
+
+### A. Read the view queue and find FIRST PENDING view
+- Open view-queue.org
+- Find first view with status PENDING
+- Record the file path
+
+### B. Detect Hardcoded Strings
+
+For files < 500 lines:
+```
+i18n_hardcode_finder(filePath, minLength=2, framework="joomla")
+```
+
+For files >= 500 lines:
+```
+1. file_chunker(filePath, chunkSize=150, overlap=20)
+2. For EACH chunk:
+   - chunk_reader(stateFile, chunkId)
+   - i18n_hardcode_finder(filePath, startLine, endLine)
+   - chunk_state(stateFile, action="complete", chunkId)
+3. Combine all findings
+```
+
+### C. Convert ALL Hardcoded Strings
+
+For EACH string found:
+```
+i18n_convert(filePath, line, originalText, keyName, type)
+```
+
+IMPORTANT: Convert ALL strings, not just some!
+
+Process in order:
+1. Labels and headings (highest confidence)
+2. Placeholders and tooltips
+3. Buttons and links
+4. Messages and paragraphs
+5. JavaScript strings
+6. Vue template strings
+
+### D. Update Source INI File
+
+After ALL conversions for this view:
+```
+ini_builder(action="add", filePath, strings='[...]')
+```
+
+### E. Translate New Keys
+
+```
+ini_builder(action="add", filePath={TARGET_INI}, strings='[translated...]')
+```
+
+### F. Validate This View
+
+1. PHP syntax check: `php -l {view_file}`
+2. INI validation: `ini_builder(action="validate", filePath)`
+
+### G. Mark View Complete
+
+Update view-queue.org:
+- Change PENDING to DONE
+- Add completion timestamp
+- Record strings converted
+
+## Output Format
+
+After completing this view, report:
+```
+## View Completed: {filename}
+
+Hardcoded strings found: {N}
+Strings converted: {N}
+New keys added to en-GB: {N}
+New keys added to {TARGET}: {N}
+PHP syntax: PASS/FAIL
+INI syntax: PASS/FAIL
+
+Remaining views: {N}
+```
+
+Then STOP and wait for instruction to continue to next view.
+#+end_src
+
+*** Success Criteria
+- ALL hardcoded strings in this view detected
+- ALL strings converted to i18n calls
+- Source INI updated with new keys
+- Target INI updated with translations
+- PHP syntax verified
+- View marked as DONE in queue
+
+** TODO [#A] Step 2: Final Review                                   :review:
+:PROPERTIES:
+:STEP_ID: final-review
+:AGENT: translation-reviewer
+:REQUIRED: yes
+:DEPENDS_ON: process-view
+:INPUTS: view_queue (all DONE)
+:OUTPUTS: review_report
+:END:
+
+*** Description
+After ALL views are processed, perform final validation.
+
+*** Agent Prompt Template
+#+begin_src markdown
+Perform final review after all views are processed.
+
+## Prerequisites
+- Check view-queue.org: ALL views must be DONE
+- If any views are PENDING, do NOT proceed - process them first!
+
+## Review Tasks
+
+### 1. Verify All Views Complete
+Read view-queue.org and confirm:
+- Total views == Completed views
+- No PENDING status remaining
+
+### 2. Validate All INI Files
+
+Source INI:
+```
+ini_builder(action="validate", filePath={SOURCE_INI})
+```
+
+Target INI:
+```
+ini_builder(action="validate", filePath={TARGET_INI})
+```
+
+### 3. Compare Source and Target
+
+```
+ini_builder(action="diff", sourceFile={SOURCE_INI}, targetFile={TARGET_INI})
+```
+
+Check:
+- All source keys exist in target
+- Placeholder counts match
+- No empty translations
+
+### 4. PHP Lint All Modified Files
+
+For each view that was modified:
+```bash
+php -l {view_file}
+```
+
+### 5. Spot Check Translations
+
+Review 10-20 random translations for:
+- Canadian French conventions (fr-CA)
+- Proper terminology
+- Natural phrasing
+
+### 6. Create Review Report
+
+Save to: workflows/active/{WORKFLOW_ID}/review.org
+
+Include:
+- PASS/FAIL status
+- All validation results
+- Any issues found
+- Recommended fixes
+#+end_src
+
+*** Success Criteria
+- All views processed
+- All INI files valid
+- All PHP files syntax-valid
+- Translations complete and accurate
+- Review report created
+
+** TODO [#B] Step 3: Commit                                        :commit:
+:PROPERTIES:
+:STEP_ID: commit
+:AGENT: supervisor
+:REQUIRED: yes
+:DEPENDS_ON: final-review
+:INPUTS: review_report
+:END:
+
+*** Description
+Commit all changes after successful review.
+
+*** Actions
+1. Verify review PASSED
+2. Stage files:
+   - All modified view files
+   - Source language INI
+   - Target language INI
+3. Generate commit message
+4. Create commit
+5. Archive workflow
+
+*** Commit Message Template
+#+begin_example
+feat(i18n): Add {TARGET_LANGUAGE} translations for com_{component}
+
+Views processed: {N}
+- {list of view files}
+
+Strings converted: {TOTAL}
+New translation keys: {N}
+
+Translation validated by translation-reviewer agent.
+#+end_example
+
+* View Processing State
+
+The view queue tracks progress:
+
+```org
+* View Queue
+
+** DONE views/lot/tmpl/edit.php
+:PROPERTIES:
+:LINES: 3705
+:NEEDS_CHUNKING: yes
+:COMPLETED: 2024-12-17T14:30:00
+:STRINGS_FOUND: 187
+:STRINGS_CONVERTED: 185
+:STRINGS_SKIPPED: 2
+:END:
+
+** IN_PROGRESS views/lots/tmpl/default.php
+:PROPERTIES:
+:LINES: 280
+:STARTED: 2024-12-17T14:35:00
+:END:
+
+** PENDING views/categories/tmpl/default.php
+:PROPERTIES:
+:LINES: 150
+:PRIORITY: 3
+:END:
+```
+
+* Workflow Commands
+
+** Start New Translation
+```
+/workflow translate /path/to/com_component fr-CA
+```
+
+** Process Next View (after scan)
+```
+/translate-view next
+```
+
+** Process Specific View
+```
+/translate-view /path/to/views/lot/tmpl/edit.php
+```
+
+** Check Progress
+```
+/workflow status
+```
+
+** Resume After Interruption
+```
+/workflow resume {WORKFLOW_ID}
+```
+
+* Configuration
+
+** Processing Limits (per view)
+| Setting | Value | Reason |
+|---------|-------|--------|
+| Max strings per batch | 30 | Prevent LLM overwhelm |
+| Chunk size | 150 lines | Fit in context window |
+| Chunk overlap | 20 lines | Maintain context |
+
+** View Processing Order
+1. Main edit views (edit.php) - usually largest
+2. List views (default.php in list views)
+3. Detail views
+4. Modal views
+5. Helper templates
+
+** Quality Checkpoints
+After EACH view:
+- [ ] All hardcoded strings found
+- [ ] All strings converted
+- [ ] PHP syntax valid
+- [ ] INI updated
+
+After ALL views:
+- [ ] Full INI validation
+- [ ] Source/target comparison
+- [ ] Placeholder verification
+
+* Troubleshooting
+
+** "View has too many strings"
+Process in smaller batches:
+1. Edit the view-queue.org
+2. Split the view into sections (by line range)
+3. Process each section separately
+
+** "Missed some hardcoded strings"
+Re-run hardcode finder on the specific view:
+```
+i18n_hardcode_finder(filePath, includeComments=false)
+```
+Then manually convert missed strings.
+
+** "Context window exceeded"
+The file is too large even with chunking:
+1. Use smaller chunk size (100 lines)
+2. Process fewer strings per batch (20)
+3. Consider splitting the view file
+
+** "Translation incomplete"
+Check the view-queue.org for:
+- Views still PENDING
+- Views marked with errors
+Process remaining views before final review.
