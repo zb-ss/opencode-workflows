@@ -9,15 +9,27 @@ A collection of agents, commands, skills, plugins, tools, and workflow templates
 - [OpenCode](https://opencode.ai) installed and working
 - [Node.js](https://nodejs.org/) v18+
 
-### Quick Install
+### One-Liner
+
+**Linux/macOS:**
+```bash
+curl -fsSL https://raw.githubusercontent.com/zb-ss/opencode-workflows/master/bootstrap.mjs | node --input-type=module
+```
+
+**Windows (PowerShell):**
+```powershell
+curl.exe -fsSL https://raw.githubusercontent.com/zb-ss/opencode-workflows/master/bootstrap.mjs | node --input-type=module
+```
+
+### Manual Install
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/opencode-workflows.git
+git clone https://github.com/zb-ss/opencode-workflows.git
 cd opencode-workflows
 node install.mjs
 ```
 
-This installs the **core** module via symlinks into `~/.config/opencode/`.
+Both methods install the **core** module via symlinks into `~/.config/opencode/`. On Windows, copy mode is used by default since symlinks require Developer Mode.
 
 ### Install Options
 
