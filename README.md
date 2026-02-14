@@ -1,26 +1,178 @@
 # OpenCode Workflows
 
-A collection of agents, commands, skills, plugins, tools, and workflow templates for [OpenCode](https://github.com/sst/opencode).
+A comprehensive collection of agents, commands, skills, plugins, and workflow templates for [OpenCode](https://opencode.ai).
 
-> **Note:** Plans and workflow state are stored as [org-mode](https://orgmode.org/) files. While any text editor can read them, you'll get the best experience with Emacs — collapsible headings, TODO state cycling, timestamps, and native org support. VS Code users can install the [Org Mode extension](https://github.com/vscode-org-mode/vscode-org-mode) for basic support.
+> **Note**: This is v2.0 - a breaking rewrite with multi-model support, swarm execution, and zero-tolerance review system.
+
+## Features
+
+- **30 Agents**: 9 primary + 21 workflow specialists
+- **5 Execution Modes**: eco, turbo, standard, thorough, swarm
+- **4 Enforcement Plugins**: workflow-enforcer, file-validator, model-router, swarm-manager
+- **Zero-Tolerance Review**: [ISSUE-N] tracking with auto-escalation
+- **Model-Agnostic**: GLM-5, MiniMax M2.5, Gemini 3 Pro/Flash, GPT-4.1
+- **E2E Testing Pipeline**: 6-phase Playwright workflow with accessibility-first selectors
+- **Parallel Execution**: SDK-based swarm mode for 3-5x speed improvement
+- **13 Skills**: PHP, Laravel, Vue, Joomla, Symfony, API design, and more
+- **6 Commands, 6 Templates**: Complete automation toolkit
+
+## Quick Start
+
+```bash
+git clone https://github.com/zb-ss/opencode-workflows.git ~/projects/opencode-workflows
+cd ~/projects/opencode-workflows
+node install.mjs
+```
+
+## Execution Modes
+
+| Mode | Speed | Quality | Parallel | Reviewers | Use Case |
+|------|-------|---------|----------|-----------|----------|
+| **eco** | Fast | Basic | No | reviewer-lite | Prototypes, experiments |
+| **turbo** | Fastest | Standard | No | 3x architect | Quick features, non-critical |
+| **standard** | Medium | Good | No | reviewer | Production features |
+| **thorough** | Slow | Excellent | No | reviewer-deep | Critical, security-sensitive |
+| **swarm** | Fastest | Excellent | Yes (4x) | 3x architect | Large, modular projects |
+
+## Agents
+
+### Primary Agents (9)
+
+| Agent | Purpose | Model Tier |
+|-------|---------|------------|
+| **org-planner** | Creates org-mode development plans | high |
+| **step-planner** | Interactive question-based planning | high |
+| **discussion** | Technical Q&A, read-only exploration | mid |
+| **editor** | Meticulous code changes with approval | mid |
+| **focused-build** | Fast implementation, auto-cleanup | mid |
+| **debug** | Systematic bug hunting | mid |
+| **supervisor** | Orchestrates multi-step workflows | high |
+| **figma-builder** | Pixel-perfect UI from Figma | mid |
+| **web-tester** | E2E testing with Playwright | mid |
+
+### Workflow Agents (21)
+
+| Agent | Role | Tier | Used By |
+|-------|------|------|---------|
+| architect | System design, planning | high | thorough, swarm |
+| architect-lite | Quick architecture decisions | mid | turbo, standard |
+| executor | Implementation with review cycles | mid | standard, thorough |
+| executor-lite | Fast implementation | low | eco, turbo |
+| reviewer | Full code review | mid | standard |
+| reviewer-lite | Quick quality check | low | eco, turbo |
+| reviewer-deep | Deep analysis | high | thorough |
+| security | Security audit | mid | standard |
+| security-lite | Basic security check | low | eco |
+| security-deep | Advanced security analysis | high | thorough |
+| perf-lite | Performance check | low | eco |
+| perf-reviewer | Performance optimization | high | thorough |
+| test-writer | Unit/integration test generation | mid | all modes |
+| e2e-explorer | Application structure mapping (BFS) | mid | e2e workflow |
+| e2e-generator | Playwright test generation | mid | e2e workflow |
+| e2e-reviewer | Test validation (flakiness, anti-patterns) | mid | e2e workflow |
+| quality-gate | Final quality checks | mid | all modes |
+| completion-guard | Post-workflow validation | mid | all modes |
+| explorer | Codebase exploration | low | all modes |
+| codebase-analyzer | Dependency and structure analysis | mid | thorough |
+| doc-writer | Documentation generation | low | all modes |
+
+## Configuration
+
+Customize `~/.config/opencode/opencode.jsonc`:
+
+```jsonc
+{
+  "workflows": {
+    "model_tiers": {
+      "low": "gemini/3-flash",
+      "mid": "glm-5",
+      "high": "openai/gpt-4.1"
+    },
+    "fallback_chain": ["high", "mid", "low"],
+    "swarm": {
+      "enabled": true,
+      "max_parallel_agents": 4
+    },
+    "review": {
+      "zero_tolerance": true,
+      "max_iterations": {
+        "lite": 2,
+        "standard": 3,
+        "deep": 5
+      }
+    }
+  }
+}
+```
+
+## Documentation
+
+- [Model Compatibility](./docs/model-compatibility.md) - Multi-model setup, tier configuration, fallback chains
+- [Review System](./docs/review-system.md) - Zero-tolerance protocol, [ISSUE-N] format, escalation
+- [Swarm Mode](./docs/swarm-mode.md) - Parallel execution, SDK spawning, 3-architect validation
+- [E2E Testing](./docs/e2e-testing.md) - 6-phase Playwright pipeline, selector priority, flakiness detection
+- [AGENTS.md](./AGENTS.md) - Comprehensive agent reference
+- [WORKFLOWS.md](./WORKFLOWS.md) - Workflow lifecycle, mode selection, templates
+
+## Commands
+
+| Command | Description |
+|---------|-------------|
+| `/plan` | Create development plan (org-planner) |
+| `/workflow` | Start automated workflow (feature, figma, bug-fix, refactor, e2e) |
+| `/workflow-resume` | Resume interrupted workflow |
+| `/workflow-status` | Show workflow status |
+| `/commit` | Commit with conventional commit message |
+| `/pr` | Create pull request |
+
+**Translate module** (optional): `/translate-auto`, `/translate-view`
+
+## Skills
+
+| Skill | Scope |
+|-------|-------|
+| php-conventions | Strict types, OOP, PSR standards |
+| laravel-conventions | Eloquent, services, validation |
+| symfony-conventions | Doctrine, Twig, services |
+| joomla-conventions | Joomla 4/5 MVC, plugins |
+| joomla3-legacy | Joomla 3.x legacy patterns |
+| vue-conventions | Vue 3 Composition API, Pinia |
+| vue2-legacy | Vue 2 Options API, Vuex |
+| typescript-conventions | Strict mode, type patterns |
+| python-conventions | Type hints, pytest, async |
+| bash-conventions | Shellcheck, portability |
+| solid-principles | SOLID with code examples |
+| api-design | RESTful patterns, versioning |
+| performance-guide | Optimization strategies |
+
+## Templates
+
+| Template | Phases | Modes |
+|----------|--------|-------|
+| feature-development | Plan → Implement → Review → Test → Security | All |
+| figma-to-code | Design → Build → Review → E2E → A11y | Standard, Thorough |
+| bug-fix | Investigate → Fix → Review → Test | All |
+| refactor | Analyze → Plan → Implement → Review | Standard, Thorough |
+| e2e-testing | Setup → Explore → Generate → Validate → QA | All |
+| joomla-translation | Scan → Process → Review (translate module) | Standard |
 
 ## Installation
 
 ### Prerequisites
 
-- [OpenCode](https://opencode.ai) installed and working
+- [OpenCode](https://opencode.ai) installed
 - [Node.js](https://nodejs.org/) v18+
 
 ### One-Liner
 
-**Linux/macOS:**
+**Linux/macOS**:
 ```bash
-curl -fsSL https://raw.githubusercontent.com/zb-ss/opencode-workflows/master/bootstrap.mjs | node --input-type=module
+curl -fsSL https://raw.githubusercontent.com/zb-ss/opencode-workflows/main/bootstrap.mjs | node --input-type=module
 ```
 
-**Windows (PowerShell):**
+**Windows (PowerShell)**:
 ```powershell
-curl.exe -fsSL https://raw.githubusercontent.com/zb-ss/opencode-workflows/master/bootstrap.mjs | node --input-type=module
+curl.exe -fsSL https://raw.githubusercontent.com/zb-ss/opencode-workflows/main/bootstrap.mjs | node --input-type=module
 ```
 
 ### Manual Install
@@ -31,209 +183,144 @@ cd opencode-workflows
 node install.mjs
 ```
 
-Both methods install the **core** module via symlinks into `~/.config/opencode/`. On Windows, copy mode is used by default since symlinks require Developer Mode.
-
 ### Install Options
 
 ```bash
-node install.mjs                       # Install core with symlinks (default)
-node install.mjs --copy                # Install core with file copies
-node install.mjs --all                 # Install everything (core + translate)
-node install.mjs --module translate    # Add the translate module
-node install.mjs --dry-run             # Preview without making changes
-node install.mjs --uninstall           # Remove all installed files
-node install.mjs --help                # Show help
+node install.mjs                  # Core (symlinks)
+node install.mjs --copy           # Core (copies)
+node install.mjs --all            # Core + translate module
+node install.mjs --dry-run        # Preview
+node install.mjs --uninstall      # Remove
 ```
 
 ### Modules
 
 | Module | Contents | Default |
 |--------|----------|---------|
-| **core** | 12 agents, 6 commands, 13 skills, 1 plugin, CONVENTIONS.md | Yes |
-| **translate** | 3 agents, 2 commands, 8 tools, 1 plugin (Joomla i18n) | No |
+| **core** | 30 agents, 6 commands, 13 skills, 4 plugins | Yes |
+| **translate** | 3 agents, 2 commands, 8 tools (Joomla i18n) | No |
 
-### Post-Install
+## Examples
 
-1. Edit `~/.config/opencode/opencode.jsonc` to configure MCP servers and API keys
-2. Start OpenCode and verify agents are available
-
-### Updating
-
-- **Symlink mode** (default): `git pull` — changes propagate automatically
-- **Copy mode**: `git pull && node install.mjs --copy`
-
-### Uninstalling
-
+### Feature Development (Standard Mode)
 ```bash
-node install.mjs --uninstall
+/workflow feature Add JWT authentication with refresh tokens
 ```
 
-Removes all installed symlinks/copies and the manifest. Your `opencode.jsonc` is never removed.
+**Flow**:
+1. Architect: Design auth system
+2. Executor: Implement with review cycles
+3. Reviewer: Code review (zero-tolerance)
+4. Test-writer: Unit/integration tests
+5. Security: OWASP audit
+6. Completion-guard: Final check
 
----
-
-## What's Included
-
-### Agents
-
-| Agent | Purpose |
-|-------|---------|
-| **org-planner** | Creates development plans as org-mode files |
-| **step-planner** | Interactive question-based planning |
-| **discussion** | Technical Q&A, brainstorming (read-only) |
-| **editor** | Code changes with manual approval for each edit |
-| **focused-build** | Fast implementation, auto-cleanup of temp files |
-| **debug** | Systematic bug hunting with scientific method |
-| **review** | Code review against plans and conventions |
-| **test-writer** | Unit and integration test generation |
-| **web-tester** | E2E testing with Playwright/Chrome DevTools |
-| **security-auditor** | OWASP Top 10 vulnerability analysis |
-| **supervisor** | Orchestrates multi-step automated workflows |
-| **figma-builder** | Pixel-perfect UI from Figma designs via REST API |
-
-**Translate module** adds: `translation-planner`, `translation-coder`, `translation-reviewer`
-
-See [AGENTS.md](./AGENTS.md) for detailed documentation on each agent.
-
-### Commands
-
-| Command | Description |
-|---------|-------------|
-| `/plan` | Create a development plan (invokes org-planner) |
-| `/workflow` | Start an automated workflow (feature, figma, bug-fix, refactor, translate) |
-| `/workflow-resume` | Resume an interrupted workflow |
-| `/workflow-status` | Show status of active workflows |
-| `/commit` | Commit staged changes with conventional commit message |
-| `/pr` | Create a pull request |
-
-**Translate module** adds: `/translate-auto`, `/translate-view`
-
-### Skills
-
-| Skill | Scope |
-|-------|-------|
-| php-conventions | Strict types, OOP, PSR standards |
-| laravel-conventions | Eloquent, controllers, validation, services |
-| symfony-conventions | Services, Doctrine, Twig, forms |
-| joomla-conventions | Joomla 4/5 MVC, services, plugins |
-| joomla3-legacy | Joomla 3.x JFactory, non-namespaced MVC |
-| vue-conventions | Vue 3 Composition API, Pinia, TypeScript |
-| vue2-legacy | Vue 2 Options API, Vuex, mixins |
-| typescript-conventions | Strict mode, type patterns, Node.js/Deno |
-| python-conventions | Type hints, pytest, async patterns |
-| bash-conventions | Error handling, portability, shellcheck |
-| solid-principles | SOLID with PHP/TypeScript examples |
-| api-design | RESTful patterns, HTTP standards, versioning |
-| performance-guide | PHP, JS, database, caching optimization |
-
-### Workflow Templates
-
-| Template | Steps |
-|----------|-------|
-| feature-development | Plan > Implement > Review > Test > Security > Commit |
-| figma-to-code | Design Analysis > Build > Review > Test > A11y > Commit |
-| bug-fix | Investigate > Plan Fix > Implement > Review > Test > Commit |
-| refactor | Analyze > Plan > Implement > Review > Test > Commit |
-| joomla-translation | Scan > Process Views > Review > Commit (translate module) |
-
-See [WORKFLOWS.md](./WORKFLOWS.md) for workflow usage guide.
-
-### Hooks
-
-| Hook | Trigger | Purpose |
-|------|---------|---------|
-| workflow-init.sh | UserPromptSubmit | Creates workflow org file from template |
-| workflow-update.sh | PostToolUse | Updates org file with step results |
-| workflow-permission-check.sh | PreToolUse | Blocks dangerous commands, auto-allows safe ones |
-
-Hooks are **not** installed by the installer. Copy them to your OpenCode hooks directory manually if you want to use them.
-
-### Translate Module Tools
-
-| Tool | Purpose |
-|------|---------|
-| i18n-hardcode-finder | Find hardcoded strings in PHP/JS/Vue |
-| i18n-convert | Convert strings to i18n calls with syntax validation |
-| i18n-extract | Extract existing translated strings |
-| i18n-verify | Verify translation completeness |
-| ini-builder | Create/validate/sort INI language files |
-| file-chunker | Split large files into processable chunks |
-| chunk-reader | Read specific file chunks |
-| chunk-state | Track chunk processing progress |
-
----
-
-## Agent Selection
-
-```
-Need to...
-├── Understand/Learn/Discuss?     → discussion
-├── Plan a feature/change?        → org-planner (or /plan)
-├── Build UI from Figma?          → figma-builder
-├── Find and fix a bug?           → debug
-├── Implement with review?        → editor (asks approval)
-├── Implement fast & clean?       → focused-build (no artifacts)
-└── Implement quickly?            → build (default, no prompts)
+### E2E Testing Workflow
+```bash
+/workflow e2e http://localhost:3000 "Test checkout flow"
 ```
 
----
+**Flow**:
+1. Explorer: BFS crawl, generate app-map.json
+2. Generator: Create Playwright tests (accessibility-first selectors)
+3. Reviewer: Run 3x, detect flakiness, check anti-patterns
+4. Quality-gate: Final validation
+
+### Swarm Mode (Parallel)
+```bash
+opencode run --mode swarm "Implement shopping cart feature"
+```
+
+**Flow**:
+1. Architect: Break into 4 independent tasks
+2. Executors (4x parallel): Implement simultaneously
+3. Architects (3x parallel): Validate by consensus
+4. Quality-gate: Final check
+
+**Time**: ~1/3 of sequential mode
 
 ## Project Structure
 
 ```
 opencode-workflows/
-├── agent/           # Agent definitions (.md with YAML frontmatter)
-├── command/         # Custom slash commands
-├── skill/           # Coding convention skills
-├── plugin/          # OpenCode plugins (TypeScript)
-├── tool/            # Custom tools for translation (TypeScript)
-├── templates/       # Workflow org-mode templates
-├── hooks/           # Optional shell hooks
-├── plans/           # Runtime: generated plan files (gitignored)
-├── workflows/       # Runtime: workflow state (gitignored)
-│   ├── active/
-│   └── completed/
-├── install.mjs      # Cross-platform installer
-├── CONVENTIONS.md   # Coding standards (installed to config dir)
-├── AGENTS.md        # Detailed agent documentation
-└── WORKFLOWS.md     # Workflow usage guide
+├── agent/
+│   ├── primary/            # 9 primary agents
+│   └── workflow/           # 21 workflow agents
+├── command/                # 6 slash commands
+├── skill/                  # 13 coding conventions
+├── plugin/                 # 4 enforcement plugins
+├── mode/                   # 5 execution mode configs
+├── templates/              # 6 workflow templates
+├── tool/                   # Translation tools (optional)
+├── docs/                   # Comprehensive documentation
+├── install.mjs             # Cross-platform installer
+├── opencode.jsonc.template # Configuration template
+├── CONVENTIONS.md          # Coding standards
+├── AGENTS.md               # Agent reference
+└── WORKFLOWS.md            # Workflow guide
 ```
-
----
 
 ## Customization
 
-### Modifying Agents
+### Modify Agents
 
-Agent files use YAML frontmatter for configuration:
-
-```markdown
----
-description: My custom agent
-model: anthropic/claude-sonnet-4-5
-temperature: 0.3
-permission:
-  edit: ask
-  bash:
-    "npm test": allow
-    "*": ask
----
-
-Your system prompt here...
+Edit agent files directly (symlink mode):
+```bash
+vim agent/workflow/executor.md
 ```
 
-In symlink mode, edit files directly in this repo. Changes take effect immediately.
+Changes take effect immediately.
 
-### Creating New Agents
+### Add New Agent
 
-Add a `.md` file to `agent/` and re-run the installer (or create it directly in `~/.config/opencode/agent/`).
+```bash
+cp agent/workflow/executor.md agent/workflow/my-custom-agent.md
+# Edit, then
+node install.mjs  # Re-symlink
+```
 
-### Adding Workflow Templates
+### Create Mode
 
-Add an `.org` file to `templates/`. The supervisor agent will pick it up automatically.
+```bash
+vim mode/my-mode.json
+```
 
----
+```json
+{
+  "name": "my-mode",
+  "description": "Custom execution mode",
+  "gates": ["architect-lite", "executor", "reviewer"],
+  "parallel_execution": false,
+  "model_tier": "mid"
+}
+```
 
 ## License
 
-MIT. Built for [OpenCode](https://github.com/sst/opencode).
+MIT. Built for [OpenCode](https://opencode.ai).
+
+## Contributing
+
+1. Fork the repo
+2. Create feature branch: `git checkout -b feature/my-feature`
+3. Commit changes: `git commit -m "feat: add my feature"`
+4. Push: `git push origin feature/my-feature`
+5. Create pull request
+
+## Changelog
+
+### v2.0 (2026-02-14)
+- Breaking rewrite with multi-model support
+- Added 21 workflow specialist agents
+- Implemented 5 execution modes
+- Zero-tolerance review system with [ISSUE-N] tracking
+- SDK-based swarm mode for parallel execution
+- 6-phase E2E testing pipeline
+- Model tier system with fallback chains
+- 4 enforcement plugins
+
+### v1.0 (2025-12-06)
+- Initial release
+- 12 agents, 6 commands, 13 skills
+- Basic workflow system
+- Translation module

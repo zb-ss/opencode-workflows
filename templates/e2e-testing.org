@@ -1,0 +1,218 @@
+#+TITLE: E2E Testing Workflow Template
+#+AUTHOR: OpenCode Workflow System
+#+WORKFLOW_TYPE: e2e
+#+DESCRIPTION: End-to-end Playwright testing pipeline with exploration, generation, and validation
+
+* Workflow Steps
+
+** TODO [#A] Step 0: Setup
+:PROPERTIES:
+:STEP_ID: setup
+:AGENT: supervisor (inline)
+:GATE: setup
+:MANDATORY: yes
+:END:
+
+*** Description
+Set up Playwright testing infrastructure for the project.
+
+*** Agent Prompt
+Perform the setup inline (no subagent needed):
+
+1. Check if Playwright is already installed:
+   - Look for @playwright/test in package.json
+   - Check for playwright.config.ts
+
+2. If not installed:
+   - Run: npm install -D @playwright/test
+   - Run: npx playwright install chromium
+   - Create playwright.config.ts with sensible defaults
+
+3. Detect project framework:
+   - React (create-react-app, Next.js, Vite)
+   - Vue (Nuxt, Vite)
+   - Angular
+   - Plain HTML/JS
+
+4. Configure base URL:
+   - Check for dev server in package.json scripts
+   - Set webServer config in playwright.config.ts
+
+5. Create test directory structure:
+   - tests/e2e/ or e2e/ (match project convention)
+
+*** Success Criteria
+- [ ] @playwright/test installed
+- [ ] Playwright browsers installed (at least chromium)
+- [ ] playwright.config.ts exists with correct baseURL
+- [ ] Test directory exists
+- [ ] Framework detected and documented
+
+** TODO [#A] Step 1: Exploration
+:PROPERTIES:
+:STEP_ID: exploration
+:AGENT: workflow:e2e-explorer
+:GATE: exploration
+:MANDATORY: yes
+:END:
+
+*** Description
+Explore the web application using Playwright MCP to build a structured app map.
+
+*** Agent Prompt
+Explore the web application at {base_url} and generate an app map.
+
+Context:
+- Workflow ID: {workflow_id}
+- Output path: {project_dir}/tests/e2e/app-map.json
+- Max depth: 3
+- Auth credentials: {auth_info} (if available)
+
+Follow the breadth-first traversal protocol. Write progressive output after each page for resilience.
+
+*** Success Criteria
+- [ ] app-map.json generated with page data
+- [ ] All reachable pages explored (up to depth limit)
+- [ ] Navigation structure documented
+- [ ] Authentication detected (if present)
+- [ ] Forms and interactive elements catalogued
+- [ ] Errors recorded (404s, timeouts)
+
+** TODO [#A] Step 2: Test Generation
+:PROPERTIES:
+:STEP_ID: generation
+:AGENT: workflow:e2e-generator
+:GATE: test_generation
+:MANDATORY: yes
+:END:
+
+*** Description
+Generate Playwright E2E test files from the app map produced by the explorer phase.
+
+*** Agent Prompt
+Generate Playwright E2E test suite from app map: {project_dir}/tests/e2e/app-map.json
+
+Context:
+- Workflow ID: {workflow_id}
+- Project directory: {project_dir}
+- Test directory: tests/e2e
+
+ENFORCED selector priority:
+1. getByRole() - ALWAYS preferred
+2. getByLabel() - For form fields
+3. getByPlaceholder() - Inputs without labels
+4. getByText() - Text-based elements
+5. getByTestId() - ONLY if data-testid exists
+6. CSS/XPath - FORBIDDEN
+
+*** Success Criteria
+- [ ] Test files generated for all major features
+- [ ] Navigation tests cover main routes
+- [ ] Form tests cover submissions and validation
+- [ ] Auth tests generated (if auth detected)
+- [ ] All selectors use accessibility-first approach
+- [ ] TypeScript compiles without errors
+- [ ] No hard-coded waits in generated code
+
+** TODO [#A] Step 3: Validation
+:PROPERTIES:
+:STEP_ID: validation
+:AGENT: workflow:e2e-reviewer
+:GATE: e2e_validation
+:MANDATORY: yes
+:END:
+
+*** Description
+Run and review the generated E2E tests. Detect flakiness, anti-patterns, and failures.
+
+*** Agent Prompt
+Review the E2E Playwright test implementation.
+
+Context:
+- Workflow ID: {workflow_id}
+- Test files: {test_files_list}
+- Review iteration: {iteration_number}
+- Project root: {project_dir}
+
+Perform:
+1. Static analysis for anti-patterns
+2. Test execution (npx playwright test)
+3. Flakiness check (run 3x if thorough mode)
+4. TypeScript validation (npx tsc --noEmit)
+
+Output structured VERDICT: PASS or FAIL with [ISSUE-N] tracking.
+
+*** Success Criteria
+- [ ] All tests execute successfully
+- [ ] No flaky tests detected
+- [ ] No hard-coded waits or CSS selectors
+- [ ] All tests have meaningful assertions
+- [ ] Tests are properly isolated
+- [ ] VERDICT: PASS
+
+** TODO [#B] Step 4: Quality Gate
+:PROPERTIES:
+:STEP_ID: quality_gate
+:AGENT: workflow:quality-gate
+:GATE: quality_gate
+:MANDATORY: yes
+:END:
+
+*** Description
+Final quality verification of the complete E2E test suite.
+
+*** Agent Prompt
+Perform quality gate verification on the E2E test suite.
+
+Context:
+- Workflow ID: {workflow_id}
+- Project directory: {project_dir}
+- Test directory: tests/e2e
+
+Verify:
+1. TypeScript compilation passes
+2. All tests pass (npx playwright test)
+3. Test coverage is adequate for discovered pages
+4. No anti-patterns remain
+5. Code follows project conventions
+
+If any auto-fixable issues found, fix them and set CHANGES_MADE: true.
+
+*** Success Criteria
+- [ ] TypeScript compiles without errors
+- [ ] All E2E tests pass
+- [ ] Test coverage matches app map pages
+- [ ] No remaining anti-patterns
+- [ ] VERDICT: PASS
+
+** TODO [#B] Step 5: Completion Guard
+:PROPERTIES:
+:STEP_ID: completion_guard
+:AGENT: workflow:completion-guard
+:GATE: completion_guard
+:MANDATORY: yes
+:END:
+
+*** Description
+Final sign-off on the E2E testing workflow.
+
+*** Agent Prompt
+Final verification for E2E testing workflow completion.
+
+Context:
+- Workflow ID: {workflow_id}
+- Project directory: {project_dir}
+
+Spot-check:
+1. Read 2-3 test files and verify quality
+2. Confirm playwright.config.ts is properly configured
+3. Verify app-map.json exists and is valid
+4. Check that test directory structure is clean
+5. Verify all gates have passed
+
+*** Success Criteria
+- [ ] Test files are well-structured and readable
+- [ ] Configuration is correct
+- [ ] App map is valid JSON
+- [ ] All previous gates passed
+- [ ] VERDICT: PASS

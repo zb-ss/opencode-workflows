@@ -1,0 +1,42 @@
+{
+  "name": "swarm",
+  "description": "Parallel execution mode with multiple concurrent agents and 3-architect validation",
+  "agent_routing": {
+    "planning": "architect",
+    "implementation": "executor",
+    "code_review": "reviewer-deep",
+    "security_review": "security-deep",
+    "tests": "test-writer",
+    "quality_gate": "quality-gate",
+    "completion_guard": "completion-guard",
+    "performance": "perf-reviewer",
+    "codebase_analysis": "codebase-analyzer",
+    "documentation": "doc-writer",
+    "e2e_exploration": "e2e-explorer",
+    "e2e_generation": "e2e-generator",
+    "e2e_validation": "e2e-reviewer"
+  },
+  "model_tiers": {
+    "forbidden": []
+  },
+  "settings": {
+    "max_review_iterations": 5,
+    "max_security_iterations": 3,
+    "max_quality_gate_iterations": 3,
+    "max_completion_guard_iterations": 3,
+    "parallel_execution": true,
+    "test_required": true
+  },
+  "escalation": {
+    "review_after": 3,
+    "review_escalate_to": "reviewer-deep",
+    "security_after": 2,
+    "security_escalate_to": "security-deep"
+  },
+  "swarm": {
+    "max_parallel_executors": 4,
+    "max_parallel_reviewers": 3,
+    "max_parallel_security": 3,
+    "validation_architects": 3
+  }
+}
