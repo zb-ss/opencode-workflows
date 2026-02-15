@@ -4,104 +4,112 @@ agent: supervisor
 model_tier: mid
 ---
 
-Start a new automated workflow.
+Start a new automated workflow with configurable execution modes.
 
 ## Usage
 ```
-/workflow <type> <description>
+/workflow <type> <description> [--mode=<mode>]
 ```
 
 ## Available Workflow Types
-- `feature` - Full feature development (plan → implement → review → test → security → commit)
-- `figma` - Figma design to code (plan → implement → review → test → a11y → commit)
-- `bug-fix` - Bug investigation and fix (investigate → plan fix → implement → review → test → commit)
-- `refactor` - Code refactoring (analyze → plan → implement → review → test → commit)
-- `translate` - Joomla component translation (scan → process views one-by-one → review → commit)
+- `feature` - Full feature development (plan → implement → review → test → security)
+- `figma` - Figma design to code (plan → implement → review → test → a11y)
+- `bugfix` - Bug investigation and fix (investigate → plan → implement → review → test)
+- `refactor` - Code refactoring (analyze → plan → implement → review → test)
+- `translate` - Joomla component translation (scan → process views → review)
+
+## Execution Modes
+
+| Mode | Description | Use Case |
+|------|-------------|----------|
+| `standard` | Balanced approach (default) | General development |
+| `turbo` | Maximum speed, lite agents | Prototypes, quick fixes |
+| `eco` | Token-efficient, minimal overhead | Simple tasks, budget-conscious |
+| `thorough` | Maximum quality, deep reviews | Production code, security-sensitive |
+| `swarm` | Parallel execution, multi-validation | Large features, complex systems |
 
 ## Examples
 ```
 /workflow feature Add user authentication with JWT tokens
-/workflow feature Implement shopping cart with checkout flow
-/workflow figma https://figma.com/file/xxx/Design?node-id=1:2 Dashboard header component
-/workflow translate /path/to/com_mycomponent fr-CA
-/workflow translate ./components/com_content fr-CA
+/workflow feature Add payment processing --mode=thorough
+/workflow feature swarm: Build notification system with email, SMS, push
+/workflow bugfix Fix race condition in checkout --mode=turbo
+/workflow refactor Extract validation logic --mode=eco
+/workflow figma https://figma.com/file/xxx Dashboard header
+/workflow translate ./com_mycomponent fr-CA
 ```
 
 ## Your Task
 
-You are the supervisor agent. A new workflow has been requested:
+You are the supervisor agent. A new workflow has been requested.
 
-**Type**: $1
-**Description**: $ARGUMENTS
+**Raw input**: $ARGUMENTS
 
-### Instructions
+### Step 1: Parse the Input
 
-1. **Validate the workflow type**
-   - If type is not recognized, list available types and ask for clarification
+Parse `$ARGUMENTS` using these rules in order:
 
-2. **For `feature` workflows**:
-   - Load template from `templates/feature-development.org`
-   - The description ($ARGUMENTS minus $1) is the feature request
+1. **Extract the workflow type** — the FIRST word is always the type:
+   `feature`, `bugfix`, `refactor`, `figma`, `translate`
 
-3. **For `figma` workflows**:
-   - Load template from `templates/figma-to-code.org`
-   - First argument after type should be Figma URL
-   - Remaining arguments are the description
+2. **Detect the mode** — check for EITHER:
+   - A `--mode=<mode>` flag anywhere in the input (remove it from description)
+   - A keyword prefix right after the type: `swarm:`, `thorough:`, `careful:`, `production:`, `quick:`, `fast:`, `prototype:`, `eco:`, `simple:`, `minor:`
+   - If neither found, use default mode from `workflows.json` (usually `standard`)
 
-4. **For `translate` workflows**:
-   - Load template from `templates/joomla-translation.org`
-   - First argument after type is the component path
-   - Second argument is the target language code (e.g., fr-CA, es-ES, de-DE)
-   - Optional third argument is source language (defaults to en-GB)
-   - Uses specialized agents: translation-planner, translation-coder, translation-reviewer
-   
-   **IMPORTANT: View-by-View Processing**
-   Translation workflows process ONE VIEW AT A TIME:
-   1. Step 0: Scan component and create view queue
-   2. Step 1: User runs `/translate-view next` for EACH view
-   3. Step 2: Final review after ALL views complete
-   4. Step 3: Commit
-   
-   This prevents LLM context overflow and ensures thorough processing.
+3. **Everything remaining** after removing type and mode is the **description**
 
-5. **Start the workflow**:
-   - Ask user about branch strategy
-   - Create workflow state file in `workflows/active/`
-   - Begin executing steps according to the template
-   - Keep workflow state file updated after each action
+**Parsing examples:**
+| Input | Type | Mode | Description |
+|-------|------|------|-------------|
+| `feature Add auth` | feature | standard | Add auth |
+| `feature --mode=swarm Add auth` | feature | swarm | Add auth |
+| `feature swarm: Add auth` | feature | swarm | Add auth |
+| `feature thorough: Add auth` | feature | thorough | Add auth |
+| `bugfix Fix login --mode=turbo` | bugfix | turbo | Fix login |
 
-6. **Execute steps sequentially**:
-   - Use @agent invocations for each step
-   - Update workflow org file with progress
-   - Send notifications on completions
-   - Pause on failures for human intervention
+### Step 2: Validate
 
-Begin by validating the request and asking about branch strategy.
+- If the type is not recognized, list available types and ask for clarification
+- If the mode is not recognized, list available modes and ask for clarification
 
-## Translation Workflow Special Instructions
+### Step 3: Load Mode Configuration
 
-For `translate` workflows, after Step 0 (component scan) completes:
+Read the mode config from `mode/<mode>.json` in the opencode config directory.
+This tells you which agents to use for each phase and iteration limits.
 
-1. **Inform the user** that views will be processed one at a time
-2. **Show the view queue** - list all views to be processed
-3. **Instruct user** to run `/translate-view next` to process each view
-4. **Track progress** in the view-queue.org file
-5. **Do NOT attempt** to process all views in a single session
+### Step 4: Set Up Workflow
 
-Example flow:
-```
-User: /workflow translate /path/to/com_lots fr-CA
-Assistant: [Scans component, creates view queue]
-           "Found 8 views to process. Run `/translate-view next` to begin."
+1. **Read `workflows.json`** from the config directory for default mode if needed
+2. **Ask about branch strategy**:
+   - Use current branch, or create `feature/<slug>` / `fix/<slug>`
+3. **Load the template** from `templates/`:
+   - `feature` → `feature-development.org`
+   - `bugfix` → `bug-fix.org`
+   - `refactor` → `refactor.org`
+   - `figma` → `figma-to-code.org`
+   - `translate` → (see Translation section below)
+4. **Create workflow state file** in `workflows/active/`
+5. **Bind session** with `workflow_bind_session`
 
-User: /translate-view next
-Assistant: [Processes views/lot/tmpl/edit.php completely]
-           "View complete. 187 strings converted. 7 views remaining."
+### Step 5: Execute
 
-User: /translate-view next
-Assistant: [Processes next view]
-           ... continues until all views done ...
+Follow the supervisor agent instructions for workflow execution.
+Invoke agents using `@agent-name` syntax (e.g., `@wf-executor`, `@wf-reviewer`).
+Use the agents specified by the mode configuration.
+Update the workflow state file after every action.
 
-User: /translate-view next
-Assistant: "All views complete! Running final review..."
-```
+## Translation Workflow
+
+For `translate` workflows, processing is **view-by-view** to prevent context overflow:
+
+1. **Step 0**: Scan component, create view queue
+2. **Step 1**: User runs `/translate-view next` for EACH view
+3. **Step 2**: Final review after all views complete
+4. **Step 3**: User commits
+
+Arguments after type: `<component-path> <target-lang> [source-lang]`
+- Source language defaults to `en-GB`
+- Uses specialized agents: `@translation-planner`, `@translation-coder`, `@translation-reviewer`
+
+Do NOT attempt to process all views in a single session.
