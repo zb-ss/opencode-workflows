@@ -1,73 +1,64 @@
 # Model Compatibility
 
-OpenCode Workflows v2.0 is model-agnostic, supporting multiple LLM providers through a tiered system.
+OpenCode Workflows is model-agnostic. Any LLM provider that supports tool use and can be configured as an MCP server will work. The tier system routes agents to cost-appropriate models — you choose which models fill each tier.
 
-## Supported Models
+## Tested Providers
 
-### GLM-5 (Zhipu AI)
-- **Model ID**: `glm-5`
-- **Strengths**: Fast inference, good for code generation
-- **Weaknesses**: Limited context window (128k)
-- **Tier**: mid
+We aim to run these workflows reliably across major providers. The following have been tested and confirmed working:
 
-### MiniMax M2.5
-- **Model ID**: `minimax/m2.5`
-- **Strengths**: Strong reasoning, multilingual
-- **Weaknesses**: Slower response times
-- **Tier**: mid/high
+| Provider | Tested Models | Notes |
+|----------|---------------|-------|
+| **Zhipu AI** | GLM-5 | Good balance of speed and capability |
+| **MiniMax** | M2.5 | Strong reasoning, excellent long-context |
+| **Google** | Gemini 3 Pro, Gemini 3 Flash | Large context windows, fast inference |
+| **OpenAI** | GPT-5.2, GPT-5.3 Codex | Strong reasoning, higher cost |
 
-### Gemini 3 Pro
-- **Model ID**: `gemini/3-pro`
-- **Strengths**: Large context (1M tokens), multimodal
-- **Weaknesses**: Rate limits on free tier
-- **Tier**: high
-
-### Gemini 3 Flash
-- **Model ID**: `gemini/3-flash`
-- **Strengths**: Fast, cost-effective
-- **Weaknesses**: Less capable reasoning
-- **Tier**: low/mid
-
-### GPT-4.1
-- **Model ID**: `openai/gpt-4.1`
-- **Strengths**: Best reasoning, strong code generation
-- **Weaknesses**: Expensive, rate limits
-- **Tier**: high
+New model versions from these providers (and others) should work without changes. If you encounter issues with a specific model, file an issue.
 
 ## Model Tier System
 
+The tier system maps agents to cost/capability levels. You assign your preferred models to each tier:
+
 ### Low Tier (Cost-Effective)
 Used for: Lightweight tasks, exploration, simple fixes
-
-**Models**: Gemini 3 Flash, GLM-5 (fast mode)
 
 **Agents**: explorer, executor-lite, reviewer-lite, security-lite, perf-lite
 
 ### Mid Tier (Balanced)
 Used for: Standard implementation, review, testing
 
-**Models**: GLM-5, MiniMax M2.5, Gemini 3 Pro
-
 **Agents**: executor, reviewer, architect-lite, e2e-explorer, e2e-generator
 
 ### High Tier (Premium Quality)
 Used for: Complex architecture, deep analysis, critical review
 
-**Models**: GPT-4.1, Gemini 3 Pro, MiniMax M2.5
-
 **Agents**: architect, reviewer-deep, security-deep, perf-reviewer, e2e-reviewer
 
 ## Configuration
 
-Configure model tiers in `opencode.jsonc`:
+Configure model tiers in `opencode.jsonc`. Use whatever models you have access to:
 
 ```jsonc
 {
   "workflows": {
     "model_tiers": {
-      "low": "gemini/3-flash",
-      "mid": "glm-5",
-      "high": "openai/gpt-4.1"
+      "low": "your-provider/fast-model",
+      "mid": "your-provider/balanced-model",
+      "high": "your-provider/best-model"
+    },
+    "fallback_chain": ["high", "mid", "low"]
+  }
+}
+```
+
+**Example with specific models:**
+```jsonc
+{
+  "workflows": {
+    "model_tiers": {
+      "low": "google/gemini-3-flash",
+      "mid": "zai/glm-5",
+      "high": "openai/gpt-5.2"
     },
     "fallback_chain": ["high", "mid", "low"]
   }
@@ -78,39 +69,34 @@ Configure model tiers in `opencode.jsonc`:
 
 If a model fails or is unavailable, workflows automatically fall back:
 
-1. Try configured tier model (e.g., `high` → `gpt-4.1`)
+1. Try configured tier model
 2. If unavailable, try next tier in fallback chain
 3. Continue until success or all tiers exhausted
 4. Report error if all models fail
 
-**Example**: `high` tier agent → GPT-4.1 rate limited → falls back to `mid` tier (GLM-5)
+## Known Model Quirks
 
-## Model-Specific Quirks
+These are behaviors observed during testing. Your experience may vary across versions.
 
-### GLM-5
-- **Token limit**: Be aggressive with context trimming
-- **Tool use**: Prefers single tool calls over batches
-- **Code formatting**: May omit language tags in code blocks
+### Zhipu AI (GLM series)
+- May prefer single tool calls over batches
+- Aggressive context trimming recommended for smaller context windows
+- May omit language tags in code blocks
 
-### MiniMax M2.5
-- **Response time**: 5-15s typical, up to 30s for complex tasks
-- **Streaming**: Limited streaming support
-- **Context**: Strong long-context handling (200k+)
+### MiniMax (M series)
+- Response times of 5-15s typical, up to 30s for complex tasks
+- Strong long-context handling (200k+)
+- Limited streaming support in some configurations
 
-### Gemini 3 Flash
-- **Speed**: Sub-second response for simple queries
-- **Reliability**: May skip validation steps in thorough mode
-- **Cost**: Best tokens-per-dollar ratio
+### Google (Gemini series)
+- Flash variants are fast but may skip validation steps in thorough mode
+- Pro variants have excellent context windows (1M tokens)
+- Free tier has daily quota limits
 
-### Gemini 3 Pro
-- **Context**: Excellent 1M token window
-- **Multimodal**: Can process screenshots, diagrams
-- **Quota**: Free tier has daily limits
-
-### GPT-4.1
-- **Quality**: Most reliable for complex reasoning
-- **Cost**: 10-20x more expensive than mid-tier
-- **Rate limits**: 500 RPM standard tier
+### OpenAI (GPT series)
+- Most reliable for complex reasoning tasks
+- Higher cost (10-20x more than mid-tier alternatives)
+- Standard tier rate limits apply (check your plan)
 
 ## Best Practices
 
@@ -148,19 +134,19 @@ opencode workflows stats --by-model
 ## Troubleshooting
 
 ### Model Unavailable Error
-**Symptom**: `Error: Model glm-5 not configured`
+**Symptom**: `Error: Model not configured`
 
 **Solution**: Add model to `opencode.jsonc` MCP servers section
 
 ### Rate Limit Exceeded
-**Symptom**: `Error: Rate limit exceeded for openai/gpt-4.1`
+**Symptom**: `Error: Rate limit exceeded`
 
 **Solution**: Fallback chain will handle automatically, or wait and retry
 
 ### Context Length Exceeded
-**Symptom**: `Error: Input exceeds 128k token limit`
+**Symptom**: `Error: Input exceeds token limit`
 
-**Solution**: Use model with larger context (Gemini 3 Pro) or enable aggressive trimming
+**Solution**: Use model with larger context or enable aggressive trimming
 
 ### Inconsistent Output Format
 **Symptom**: Agent skips required sections in output
@@ -169,25 +155,24 @@ opencode workflows stats --by-model
 
 ## Adding New Models
 
-To add a new model:
+Any model that supports tool use works. To add one:
 
 1. Configure MCP server in `opencode.jsonc`
-2. Add to tier configuration
-3. Test with sample workflow
-4. Document quirks in this file
+2. Assign to a tier
+3. Test with a sample workflow
+4. Optionally document quirks in this file
 
-Example:
 ```jsonc
 {
   "mcpServers": {
-    "my-new-model": {
+    "my-provider": {
       "endpoint": "https://api.provider.com/v1",
-      "apiKey": "${MY_MODEL_API_KEY}"
+      "apiKey": "${MY_PROVIDER_API_KEY}"
     }
   },
   "workflows": {
     "model_tiers": {
-      "mid": "my-new-model/large-v1"
+      "mid": "my-provider/model-name"
     }
   }
 }

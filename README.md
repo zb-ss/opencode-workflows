@@ -10,7 +10,7 @@ A comprehensive collection of agents, commands, skills, plugins, and workflow te
 - **5 Execution Modes**: eco, turbo, standard, thorough, swarm
 - **4 Enforcement Plugins**: workflow-enforcer, file-validator, model-router, swarm-manager
 - **Zero-Tolerance Review**: [ISSUE-N] tracking with auto-escalation
-- **Model-Agnostic**: GLM-5, MiniMax M2.5, Gemini 3 Pro/Flash, GPT-4.1
+- **Model-Agnostic**: Works with any LLM provider (tested on Zhipu, MiniMax, Google, OpenAI)
 - **E2E Testing Pipeline**: 6-phase Playwright workflow with accessibility-first selectors
 - **Parallel Execution**: SDK-based swarm mode for 3-5x speed improvement
 - **13 Skills**: PHP, Laravel, Vue, Joomla, Symfony, API design, and more
@@ -18,6 +18,17 @@ A comprehensive collection of agents, commands, skills, plugins, and workflow te
 
 ## Quick Start
 
+**Linux/macOS**:
+```bash
+curl -fsSL https://raw.githubusercontent.com/zb-ss/opencode-workflows/master/bootstrap.mjs | node --input-type=module
+```
+
+**Windows (PowerShell)**:
+```powershell
+curl.exe -fsSL https://raw.githubusercontent.com/zb-ss/opencode-workflows/master/bootstrap.mjs | node --input-type=module
+```
+
+Or clone manually:
 ```bash
 git clone https://github.com/zb-ss/opencode-workflows.git ~/projects/opencode-workflows
 cd ~/projects/opencode-workflows
@@ -84,9 +95,9 @@ Customize `~/.config/opencode/opencode.jsonc`:
 {
   "workflows": {
     "model_tiers": {
-      "low": "gemini/3-flash",
-      "mid": "glm-5",
-      "high": "openai/gpt-4.1"
+      "low": "minimax-coding-plan/MiniMax-M2.5",
+      "mid": "zai/glm-5",
+      "high": "openai/gpt-5.2"
     },
     "fallback_chain": ["high", "mid", "low"],
     "swarm": {
@@ -162,18 +173,6 @@ Customize `~/.config/opencode/opencode.jsonc`:
 
 - [OpenCode](https://opencode.ai) installed
 - [Node.js](https://nodejs.org/) v18+
-
-### One-Liner
-
-**Linux/macOS**:
-```bash
-curl -fsSL https://raw.githubusercontent.com/zb-ss/opencode-workflows/master/bootstrap.mjs | node --input-type=module
-```
-
-**Windows (PowerShell)**:
-```powershell
-curl.exe -fsSL https://raw.githubusercontent.com/zb-ss/opencode-workflows/master/bootstrap.mjs | node --input-type=module
-```
 
 ### Manual Install
 
