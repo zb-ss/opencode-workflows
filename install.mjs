@@ -439,6 +439,37 @@ function install(modules, mode, dryRun) {
     });
   }
 
+  // workflows.json — copy only if it doesn't exist yet
+  const wfConfigTarget = path.join(configDir, "workflows.json");
+  const wfConfigSource = path.join(REPO_ROOT, "workflows.json.template");
+  if (!fs.existsSync(wfConfigTarget) && fs.existsSync(wfConfigSource)) {
+    if (dryRun) {
+      allActions.push({
+        action: "copy",
+        source: wfConfigSource,
+        target: wfConfigTarget,
+        dryRun: true,
+        note: "workflows.json (from template, first install only)",
+      });
+    } else {
+      fs.mkdirSync(path.dirname(wfConfigTarget), { recursive: true });
+      fs.copyFileSync(wfConfigSource, wfConfigTarget);
+      allActions.push({
+        action: "copy",
+        source: wfConfigSource,
+        target: wfConfigTarget,
+        note: "workflows.json (from template, first install only)",
+      });
+      installedTargets.push(wfConfigTarget);
+    }
+  } else if (fs.existsSync(wfConfigTarget)) {
+    allActions.push({
+      action: "skip",
+      target: wfConfigTarget,
+      reason: "already exists (not overwritten)",
+    });
+  }
+
   // Ensure runtime directories exist in repo
   const runtimeDirs = [
     path.join(REPO_ROOT, "plans"),
@@ -617,8 +648,9 @@ function printSummary(actions, modules, mode, dryRun) {
   if (!dryRun) {
     console.log("Next steps:");
     console.log(`  1. Review/edit ${path.join(getConfigDir(), "opencode.jsonc")}`);
-    console.log("  2. Set up API keys in ~/.secrets/ as needed");
-    console.log("  3. Start OpenCode and verify agents are available");
+    console.log(`  2. Configure model tiers in ${path.join(getConfigDir(), "workflows.json")}`);
+    console.log("  3. Set up API keys in ~/.secrets/ as needed");
+    console.log("  4. Start OpenCode and verify agents are available");
     if (mode === "symlink") {
       console.log(
         "\nTo update: just `git pull` — symlinks track repo changes automatically."

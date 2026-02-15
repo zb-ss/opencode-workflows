@@ -673,17 +673,17 @@ permission:
 
 ## Model Tier Assignment
 
-Configure in `opencode.jsonc`:
+Configure in `~/.config/opencode/workflows.json`:
 
-```jsonc
+```json
 {
-  "workflows": {
-    "model_tiers": {
-      "low": "gemini/3-flash",
-      "mid": "glm-5",
-      "high": "openai/gpt-4.1"
-    }
-  }
+  "model_tiers": {
+    "low":  ["google/gemini-3-flash", "minimax/m2.5"],
+    "mid":  ["minimax/m2.5", "zhipu/glm-5", "google/gemini-3-pro"],
+    "high": ["zhipu/glm-5", "google/gemini-3-pro", "openai/gpt-5.2"]
+  },
+  "fallback_order": ["minimax/m2.5", "zhipu/glm-5", "google/gemini-3-pro"],
+  "default_mode": "standard"
 }
 ```
 

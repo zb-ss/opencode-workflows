@@ -279,26 +279,21 @@ page.getByTestId('notification-badge')
 
 ## Configuration
 
-Configure E2E testing in `opencode.jsonc`:
+E2E testing uses the standard workflow configuration. Model tiers are configured in `~/.config/opencode/workflows.json`:
 
-```jsonc
+```json
 {
-  "workflows": {
-    "e2e": {
-      "template": "e2e-testing",
-      "browser": "chromium",
-      "headless": true,
-      "max_depth": 5,
-      "flakiness_runs": 3,
-      "quality_gate": {
-        "require_all_pass": true,
-        "allow_skipped": false,
-        "coverage_threshold": 80
-      }
-    }
-  }
+  "model_tiers": {
+    "low":  ["google/gemini-3-flash"],
+    "mid":  ["minimax/m2.5", "zhipu/glm-5"],
+    "high": ["zhipu/glm-5", "openai/gpt-5.2"]
+  },
+  "fallback_order": ["minimax/m2.5", "zhipu/glm-5"],
+  "default_mode": "standard"
 }
 ```
+
+E2E-specific settings (browser, headless, flakiness runs) are configured in the E2E workflow template (`templates/e2e-testing.org`).
 
 ## Running E2E Workflow
 

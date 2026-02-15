@@ -89,32 +89,21 @@ node install.mjs
 
 ## Configuration
 
-Customize `~/.config/opencode/opencode.jsonc`:
+Configure model tiers in `~/.config/opencode/workflows.json`:
 
-```jsonc
+```json
 {
-  "workflows": {
-    "model_tiers": {
-      "low": "minimax-coding-plan/MiniMax-M2.5",
-      "mid": "zai/glm-5",
-      "high": "openai/gpt-5.2"
-    },
-    "fallback_chain": ["high", "mid", "low"],
-    "swarm": {
-      "enabled": true,
-      "max_parallel_agents": 4
-    },
-    "review": {
-      "zero_tolerance": true,
-      "max_iterations": {
-        "lite": 2,
-        "standard": 3,
-        "deep": 5
-      }
-    }
-  }
+  "model_tiers": {
+    "low":  ["google/gemini-3-flash", "minimax/m2.5"],
+    "mid":  ["minimax/m2.5", "zhipu/glm-5", "google/gemini-3-pro"],
+    "high": ["zhipu/glm-5", "google/gemini-3-pro", "openai/gpt-5.2"]
+  },
+  "fallback_order": ["minimax/m2.5", "zhipu/glm-5", "google/gemini-3-pro"],
+  "default_mode": "standard"
 }
 ```
+
+Each tier is an array — first model is preferred, rest are fallbacks. Use any model ID your provider supports. Swarm and review settings are configured per-mode in `mode/*.json`. See [WORKFLOWS.md](./WORKFLOWS.md) for mode configuration.
 
 ## Documentation
 
@@ -209,8 +198,9 @@ INSTALL_DIR=~/projects/opencode-workflows curl -fsSL https://raw.githubuserconte
 
 ### Post-Install
 
-1. Review/edit `~/.config/opencode/opencode.jsonc` for model tiers and API keys
-2. Start OpenCode and verify agents are available
+1. Review/edit `~/.config/opencode/opencode.jsonc` for MCP servers and permissions
+2. Configure model tiers in `~/.config/opencode/workflows.json`
+3. Start OpenCode and verify agents are available
 
 ### Updating
 

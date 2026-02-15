@@ -123,7 +123,7 @@ export interface PluginInput {
 }
 
 /**
- * Workflow user config from opencode.jsonc "workflows" key.
+ * Workflow user config from workflows.json.
  */
 export interface WorkflowUserConfig {
   model_tiers: {

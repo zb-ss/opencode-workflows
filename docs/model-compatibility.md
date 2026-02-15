@@ -36,32 +36,30 @@ Used for: Complex architecture, deep analysis, critical review
 
 ## Configuration
 
-Configure model tiers in `opencode.jsonc`. Use whatever models you have access to:
+Configure model tiers in `~/.config/opencode/workflows.json`. Each tier is an array — first model is preferred, rest are fallbacks:
 
-```jsonc
+```json
 {
-  "workflows": {
-    "model_tiers": {
-      "low": "your-provider/fast-model",
-      "mid": "your-provider/balanced-model",
-      "high": "your-provider/best-model"
-    },
-    "fallback_chain": ["high", "mid", "low"]
-  }
+  "model_tiers": {
+    "low":  ["your-provider/fast-model"],
+    "mid":  ["your-provider/balanced-model"],
+    "high": ["your-provider/best-model"]
+  },
+  "fallback_order": ["your-provider/balanced-model", "your-provider/fast-model"],
+  "default_mode": "standard"
 }
 ```
 
 **Example with specific models:**
-```jsonc
+```json
 {
-  "workflows": {
-    "model_tiers": {
-      "low": "google/gemini-3-flash",
-      "mid": "zai/glm-5",
-      "high": "openai/gpt-5.2"
-    },
-    "fallback_chain": ["high", "mid", "low"]
-  }
+  "model_tiers": {
+    "low":  ["google/gemini-3-flash", "minimax/m2.5"],
+    "mid":  ["minimax/m2.5", "zhipu/glm-5", "google/gemini-3-pro"],
+    "high": ["zhipu/glm-5", "google/gemini-3-pro", "openai/gpt-5.2"]
+  },
+  "fallback_order": ["minimax/m2.5", "zhipu/glm-5", "google/gemini-3-pro"],
+  "default_mode": "standard"
 }
 ```
 
@@ -107,16 +105,16 @@ Feature implementation → mid tier
 Architecture design → high tier
 ```
 
-### 2. Use Fallback Chains Strategically
-```jsonc
+### 2. Use Fallback Order Strategically
+```json
 // For reliability (cost-conscious)
-"fallback_chain": ["mid", "high", "low"]
+"fallback_order": ["minimax/m2.5", "zhipu/glm-5", "google/gemini-3-pro"]
 
 // For quality (cost-tolerant)
-"fallback_chain": ["high", "mid", "low"]
+"fallback_order": ["openai/gpt-5.2", "zhipu/glm-5", "minimax/m2.5"]
 
 // For speed (development)
-"fallback_chain": ["low", "mid", "high"]
+"fallback_order": ["google/gemini-3-flash", "minimax/m2.5"]
 ```
 
 ### 3. Override Per-Workflow
@@ -136,7 +134,7 @@ opencode workflows stats --by-model
 ### Model Unavailable Error
 **Symptom**: `Error: Model not configured`
 
-**Solution**: Add model to `opencode.jsonc` MCP servers section
+**Solution**: Add model to `opencode.jsonc` MCP servers and `workflows.json` tiers
 
 ### Rate Limit Exceeded
 **Symptom**: `Error: Rate limit exceeded`
@@ -157,23 +155,30 @@ opencode workflows stats --by-model
 
 Any model that supports tool use works. To add one:
 
-1. Configure MCP server in `opencode.jsonc`
-2. Assign to a tier
+1. Configure MCP server in `opencode.jsonc` (or `opencode.json`)
+2. Add the model to a tier in `workflows.json`
 3. Test with a sample workflow
 4. Optionally document quirks in this file
 
+**opencode.jsonc** (MCP server):
 ```jsonc
 {
-  "mcpServers": {
+  "mcp": {
     "my-provider": {
-      "endpoint": "https://api.provider.com/v1",
-      "apiKey": "${MY_PROVIDER_API_KEY}"
+      "type": "local",
+      "enabled": true,
+      "command": ["my-provider-mcp-server"],
+      "environment": { "API_KEY": "your-key" }
     }
-  },
-  "workflows": {
-    "model_tiers": {
-      "mid": "my-provider/model-name"
-    }
+  }
+}
+```
+
+**workflows.json** (model tier):
+```json
+{
+  "model_tiers": {
+    "mid": ["my-provider/model-name", "existing-fallback"]
   }
 }
 ```
