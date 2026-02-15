@@ -4,6 +4,8 @@ model_tier: high
 mode: primary
 temperature: 0.1
 permission:
+  external_directory:
+    "~/.config/opencode/**": allow
   bash:
     "*": ask
 ---

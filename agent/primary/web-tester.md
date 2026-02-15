@@ -4,6 +4,8 @@ model_tier: mid
 mode: primary
 temperature: 0.2
 permission:
+  external_directory:
+    "~/.config/opencode/**": allow
   write: ask
   edit: ask
   bash:

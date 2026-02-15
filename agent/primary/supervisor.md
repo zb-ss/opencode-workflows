@@ -4,6 +4,14 @@ model_tier: high
 mode: primary
 temperature: 0.1
 permission:
+  external_directory:
+    "~/.config/opencode/**": allow
+  read:
+    "*": allow
+  glob:
+    "*": allow
+  grep:
+    "*": allow
   write:
     "*": allow
     "/etc/*": deny

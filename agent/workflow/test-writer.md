@@ -5,6 +5,8 @@ mode: subagent
 temperature: 0.1
 steps: 20
 permission:
+  external_directory:
+    "~/.config/opencode/**": allow
   edit: allow
   write: allow
   read: allow

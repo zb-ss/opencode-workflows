@@ -4,6 +4,8 @@ model_tier: mid
 mode: primary
 temperature: 0.7
 permission:
+  external_directory:
+    "~/.config/opencode/**": allow
   read: allow
   webfetch: allow
   grep: allow
