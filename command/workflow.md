@@ -73,30 +73,63 @@ Parse `$ARGUMENTS` using these rules in order:
 - If the type is not recognized, list available types and ask for clarification
 - If the mode is not recognized, list available modes and ask for clarification
 
-### Step 3: Load Mode Configuration
+### Step 3: Resolve Config Directory
 
-Read the mode config from `mode/<mode>.json` in the opencode config directory.
-This tells you which agents to use for each phase and iteration limits.
+**CRITICAL**: First, run `echo $HOME` to get the absolute home path. Then use it to build the config directory path:
+```
+<HOME>/.config/opencode
+```
+For example: `/home/zashboy/.config/opencode`
 
-### Step 4: Set Up Workflow
+**NEVER use relative paths.** Always use the absolute path for all file reads below.
 
-1. **Read `workflows.json`** from the config directory for default mode if needed
-2. **Ask about branch strategy**:
-   - Use current branch, or create `feature/<slug>` / `fix/<slug>`
-3. **Load the template** from `templates/`:
-   - `feature` → `feature-development.org`
-   - `bugfix` → `bug-fix.org`
-   - `refactor` → `refactor.org`
-   - `figma` → `figma-to-code.org`
-   - `translate` → (see Translation section below)
-4. **Create workflow state file** in `workflows/active/`
-5. **Bind session** with `workflow_bind_session`
+### Step 4: Load Mode Configuration
 
-### Step 5: Execute
+Read the mode config JSON file. Use the absolute path:
+```bash
+# If mode is "swarm":
+cat <HOME>/.config/opencode/mode/swarm.json
+```
+
+Available mode files: `eco.json`, `turbo.json`, `standard.json`, `thorough.json`, `swarm.json`
+
+The JSON contains:
+- `agent_routing` — which agent to use for each phase (planning, implementation, code_review, etc.)
+- `settings` — iteration limits, parallel execution flag, test requirements
+
+### Step 5: Load Workflow Configuration
+
+Read the workflow config:
+```
+<HOME>/.config/opencode/workflows.json
+```
+This contains `model_tiers` and `default_mode`.
+
+### Step 6: Ask About Branch Strategy
+
+Ask the user:
+- Use current branch, or create `feature/<slug>` / `fix/<slug>`
+
+### Step 7: Load Template & Create State
+
+Read the workflow template using its absolute path:
+
+| Type | Template Path |
+|------|---------------|
+| `feature` | `<HOME>/.config/opencode/templates/feature-development.org` |
+| `bugfix` | `<HOME>/.config/opencode/templates/bug-fix.org` |
+| `refactor` | `<HOME>/.config/opencode/templates/refactor.org` |
+| `figma` | `<HOME>/.config/opencode/templates/figma-to-code.org` |
+| `translate` | See Translation section below |
+
+Create workflow state file in: `<HOME>/.config/opencode/workflows/active/`
+Bind session with `workflow_bind_session`.
+
+### Step 8: Execute
 
 Follow the supervisor agent instructions for workflow execution.
 Invoke agents using `@agent-name` syntax (e.g., `@wf-executor`, `@wf-reviewer`).
-Use the agents specified by the mode configuration.
+Use the agents from the mode config's `agent_routing` (Step 4), prefixed with `@wf-`.
 Update the workflow state file after every action.
 
 ## Translation Workflow
