@@ -1,7 +1,7 @@
 ---
 description: "Test generation following project conventions"
 mode: subagent
-temperature: 0.2
+temperature: 0.1
 steps: 20
 permission:
   edit: allow

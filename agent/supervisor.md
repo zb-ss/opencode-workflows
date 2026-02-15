@@ -1,7 +1,7 @@
 ---
 description: Orchestrates automated development workflows with state persistence
 model: anthropic/claude-sonnet-4-5
-temperature: 0.2
+temperature: 0.1
 tools:
   write: true
   edit: true

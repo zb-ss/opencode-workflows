@@ -1,7 +1,7 @@
 ---
 description: "Mandatory quality verification with auto-fix retry loop"
 mode: subagent
-temperature: 0.2
+temperature: 0.1
 steps: 20
 permission:
   edit: allow

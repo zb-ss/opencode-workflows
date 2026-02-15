@@ -1,7 +1,7 @@
 ---
 description: "Comprehensive security audit with deep analysis"
 mode: subagent
-temperature: 0.2
+temperature: 0.1
 steps: 12
 permission:
   read: allow

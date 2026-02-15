@@ -1,7 +1,7 @@
 ---
 description: "Explores web applications using Playwright MCP to build feature maps"
 mode: subagent
-temperature: 0.2
+temperature: 0.1
 steps: 25
 permission:
   edit: allow

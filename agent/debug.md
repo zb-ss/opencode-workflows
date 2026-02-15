@@ -1,7 +1,7 @@
 ---
 description: Systematic bug hunting and root cause analysis without codebase pollution
 model: anthropic/claude-sonnet-4-5
-temperature: 0.4
+temperature: 0.3
 tools:
   write: true
   edit: true

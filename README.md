@@ -167,12 +167,12 @@ Customize `~/.config/opencode/opencode.jsonc`:
 
 **Linux/macOS**:
 ```bash
-curl -fsSL https://raw.githubusercontent.com/zb-ss/opencode-workflows/main/bootstrap.mjs | node --input-type=module
+curl -fsSL https://raw.githubusercontent.com/zb-ss/opencode-workflows/master/bootstrap.mjs | node --input-type=module
 ```
 
 **Windows (PowerShell)**:
 ```powershell
-curl.exe -fsSL https://raw.githubusercontent.com/zb-ss/opencode-workflows/main/bootstrap.mjs | node --input-type=module
+curl.exe -fsSL https://raw.githubusercontent.com/zb-ss/opencode-workflows/master/bootstrap.mjs | node --input-type=module
 ```
 
 ### Manual Install
@@ -183,6 +183,8 @@ cd opencode-workflows
 node install.mjs
 ```
 
+Both methods install the **core** module via symlinks into `~/.config/opencode/`. On Windows, copy mode is used by default since symlinks require Developer Mode.
+
 ### Install Options
 
 ```bash
@@ -192,6 +194,37 @@ node install.mjs --all            # Core + translate module
 node install.mjs --dry-run        # Preview
 node install.mjs --uninstall      # Remove
 ```
+
+### Bootstrap Environment Variables
+
+The bootstrap installer supports the following environment variables:
+
+- `INSTALL_DIR=~/my/path` — Custom clone location (default: `~/.local/share/opencode-workflows`)
+- `INSTALL_MODE=copy` — Copy files instead of symlinks
+- `INSTALL_MODULES=all` — Install all modules including translate
+
+Example:
+```bash
+INSTALL_DIR=~/projects/opencode-workflows curl -fsSL https://raw.githubusercontent.com/zb-ss/opencode-workflows/master/bootstrap.mjs | node --input-type=module
+```
+
+### Post-Install
+
+1. Review/edit `~/.config/opencode/opencode.jsonc` for model tiers and API keys
+2. Start OpenCode and verify agents are available
+
+### Updating
+
+- **Symlink mode** (default): `git pull` — changes propagate automatically
+- **Copy mode**: `git pull && node install.mjs --copy`
+
+### Uninstalling
+
+```bash
+node install.mjs --uninstall
+```
+
+Removes all installed symlinks/copies and the manifest. Your `opencode.jsonc` is never removed.
 
 ### Modules
 

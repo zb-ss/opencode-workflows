@@ -1,7 +1,7 @@
 ---
 description: "Reviews E2E Playwright tests for quality, flakiness, and best practices"
 mode: subagent
-temperature: 0.2
+temperature: 0.1
 steps: 15
 permission:
   read: allow

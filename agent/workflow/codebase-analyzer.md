@@ -1,7 +1,7 @@
 ---
 description: "Analyzes codebase to extract conventions, patterns, and best practices"
 mode: subagent
-temperature: 0.2
+temperature: 0.1
 steps: 20
 permission:
   read: allow

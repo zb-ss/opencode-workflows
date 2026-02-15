@@ -1,7 +1,7 @@
 ---
 description: "Standard code review with balanced depth"
 mode: subagent
-temperature: 0.2
+temperature: 0.1
 steps: 12
 permission:
   read: allow

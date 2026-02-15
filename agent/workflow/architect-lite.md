@@ -1,7 +1,7 @@
 ---
 description: "Quick architectural analysis for simple changes"
 mode: subagent
-temperature: 0.2
+temperature: 0.1
 steps: 10
 permission:
   read: allow

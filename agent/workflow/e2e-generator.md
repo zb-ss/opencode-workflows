@@ -1,7 +1,7 @@
 ---
 description: "Generates Playwright E2E test specs from app exploration maps"
 mode: subagent
-temperature: 0.2
+temperature: 0.1
 steps: 25
 permission:
   edit: allow

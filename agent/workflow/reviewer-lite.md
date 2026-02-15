@@ -1,7 +1,7 @@
 ---
 description: "Quick code review for simple changes"
 mode: subagent
-temperature: 0.2
+temperature: 0.1
 steps: 8
 permission:
   read: allow

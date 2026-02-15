@@ -1,7 +1,7 @@
 ---
 description: "Final architect verification before workflow completion - MANDATORY sign-off"
 mode: subagent
-temperature: 0.2
+temperature: 0.1
 steps: 12
 permission:
   read: allow

@@ -1,7 +1,7 @@
 ---
 description: Tests, debugs, and automates web applications using browser tools
 mode: primary
-temperature: 0.3
+temperature: 0.2
 permission:
   write: ask
   edit: ask

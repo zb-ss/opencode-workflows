@@ -1,7 +1,7 @@
 ---
 description: "Performance review with optimization suggestions"
 mode: subagent
-temperature: 0.2
+temperature: 0.1
 steps: 10
 permission:
   read: allow

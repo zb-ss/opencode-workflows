@@ -1,7 +1,7 @@
 ---
 description: "Quick security scan for obvious vulnerabilities"
 mode: subagent
-temperature: 0.2
+temperature: 0.1
 steps: 8
 permission:
   read: allow

@@ -1,7 +1,7 @@
 ---
 description: Orchestrates automated development workflows with state persistence
 mode: primary
-temperature: 0.2
+temperature: 0.1
 permission:
   write:
     "*": allow

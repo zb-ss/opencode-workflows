@@ -1,7 +1,7 @@
 ---
 description: "Deep architectural planning and analysis"
 mode: subagent
-temperature: 0.2
+temperature: 0.1
 steps: 15
 permission:
   read: allow

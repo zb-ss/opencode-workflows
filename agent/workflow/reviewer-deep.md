@@ -1,7 +1,7 @@
 ---
 description: "Thorough code review with comprehensive analysis"
 mode: subagent
-temperature: 0.2
+temperature: 0.1
 steps: 15
 permission:
   read: allow
