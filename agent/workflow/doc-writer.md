@@ -1,5 +1,6 @@
 ---
 description: "Documentation updates for code changes"
+model_tier: low
 mode: subagent
 temperature: 0.2
 steps: 10

@@ -1,5 +1,6 @@
 ---
 description: "Quick performance check for obvious issues"
+model_tier: low
 mode: subagent
 temperature: 0.1
 steps: 8

@@ -1,5 +1,6 @@
 ---
 description: "Explores web applications using Playwright MCP to build feature maps"
+model_tier: mid
 mode: subagent
 temperature: 0.1
 steps: 25

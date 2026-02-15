@@ -1,5 +1,6 @@
 ---
 description: Builds pixel-perfect frontend layouts from Figma designs using Figma REST API
+model_tier: mid
 mode: primary
 temperature: 0.2
 permission:

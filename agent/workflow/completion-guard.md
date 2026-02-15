@@ -1,5 +1,6 @@
 ---
 description: "Final architect verification before workflow completion - MANDATORY sign-off"
+model_tier: mid
 mode: subagent
 temperature: 0.1
 steps: 12

@@ -1,5 +1,6 @@
 ---
 description: General technical discussions, Q&A, and brainstorming
+model_tier: mid
 mode: primary
 temperature: 0.7
 permission:

@@ -1,5 +1,6 @@
 ---
 description: Creates detailed development plans and saves them as org files
+model_tier: high
 mode: primary
 temperature: 0.1
 permission:

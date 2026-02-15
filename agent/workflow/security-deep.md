@@ -1,5 +1,6 @@
 ---
 description: "Comprehensive security audit with deep analysis"
+model_tier: high
 mode: subagent
 temperature: 0.1
 steps: 12

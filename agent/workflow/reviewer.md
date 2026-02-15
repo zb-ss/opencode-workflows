@@ -1,5 +1,6 @@
 ---
 description: "Standard code review with balanced depth"
+model_tier: mid
 mode: subagent
 temperature: 0.1
 steps: 12

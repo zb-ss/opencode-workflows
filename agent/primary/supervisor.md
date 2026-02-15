@@ -1,5 +1,6 @@
 ---
 description: Orchestrates automated development workflows with state persistence
+model_tier: high
 mode: primary
 temperature: 0.1
 permission:

@@ -1,5 +1,6 @@
 ---
 description: "Thorough code review with comprehensive analysis"
+model_tier: high
 mode: subagent
 temperature: 0.1
 steps: 15

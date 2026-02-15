@@ -1,5 +1,6 @@
 ---
 description: "Quick architectural analysis for simple changes"
+model_tier: mid
 mode: subagent
 temperature: 0.1
 steps: 10

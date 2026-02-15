@@ -151,6 +151,89 @@ function getConfigDir() {
 const MANIFEST_NAME = ".opencode-workflows-manifest.json";
 const ENV_FILE_NAME = "opencode-workflows.env";
 
+/**
+ * Load model tier configuration from workflows.json.
+ * Checks: 1) config dir workflows.json, 2) repo template as fallback.
+ * Returns a map of tier -> first model ID, e.g. { high: "zhipu/glm-5", ... }
+ */
+function loadModelTiers() {
+  const configDir = getConfigDir();
+  const candidates = [
+    path.join(configDir, "workflows.json"),
+    path.join(REPO_ROOT, "workflows.json.template"),
+  ];
+
+  for (const candidate of candidates) {
+    try {
+      const raw = fs.readFileSync(candidate, "utf-8");
+      const config = JSON.parse(raw);
+      if (config.model_tiers) {
+        const resolved = {};
+        for (const [tier, models] of Object.entries(config.model_tiers)) {
+          if (Array.isArray(models) && models.length > 0) {
+            resolved[tier] = models[0];
+          }
+        }
+        if (Object.keys(resolved).length > 0) {
+          console.log(`Model tiers loaded from: ${candidate}`);
+          for (const [tier, model] of Object.entries(resolved)) {
+            console.log(`  ${tier}: ${model}`);
+          }
+          return resolved;
+        }
+      }
+    } catch {
+      // try next candidate
+    }
+  }
+
+  console.warn("Warning: No workflows.json found. Agents will not have model: set.");
+  return null;
+}
+
+/**
+ * Install an agent file, replacing model_tier: with model: from config.
+ * Always copies (never symlinks) because content is transformed.
+ */
+function installAgent(source, target, tierModels, dryRun) {
+  const actions = [];
+
+  if (!fs.existsSync(source)) {
+    actions.push({ action: "skip", source, target, reason: "source missing" });
+    return actions;
+  }
+
+  if (dryRun) {
+    actions.push({ action: "copy", source, target, dryRun: true, note: "agent (model resolved)" });
+    return actions;
+  }
+
+  const backup = backupIfNeeded(target);
+  if (backup) {
+    actions.push({ action: "backup", original: target, backup });
+  }
+
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  removePath(target);
+
+  let content = fs.readFileSync(source, "utf-8");
+
+  if (tierModels) {
+    // Replace model_tier: <tier> with model: <resolved_model>
+    content = content.replace(
+      /^(model_tier:\s*)(low|mid|high)\s*$/m,
+      (_, _prefix, tier) => {
+        const model = tierModels[tier];
+        return model ? `model: ${model}` : `model_tier: ${tier}`;
+      }
+    );
+  }
+
+  fs.writeFileSync(target, content);
+  actions.push({ action: "copy", source, target, note: "agent (model resolved)" });
+  return actions;
+}
+
 function timestamp() {
   return new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
 }
@@ -273,12 +356,14 @@ function buildFileList(modules) {
     }
 
     // Handle agents_primary: agent/primary/{name} -> agent/{basename}
+    // Marked as isAgent for model_tier resolution during install
     if (def.agents_primary) {
       for (const f of def.agents_primary) {
         const basename = path.basename(f);
         files.push({
           source: path.join(REPO_ROOT, "agent", f),
           target: path.join(configDir, "agent", basename),
+          isAgent: true,
         });
       }
     }
@@ -291,6 +376,7 @@ function buildFileList(modules) {
         files.push({
           source: path.join(REPO_ROOT, "agent", f),
           target: path.join(configDir, "agent", targetName),
+          isAgent: true,
         });
       }
     }
@@ -301,6 +387,7 @@ function buildFileList(modules) {
         files.push({
           source: path.join(REPO_ROOT, "agent", f),
           target: path.join(configDir, "agent", f),
+          isAgent: true,
         });
       }
     }
@@ -393,9 +480,15 @@ function install(modules, mode, dryRun) {
   if (dryRun) console.log("(dry run — no changes will be made)\n");
   else console.log();
 
+  // Load model tiers for agent model resolution
+  const tierModels = loadModelTiers();
+
   // Install each file
-  for (const { source, target } of files) {
-    const actions = installFile(source, target, mode, dryRun);
+  for (const { source, target, isAgent } of files) {
+    // Agent files use copy + model_tier resolution (never symlinked)
+    const actions = isAgent
+      ? installAgent(source, target, tierModels, dryRun)
+      : installFile(source, target, mode, dryRun);
     allActions.push(...actions);
     for (const a of actions) {
       if (a.action === "symlink" || a.action === "copy") {

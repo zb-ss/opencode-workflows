@@ -1,5 +1,6 @@
 ---
 description: "Quick code review for simple changes"
+model_tier: low
 mode: subagent
 temperature: 0.1
 steps: 8

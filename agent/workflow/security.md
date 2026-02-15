@@ -1,5 +1,6 @@
 ---
 description: "Standard security audit with OWASP coverage"
+model_tier: mid
 mode: subagent
 temperature: 0.1
 steps: 10

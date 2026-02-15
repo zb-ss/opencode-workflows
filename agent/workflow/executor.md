@@ -1,5 +1,6 @@
 ---
 description: "Standard implementation following plans"
+model_tier: mid
 mode: subagent
 temperature: 0.2
 steps: 25

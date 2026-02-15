@@ -1,5 +1,6 @@
 ---
 description: "Performance review with optimization suggestions"
+model_tier: high
 mode: subagent
 temperature: 0.1
 steps: 10

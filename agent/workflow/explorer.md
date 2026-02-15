@@ -1,5 +1,6 @@
 ---
 description: "Fast codebase exploration and understanding"
+model_tier: low
 mode: subagent
 temperature: 0.1
 steps: 15

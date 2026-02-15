@@ -1,5 +1,6 @@
 ---
 description: "Quick security scan for obvious vulnerabilities"
+model_tier: low
 mode: subagent
 temperature: 0.1
 steps: 8

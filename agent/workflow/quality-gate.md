@@ -1,5 +1,6 @@
 ---
 description: "Mandatory quality verification with auto-fix retry loop"
+model_tier: mid
 mode: subagent
 temperature: 0.1
 steps: 20

@@ -1,5 +1,6 @@
 ---
 description: Focused, efficient code implementation without exploration or documentation pollution
+model_tier: mid
 mode: primary
 temperature: 0.2
 permission:

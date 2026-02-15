@@ -1,5 +1,6 @@
 ---
 description: "Quick implementation for simple changes"
+model_tier: low
 mode: subagent
 temperature: 0.2
 steps: 15

@@ -1,5 +1,6 @@
 ---
 description: Carefully applies code changes with manual approval for each modification
+model_tier: mid
 mode: primary
 temperature: 0.1
 permission:
