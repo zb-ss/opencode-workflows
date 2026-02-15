@@ -413,11 +413,12 @@ function buildFileList(modules) {
       }
     }
 
+    // OpenCode loads plugins from "plugins/" (plural)
     if (def.plugins) {
       for (const f of def.plugins) {
         files.push({
           source: path.join(REPO_ROOT, "plugin", f),
-          target: path.join(configDir, "plugin", f),
+          target: path.join(configDir, "plugins", f),
         });
       }
     }
@@ -665,7 +666,7 @@ function uninstall(dryRun) {
 
   // Clean up empty directories
   if (!dryRun) {
-    for (const sub of ["agents", "command", "skill", "plugin", "tool", "mode", "lib", "templates"]) {
+    for (const sub of ["agents", "command", "skill", "plugins", "plugin", "tool", "mode", "lib", "templates"]) {
       const dir = path.join(configDir, sub);
       try {
         const entries = fs.readdirSync(dir);
