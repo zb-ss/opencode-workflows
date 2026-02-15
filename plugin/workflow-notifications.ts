@@ -14,13 +14,18 @@
  */
 
 import type { Plugin } from "@opencode-ai/plugin"
+import { getActiveWorkflow, getPendingGates, allMandatoryGatesPassed } from '../lib/state.ts'
+import type { GateStatus } from '../lib/types.ts'
 
 interface WorkflowEvent {
-  type: 'step_complete' | 'workflow_complete' | 'step_failed' | 'workflow_paused'
+  type: 'step_complete' | 'workflow_complete' | 'step_failed' | 'workflow_paused' | 'gate_transition'
   workflowId?: string
   workflowTitle?: string
   stepName?: string
   message?: string
+  gate?: string
+  fromStatus?: string
+  toStatus?: string
 }
 
 /**
@@ -52,6 +57,27 @@ function parseWorkflowEvent(text: string): WorkflowEvent | null {
     return {
       type: 'step_failed',
       message: stepFailedMatch[1].trim()
+    }
+  }
+
+  // Gate verdict patterns: "VERDICT: PASS" / "VERDICT: FAIL"
+  const verdictPassMatch = text.match(/VERDICT:\s*PASS(?:\s*[-:]\s*(.+))?/i)
+  if (verdictPassMatch) {
+    return {
+      type: 'gate_transition',
+      gate: verdictPassMatch[1]?.trim() || 'unknown',
+      toStatus: 'passed',
+      message: `Gate passed: ${verdictPassMatch[1]?.trim() || 'unknown'}`
+    }
+  }
+
+  const verdictFailMatch = text.match(/VERDICT:\s*FAIL(?:\s*[-:]\s*(.+))?/i)
+  if (verdictFailMatch) {
+    return {
+      type: 'gate_transition',
+      gate: verdictFailMatch[1]?.trim() || 'unknown',
+      toStatus: 'failed',
+      message: `Gate failed: ${verdictFailMatch[1]?.trim() || 'unknown'}`
     }
   }
 
@@ -99,14 +125,47 @@ async function sendNotification(
 export const WorkflowNotifications: Plugin = async ({ $, client }) => {
   // Track seen events to avoid duplicate notifications
   const seenEvents = new Set<string>()
-  
+  // Track gate states for transition detection
+  const lastGateStates = new Map<string, GateStatus>()
+
   return {
     event: async ({ event }) => {
-      // Handle session idle events - workflow may have completed a step
+      // Handle session idle events - check for gate transitions
       if (event.type === "session.idle") {
-        // We could check the session messages here for workflow markers
-        // but that requires additional API calls
-        // For now, the main detection happens in message.updated
+        try {
+          const active = getActiveWorkflow()
+          if (active) {
+            const { state } = active
+            for (const [gateName, gate] of Object.entries(state.gates || {})) {
+              const prev = lastGateStates.get(gateName)
+              if (prev && prev !== gate.status) {
+                // Gate transition detected
+                const eventKey = `gate-${gateName}-${gate.status}-${state.updated_at}`
+                if (!seenEvents.has(eventKey)) {
+                  seenEvents.add(eventKey)
+
+                  if (gate.status === 'passed') {
+                    await sendNotification($, 'Workflow Gate Passed', `${gateName} passed`, 'normal', 'emblem-default')
+                  } else if (gate.status === 'failed') {
+                    await sendNotification($, 'Workflow Gate Failed', `${gateName} failed - iteration ${gate.iteration}`, 'critical', 'dialog-error')
+                  }
+                }
+              }
+              lastGateStates.set(gateName, gate.status)
+            }
+
+            // Check if all gates just passed
+            if (allMandatoryGatesPassed(state)) {
+              const completeKey = `workflow-complete-${state.workflow_id}`
+              if (!seenEvents.has(completeKey)) {
+                seenEvents.add(completeKey)
+                await sendNotification($, 'Workflow Complete', `${state.workflow_id} - all gates passed`, 'normal', 'emblem-default')
+              }
+            }
+          }
+        } catch {
+          // Gate detection is best-effort
+        }
       }
 
       // Handle message updates - detect workflow markers in real-time
@@ -177,14 +236,28 @@ export const WorkflowNotifications: Plugin = async ({ $, client }) => {
               'dialog-warning'
             )
             break
+
+          case 'gate_passed':
+          case 'gate_failed':
+          case 'gate_transition': {
+            const isPassed = workflowEvent.toStatus === 'passed' || workflowEvent.type === 'gate_passed'
+            await sendNotification(
+              $,
+              isPassed ? 'Workflow Gate Passed' : 'Workflow Gate Failed',
+              workflowEvent.message || `Gate ${workflowEvent.gate || 'unknown'} ${isPassed ? 'passed' : 'failed'}`,
+              isPassed ? 'normal' : 'critical',
+              isPassed ? 'emblem-default' : 'dialog-error'
+            )
+            break
+          }
         }
       }
     },
 
-    // Optional: Custom tool for manual notifications from supervisor
+    // Custom tool for manual notifications and gate events from supervisor
     tool: {
       workflow_notify: {
-        description: "Send a workflow notification to the desktop",
+        description: "Send a workflow notification to the desktop. Can also announce gate transitions.",
         parameters: {
           type: "object",
           properties: {
@@ -193,25 +266,41 @@ export const WorkflowNotifications: Plugin = async ({ $, client }) => {
               description: "Notification title"
             },
             message: {
-              type: "string", 
+              type: "string",
               description: "Notification message"
             },
             urgency: {
               type: "string",
               enum: ["low", "normal", "critical"],
               description: "Notification urgency level"
+            },
+            gate: {
+              type: "string",
+              description: "Gate name if this is a gate transition notification"
+            },
+            gateStatus: {
+              type: "string",
+              enum: ["passed", "failed", "in_progress", "skipped"],
+              description: "New gate status"
             }
           },
           required: ["title", "message"]
         },
-        async execute(args: { title?: string; message?: string; urgency?: string }) {
-          // Handle cases where args might be empty or undefined
+        async execute(args: { title?: string; message?: string; urgency?: string; gate?: string; gateStatus?: string }) {
           const title = args?.title || 'OpenCode Workflow'
           const message = args?.message || 'Notification'
           const urgency = (args?.urgency || 'normal') as 'low' | 'normal' | 'critical'
-          
-          await sendNotification($, title, message, urgency)
-          return `Notification sent: ${title}`
+
+          // If gate info provided, use appropriate icon
+          let icon = 'dialog-information'
+          if (args?.gate) {
+            if (args.gateStatus === 'passed') icon = 'emblem-default'
+            else if (args.gateStatus === 'failed') icon = 'dialog-error'
+            else if (args.gateStatus === 'in_progress') icon = 'dialog-information'
+          }
+
+          await sendNotification($, title, message, urgency, icon)
+          return `Notification sent: ${title} - ${message}`
         }
       }
     }

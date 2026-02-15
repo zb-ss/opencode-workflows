@@ -1,17 +1,7 @@
 ---
 description: Tests, debugs, and automates web applications using browser tools
-model: anthropic/claude-opus-4-5
+mode: primary
 temperature: 0.2
-tools:
-  write: true
-  edit: true
-  bash: true
-  read: true
-  grep: true
-  glob: true
-  playwright_*: true
-  chrome-devtools_*: true
-  context7_*: true
 permission:
   write: ask
   edit: ask
@@ -292,13 +282,13 @@ If a test fails:
 
 ### Test Results:
 ```
-✓ login flow works with valid credentials (2.3s)
-✗ login flow shows error with invalid credentials (1.1s)
+[PASS] login flow works with valid credentials (2.3s)
+[FAIL] login flow shows error with invalid credentials (1.1s)
   Expected error message to be visible
   Screenshot: tests/screenshots/login-error-fail.png
   
-✓ dashboard loads user data (3.2s)
-✓ navigation menu is accessible (0.8s)
+[PASS] dashboard loads user data (3.2s)
+[PASS] navigation menu is accessible (0.8s)
 
 Tests: 3 passed, 1 failed, 4 total
 Time:  7.4s
@@ -309,9 +299,9 @@ Time:  7.4s
 Issue: Login button not responding to clicks
 
 Investigation:
-1. Button element exists: ✓
-2. Button is visible: ✓
-3. Button is enabled: ✗ (disabled attribute present)
+1. Button element exists: YES
+2. Button is visible: YES
+3. Button is enabled: NO (disabled attribute present)
 4. JavaScript errors: TypeError at login.js:42
 
 Root cause: Form validation runs on page load and disables 

@@ -26,19 +26,39 @@ import os from "node:os";
 
 const MODULES = {
   core: {
-    agents: [
-      "org-planner.md",
-      "discussion.md",
-      "editor.md",
-      "focused-build.md",
-      "debug.md",
-      "review.md",
-      "test-writer.md",
-      "web-tester.md",
-      "security-auditor.md",
-      "supervisor.md",
-      "step-planner.md",
-      "figma-builder.md",
+    agents_primary: [
+      "primary/supervisor.md",
+      "primary/editor.md",
+      "primary/focused-build.md",
+      "primary/debug.md",
+      "primary/org-planner.md",
+      "primary/step-planner.md",
+      "primary/discussion.md",
+      "primary/web-tester.md",
+      "primary/figma-builder.md",
+    ],
+    agents_workflow: [
+      "workflow/architect.md",
+      "workflow/architect-lite.md",
+      "workflow/executor.md",
+      "workflow/executor-lite.md",
+      "workflow/reviewer.md",
+      "workflow/reviewer-lite.md",
+      "workflow/reviewer-deep.md",
+      "workflow/security.md",
+      "workflow/security-lite.md",
+      "workflow/security-deep.md",
+      "workflow/test-writer.md",
+      "workflow/quality-gate.md",
+      "workflow/completion-guard.md",
+      "workflow/codebase-analyzer.md",
+      "workflow/perf-reviewer.md",
+      "workflow/perf-lite.md",
+      "workflow/doc-writer.md",
+      "workflow/explorer.md",
+      "workflow/e2e-explorer.md",
+      "workflow/e2e-generator.md",
+      "workflow/e2e-reviewer.md",
     ],
     commands: [
       "plan.md",
@@ -63,7 +83,35 @@ const MODULES = {
       "bash-conventions",
       "python-conventions",
     ],
-    plugins: ["workflow-notifications.ts"],
+    plugins: [
+      "workflow-notifications.ts",
+      "workflow-enforcer.ts",
+      "file-validator.ts",
+      "model-router.ts",
+      "swarm-manager.ts",
+      "package.json",
+    ],
+    modes: [
+      "eco.json",
+      "turbo.json",
+      "standard.json",
+      "thorough.json",
+      "swarm.json",
+    ],
+    lib: [
+      "types.ts",
+      "logger.ts",
+      "state.ts",
+      "model-registry.ts",
+      "mode-rules.ts",
+    ],
+    templates: [
+      "feature-development.org",
+      "bug-fix.org",
+      "refactor.org",
+      "figma-to-code.org",
+      "e2e-testing.org",
+    ],
     rootFiles: ["CONVENTIONS.md"],
   },
   translate: {
@@ -224,6 +272,30 @@ function buildFileList(modules) {
       process.exit(1);
     }
 
+    // Handle agents_primary: agent/primary/{name} -> agent/{basename}
+    if (def.agents_primary) {
+      for (const f of def.agents_primary) {
+        const basename = path.basename(f);
+        files.push({
+          source: path.join(REPO_ROOT, "agent", f),
+          target: path.join(configDir, "agent", basename),
+        });
+      }
+    }
+
+    // Handle agents_workflow: agent/workflow/{name} -> agent/wf-{basename}
+    if (def.agents_workflow) {
+      for (const f of def.agents_workflow) {
+        const basename = path.basename(f);
+        const targetName = `wf-${basename}`;
+        files.push({
+          source: path.join(REPO_ROOT, "agent", f),
+          target: path.join(configDir, "agent", targetName),
+        });
+      }
+    }
+
+    // Legacy agents support (translate module)
     if (def.agents) {
       for (const f of def.agents) {
         files.push({
@@ -256,6 +328,33 @@ function buildFileList(modules) {
         files.push({
           source: path.join(REPO_ROOT, "plugin", f),
           target: path.join(configDir, "plugin", f),
+        });
+      }
+    }
+
+    if (def.modes) {
+      for (const f of def.modes) {
+        files.push({
+          source: path.join(REPO_ROOT, "mode", f),
+          target: path.join(configDir, "mode", f),
+        });
+      }
+    }
+
+    if (def.lib) {
+      for (const f of def.lib) {
+        files.push({
+          source: path.join(REPO_ROOT, "lib", f),
+          target: path.join(configDir, "lib", f),
+        });
+      }
+    }
+
+    if (def.templates) {
+      for (const f of def.templates) {
+        files.push({
+          source: path.join(REPO_ROOT, "templates", f),
+          target: path.join(configDir, "templates", f),
         });
       }
     }
@@ -439,7 +538,7 @@ function uninstall(dryRun) {
 
   // Clean up empty directories
   if (!dryRun) {
-    for (const sub of ["agent", "command", "skill", "plugin", "tool"]) {
+    for (const sub of ["agent", "command", "skill", "plugin", "tool", "mode", "lib", "templates"]) {
       const dir = path.join(configDir, sub);
       try {
         const entries = fs.readdirSync(dir);
@@ -550,8 +649,17 @@ Options:
   --help              Show this help message
 
 Modules:
-  core       Agents, commands, skills, plugins for general development (default)
+  core       Primary agents, workflow agents, commands, skills, plugins,
+             execution modes, libraries, templates, and conventions (default)
   translate  Joomla translation agents, commands, tools, and plugin
+
+Features (core module):
+  - Primary agents for interactive coding (supervisor, editor, etc.)
+  - Workflow agents for autonomous execution (architect, executor, reviewer, etc.)
+  - Multi-model execution modes (eco, standard, turbo, thorough, swarm)
+  - Workflow templates (feature-development, bug-fix, refactor, e2e-testing)
+  - TypeScript libraries for plugin development
+  - Skills for framework-specific conventions
 
 Examples:
   node install.mjs                       # Install core with symlinks

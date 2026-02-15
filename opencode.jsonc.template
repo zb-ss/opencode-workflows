@@ -30,6 +30,8 @@
   "permission": {
     "bash": {
       "git commit*": "ask",
+      "git push*": "ask",
+      "rm -rf*": "deny",
       "*": "allow"
     }
   },
@@ -37,6 +39,18 @@
   // Disable MCP tools globally, then enable per-agent below
   // Example: "github_*": false
   "tools": {},
+
+  // Workflow configuration (read by workflow plugins)
+  // Customize model tiers based on your API access
+  "workflows": {
+    "model_tiers": {
+      "low":  ["google/gemini-3-flash", "minimax/m2.5"],
+      "mid":  ["minimax/m2.5", "zhipu/glm-5", "google/gemini-3-pro"],
+      "high": ["zhipu/glm-5", "google/gemini-3-pro", "openai/gpt-4.1"]
+    },
+    "fallback_order": ["minimax/m2.5", "zhipu/glm-5", "google/gemini-3-pro"],
+    "default_mode": "standard"
+  },
 
   // Per-agent tool access and permission overrides
   //
