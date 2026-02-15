@@ -1,7 +1,7 @@
 ---
 description: Create a pull request using gh CLI
 agent: build
-model: google/gemini-3-flash-preview
+model_tier: low
 
 ---
 

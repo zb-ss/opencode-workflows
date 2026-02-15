@@ -1,7 +1,7 @@
 ---
 description: Create a detailed development plan saved as an org file
 agent: org-planner
-model: anthropic/claude-haiku-4-5
+model_tier: low
 ---
 
 Create a comprehensive development plan for: $ARGUMENTS

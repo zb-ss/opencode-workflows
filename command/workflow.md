@@ -1,7 +1,7 @@
 ---
 description: Start an automated development workflow
 agent: supervisor
-model: anthropic/claude-sonnet-4-5
+model_tier: mid
 ---
 
 Start a new automated workflow.

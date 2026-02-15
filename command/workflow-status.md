@@ -1,7 +1,7 @@
 ---
 description: Show status of active workflows
 agent: supervisor
-model: anthropic/claude-sonnet-4-5
+model_tier: mid
 ---
 
 Display the status of active workflows.

@@ -192,10 +192,11 @@ function loadModelTiers() {
 }
 
 /**
- * Install an agent file, replacing model_tier: with model: from config.
- * Always copies (never symlinks) because content is transformed.
+ * Install a file that needs model_tier resolution, replacing model_tier:
+ * with model: from config. Always copies (never symlinks) because content
+ * is transformed. Used for both agent and command files.
  */
-function installAgent(source, target, tierModels, dryRun) {
+function installWithModelResolution(source, target, tierModels, dryRun) {
   const actions = [];
 
   if (!fs.existsSync(source)) {
@@ -204,7 +205,7 @@ function installAgent(source, target, tierModels, dryRun) {
   }
 
   if (dryRun) {
-    actions.push({ action: "copy", source, target, dryRun: true, note: "agent (model resolved)" });
+    actions.push({ action: "copy", source, target, dryRun: true, note: "model tier resolved" });
     return actions;
   }
 
@@ -230,7 +231,7 @@ function installAgent(source, target, tierModels, dryRun) {
   }
 
   fs.writeFileSync(target, content);
-  actions.push({ action: "copy", source, target, note: "agent (model resolved)" });
+  actions.push({ action: "copy", source, target, note: "model tier resolved" });
   return actions;
 }
 
@@ -362,7 +363,7 @@ function buildFileList(modules) {
         const basename = path.basename(f);
         files.push({
           source: path.join(REPO_ROOT, "agent", f),
-          target: path.join(configDir, "agent", basename),
+          target: path.join(configDir, "agents", basename),
           isAgent: true,
         });
       }
@@ -375,7 +376,7 @@ function buildFileList(modules) {
         const targetName = `wf-${basename}`;
         files.push({
           source: path.join(REPO_ROOT, "agent", f),
-          target: path.join(configDir, "agent", targetName),
+          target: path.join(configDir, "agents", targetName),
           isAgent: true,
         });
       }
@@ -386,17 +387,19 @@ function buildFileList(modules) {
       for (const f of def.agents) {
         files.push({
           source: path.join(REPO_ROOT, "agent", f),
-          target: path.join(configDir, "agent", f),
+          target: path.join(configDir, "agents", f),
           isAgent: true,
         });
       }
     }
 
+    // Commands need model_tier resolution (like agents)
     if (def.commands) {
       for (const f of def.commands) {
         files.push({
           source: path.join(REPO_ROOT, "command", f),
           target: path.join(configDir, "command", f),
+          needsModelResolution: true,
         });
       }
     }
@@ -484,10 +487,10 @@ function install(modules, mode, dryRun) {
   const tierModels = loadModelTiers();
 
   // Install each file
-  for (const { source, target, isAgent } of files) {
-    // Agent files use copy + model_tier resolution (never symlinked)
-    const actions = isAgent
-      ? installAgent(source, target, tierModels, dryRun)
+  for (const { source, target, isAgent, needsModelResolution } of files) {
+    // Files with model_tier use copy + resolution (never symlinked)
+    const actions = (isAgent || needsModelResolution)
+      ? installWithModelResolution(source, target, tierModels, dryRun)
       : installFile(source, target, mode, dryRun);
     allActions.push(...actions);
     for (const a of actions) {
@@ -662,7 +665,7 @@ function uninstall(dryRun) {
 
   // Clean up empty directories
   if (!dryRun) {
-    for (const sub of ["agent", "command", "skill", "plugin", "tool", "mode", "lib", "templates"]) {
+    for (const sub of ["agents", "command", "skill", "plugin", "tool", "mode", "lib", "templates"]) {
       const dir = path.join(configDir, sub);
       try {
         const entries = fs.readdirSync(dir);

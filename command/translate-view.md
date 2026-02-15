@@ -1,7 +1,7 @@
 ---
 description: Process a single view file for translation (part of translation workflow)
 agent: translation-coder
-model: anthropic/claude-sonnet-4-5
+model_tier: mid
 ---
 
 Process a single Joomla view file for translation.

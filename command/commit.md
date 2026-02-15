@@ -1,7 +1,7 @@
 ---
 description: Commit the recent changes
 agent: build
-model: google/gemini-3-flash-preview
+model_tier: low
 ---
 
 Here is the current status and the staged diff:

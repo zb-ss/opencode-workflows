@@ -1,7 +1,7 @@
 ---
 description: Fully automatic Joomla translation workflow with review loop
 agent: supervisor
-model: anthropic/claude-sonnet-4-5
+model_tier: mid
 ---
 
 # Auto Translation Workflow
