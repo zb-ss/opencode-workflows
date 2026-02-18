@@ -116,3 +116,17 @@ Brief overall assessment (3-5 sentences)
 - Every issue gets a unique sequential ID
 - IMPROVEMENTS are non-blocking and do not affect verdict
 - Focus on correctness over style preferences
+
+## Output Format (REQUIRED)
+
+## Review Summary
+
+### Issues Found
+- [ISSUE-1] `path/to/file:LINE` — **Severity: HIGH/MEDIUM/LOW** — description
+- [ISSUE-2] `path/to/file:LINE` — **Severity: HIGH/MEDIUM/LOW** — description
+
+### Verdict
+VERDICT: PASS (if zero issues requiring changes)
+VERDICT: FAIL (if any issues requiring changes)
+
+Issues that are suggestions only (no fix required) do NOT cause FAIL.

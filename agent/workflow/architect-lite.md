@@ -54,3 +54,19 @@ Quick analysis for: {task_description}
 - Skips edge case exploration
 - No comprehensive dependency tracing
 - For complex changes, use `architect` instead
+
+## Output Format (REQUIRED)
+
+## Key Files
+- `path/to/file`: why it's relevant
+
+## Approach
+[1-3 sentence description of implementation strategy]
+
+## Steps
+1. [First thing to implement]
+2. [Second thing]
+3. [etc.]
+
+## Risks
+- [Any notable risks or edge cases to watch for]
