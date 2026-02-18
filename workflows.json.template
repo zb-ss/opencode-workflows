@@ -1,28 +1,73 @@
 {
-  "_comment_overview": "OpenCode Workflows Configuration — edit this file to customize model assignments. Run the installer again after changes.",
+  "_comment_overview": "OpenCode Workflows Configuration — edit this file to customize model assignments. Run the installer again after changes to apply.",
 
-  "_comment_model_tiers": "Tier-based model assignment. Each tier is tried in order; first available model wins. Agents use model_tier: low|mid|high in their frontmatter.",
+  "_comment_model_tiers": "Tier-based model assignment. Each tier is an array tried in order; first available model wins. Agents declare their tier in frontmatter (model_tier: low|mid|high). These defaults work out of the box for new users.",
   "model_tiers": {
-    "low":  ["google/gemini-3-flash"],
-    "mid":  ["google/gemini-3-pro", "minimax/m2.5"],
-    "high": ["google/gemini-3-pro", "openai/gpt-5.2"]
+    "low":  ["google/gemini-3-flash", "minimax/m2.5"],
+    "mid":  ["google/gemini-3-pro",   "minimax/m2.5", "zhipu/glm-5"],
+    "high": ["google/gemini-3-pro",   "openai/gpt-5.2", "zhipu/glm-5"]
   },
 
-  "_comment_agent_models": "Per-agent model overrides. Keys are installed agent filenames (without .md). Takes precedence over model_tiers. Keys starting with '_example_' are inactive examples — remove the prefix to activate.",
-  "_comment_primary_agents": "Primary agents: supervisor, editor, focused-build, debug, org-planner, step-planner, discussion, web-tester, figma-builder",
-  "_comment_workflow_agents": "Workflow agents: wf-architect, wf-architect-lite, wf-executor, wf-executor-lite, wf-reviewer, wf-reviewer-lite, wf-reviewer-deep, wf-security, wf-security-lite, wf-security-deep, wf-test-writer, wf-quality-gate, wf-completion-guard, wf-codebase-analyzer, wf-perf-reviewer, wf-perf-lite, wf-doc-writer, wf-explorer, wf-e2e-explorer, wf-e2e-generator, wf-e2e-reviewer",
-  "_comment_translation_agents": "Translation agents: translation-planner, translation-coder, translation-reviewer",
+  "_comment_agent_models": "Per-agent model overrides. Takes precedence over model_tiers. Keys starting with '_example_' are INACTIVE — copy a key and remove the '_example_' prefix to activate it.",
+
+  "_comment_group_primary_high": "── Primary agents (high tier: complex orchestration & planning) ──────────────────────",
+  "_comment_primary_high_note": "These agents handle top-level orchestration. Assign your best reasoning model.",
   "agent_models": {
-    "_example_supervisor":        "openai/gpt-5.2",
-    "_example_wf-reviewer-deep":  "openai/gpt-5.3-codex",
-    "_example_wf-executor":       "minimax/m2.5",
-    "_example_wf-executor-lite":  "minimax/m2.5",
-    "_example_wf-security-deep":  "google/gemini-3-pro",
-    "_example_wf-architect":      "google/gemini-3-pro"
+    "_example_supervisor":           "openai/gpt-5.2",
+    "_example_org-planner":          "openai/gpt-5.2",
+    "_example_step-planner":         "openai/gpt-5.2",
+
+    "_comment_group_primary_mid": "── Primary agents (mid tier: implementation & interaction) ──────────────────────────",
+    "_example_debug":                "google/gemini-3-pro",
+    "_example_discussion":           "google/gemini-3-pro",
+    "_example_editor":               "google/gemini-3-pro",
+    "_example_figma-builder":        "google/gemini-3-pro",
+    "_example_focused-build":        "google/gemini-3-pro",
+    "_example_web-tester":           "google/gemini-3-pro",
+
+    "_comment_group_primary_util": "── Primary utility agents (no fixed tier) ───────────────────────────────────────────",
+    "_comment_util_note": "These agents run as Claude Code agents — they use the OpenCode model setting, not model_tier.",
+    "_example_review":               "google/gemini-3-pro",
+    "_example_security-auditor":     "openai/gpt-5.2",
+    "_example_test-writer":          "google/gemini-3-pro",
+
+    "_comment_group_translation": "── Translation agents ───────────────────────────────────────────────────────────────",
+    "_example_translation-planner":  "google/gemini-3-pro",
+    "_example_translation-coder":    "minimax/m2.5",
+    "_example_translation-reviewer": "google/gemini-3-pro",
+
+    "_comment_group_wf_high": "── Workflow agents (high tier: deep analysis & architecture) ────────────────────────",
+    "_comment_wf_high_note": "Deep review and architecture agents. Assign your strongest code-analysis model.",
+    "_example_wf-architect":         "openai/gpt-5.2",
+    "_example_wf-reviewer-deep":     "openai/gpt-5.3-codex",
+    "_example_wf-security-deep":     "openai/gpt-5.2",
+    "_example_wf-perf-reviewer":     "google/gemini-3-pro",
+
+    "_comment_group_wf_mid": "── Workflow agents (mid tier: standard implementation & review) ─────────────────────",
+    "_example_wf-executor":          "minimax/m2.5",
+    "_example_wf-architect-lite":    "google/gemini-3-pro",
+    "_example_wf-reviewer":          "google/gemini-3-pro",
+    "_example_wf-security":          "google/gemini-3-pro",
+    "_example_wf-test-writer":       "google/gemini-3-pro",
+    "_example_wf-codebase-analyzer": "google/gemini-3-pro",
+    "_example_wf-quality-gate":      "google/gemini-3-pro",
+    "_example_wf-completion-guard":  "google/gemini-3-pro",
+    "_example_wf-e2e-explorer":      "google/gemini-3-pro",
+    "_example_wf-e2e-generator":     "google/gemini-3-pro",
+    "_example_wf-e2e-reviewer":      "google/gemini-3-pro",
+
+    "_comment_group_wf_low": "── Workflow agents (low tier: fast & lightweight) ───────────────────────────────────",
+    "_comment_wf_low_note": "Lite agents run on cheap/fast models. Assign your lowest-cost model here.",
+    "_example_wf-executor-lite":     "minimax/m2.5",
+    "_example_wf-reviewer-lite":     "minimax/m2.5",
+    "_example_wf-security-lite":     "minimax/m2.5",
+    "_example_wf-explorer":          "google/gemini-3-flash",
+    "_example_wf-perf-lite":         "google/gemini-3-flash",
+    "_example_wf-doc-writer":        "google/gemini-3-flash"
   },
 
-  "_comment_fallback": "Fallback model chain tried in order when primary model is unavailable.",
-  "fallback_order": ["google/gemini-3-pro", "minimax/m2.5"],
+  "_comment_fallback": "Fallback model chain tried in order when the primary model is unavailable.",
+  "fallback_order": ["google/gemini-3-pro", "minimax/m2.5", "zhipu/glm-5"],
 
   "_comment_default_mode": "Default workflow execution mode: eco | turbo | standard | thorough | swarm",
   "default_mode": "standard",
@@ -31,9 +76,9 @@
   "swarm_config": {
     "_comment_concurrency": "Global max parallel sessions across all providers",
     "default_concurrency": 4,
-    "_comment_stale": "Cancel session if zero new messages for this duration (milliseconds). Default: 3 minutes",
+    "_comment_stale": "Cancel session if zero new messages for this duration (ms). Default: 3 minutes",
     "stale_timeout_ms": 180000,
-    "_comment_poll": "How often to check session status (milliseconds). Default: 3 seconds",
+    "_comment_poll": "How often to check session status (ms). Default: 3 seconds",
     "poll_interval_ms": 3000,
     "_comment_provider": "Per-provider concurrent session limits. Prevents rate-limit errors.",
     "provider_concurrency": {
@@ -43,7 +88,7 @@
       "minimax":   3,
       "zhipu":     3
     },
-    "_comment_progress": "Cancel session if some progress was seen but it stalled for this duration (milliseconds). Default: 10 minutes",
+    "_comment_progress": "Cancel session if some progress was seen but stalled for this duration (ms). Default: 10 minutes",
     "progress_timeout_ms": 600000
   }
 }
