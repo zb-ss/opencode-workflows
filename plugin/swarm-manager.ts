@@ -218,10 +218,19 @@ export const SwarmManager: Plugin = async ({ client, $ }) => {
                 title: `[${batchId}] ${task.agent}: ${task.id}`,
               });
 
-              // Fire-and-forget prompt
+              // Fire-and-forget prompt — pass model and agent so OpenCode routes correctly
               await client.session.promptAsync({
                 path: { id: session.id },
-                body: { content: task.prompt },
+                body: {
+                  ...(task.model ? {
+                    model: {
+                      providerID: extractProvider(task.model),
+                      modelID: task.model.substring(task.model.indexOf('/') + 1),
+                    }
+                  } : {}),
+                  ...(task.agent ? { agent: task.agent } : {}),
+                  content: task.prompt,
+                },
               });
 
               const now = Date.now();
@@ -411,7 +420,16 @@ export const SwarmManager: Plugin = async ({ client, $ }) => {
               });
               await client.session.promptAsync({
                 path: { id: session.id },
-                body: { content: task.prompt },
+                body: {
+                  ...(task.model ? {
+                    model: {
+                      providerID: extractProvider(task.model),
+                      modelID: task.model.substring(task.model.indexOf('/') + 1),
+                    }
+                  } : {}),
+                  ...(task.agent ? { agent: task.agent } : {}),
+                  content: task.prompt,
+                },
               });
 
               const now = Date.now();
