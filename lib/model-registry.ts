@@ -76,3 +76,13 @@ export function shouldChunkForModel(modelId: string, estimatedTokens: number): b
 export function getModelCapability(modelId: string): ModelCapability | null {
   return MODEL_REGISTRY[modelId] ?? null;
 }
+
+/**
+ * Extract the provider prefix from a model ID (e.g. "google/gemini-3-pro" -> "google").
+ * Returns "unknown" if the model ID contains no slash.
+ */
+export function extractProvider(modelId: string): string {
+  const slashIdx = modelId.indexOf('/');
+  if (slashIdx === -1) return 'unknown';
+  return modelId.substring(0, slashIdx).toLowerCase();
+}

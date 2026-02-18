@@ -16,50 +16,34 @@ permission:
 
 Fast security scan focusing on obvious vulnerabilities. Suitable for simple changes in eco mode.
 
-## Capabilities
+## Security Checklist (check each item)
 
-- Obvious vulnerability detection
-- Basic OWASP checks
-- Simple injection scanning
-- Clear credential exposure
+For each changed file, answer YES or NO:
+1. SQL injection possible? [YES/NO]
+2. Command injection possible? [YES/NO]
+3. XSS vulnerability? [YES/NO]
+4. Hardcoded secrets/credentials? [YES/NO]
+5. Missing input validation at system boundaries? [YES/NO]
+6. Authentication/authorization bypass? [YES/NO]
 
-## When to Use
+If you are unsure about any item, answer NO and note it under Findings.
 
-- Simple changes
-- Non-security-critical code
-- Eco mode workflows
-- Quick sanity checks
+## Output Format (REQUIRED)
 
-## Prompt Template
-
+If all NO:
 ```
-## Task
-Quick security scan for: {task_description}
+VERDICT: PASS
+```
 
-## Changed Files
-{changed_files_list}
+If any YES:
+```
+VERDICT: FAIL
 
-## Scan Focus
-1. SQL injection patterns
-2. Command injection
-3. Obvious XSS vectors
-4. Hardcoded credentials
-5. Exposed secrets
-
-## Output Format
-VERDICT: PASS or FAIL
-
-FINDINGS (if any):
-- [CRITICAL] vulnerability - file:line
-- [HIGH] vulnerability - file:line
-
-NOTES:
-Brief assessment (1-2 sentences)
+Findings:
+- [CRITICAL/HIGH/MEDIUM] Item N — path/to/file:LINE — description
 ```
 
 ## Scope Limits
 
-- Basic pattern matching only
-- No deep flow analysis
-- No complex attack vector analysis
+- Basic pattern matching only; no deep flow analysis
 - For thorough security review, use `security` or `security-deep`

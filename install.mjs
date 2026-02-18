@@ -152,11 +152,11 @@ const MANIFEST_NAME = ".opencode-workflows-manifest.json";
 const ENV_FILE_NAME = "opencode-workflows.env";
 
 /**
- * Load model tier configuration from workflows.json.
+ * Load full workflow configuration from workflows.json.
  * Checks: 1) config dir workflows.json, 2) repo template as fallback.
- * Returns a map of tier -> first model ID, e.g. { high: "zhipu/glm-5", ... }
+ * Returns the full config object including model_tiers, agent_models, swarm_config, etc.
  */
-function loadModelTiers() {
+function loadWorkflowConfig() {
   const configDir = getConfigDir();
   const candidates = [
     path.join(configDir, "workflows.json"),
@@ -168,18 +168,36 @@ function loadModelTiers() {
       const raw = fs.readFileSync(candidate, "utf-8");
       const config = JSON.parse(raw);
       if (config.model_tiers) {
-        const resolved = {};
+        // Build resolved tier map (first model in each tier array)
+        const model_tiers = {};
         for (const [tier, models] of Object.entries(config.model_tiers)) {
           if (Array.isArray(models) && models.length > 0) {
-            resolved[tier] = models[0];
+            model_tiers[tier] = models;
           }
         }
-        if (Object.keys(resolved).length > 0) {
-          console.log(`Model tiers loaded from: ${candidate}`);
-          for (const [tier, model] of Object.entries(resolved)) {
-            console.log(`  ${tier}: ${model}`);
+
+        if (Object.keys(model_tiers).length > 0) {
+          console.log(`Workflow config loaded from: ${candidate}`);
+          for (const [tier, models] of Object.entries(model_tiers)) {
+            console.log(`  ${tier}: ${models[0]}`);
           }
-          return resolved;
+
+          const agentModels = config.agent_models || {};
+          const activeAgentModels = {};
+          for (const [key, val] of Object.entries(agentModels)) {
+            // Skip comment/example keys
+            if (!key.startsWith('_')) {
+              activeAgentModels[key] = val;
+            }
+          }
+
+          return {
+            model_tiers,
+            agent_models: activeAgentModels,
+            fallback_order: config.fallback_order || [],
+            default_mode: config.default_mode || 'standard',
+            swarm_config: config.swarm_config || {},
+          };
         }
       }
     } catch {
@@ -192,11 +210,43 @@ function loadModelTiers() {
 }
 
 /**
+ * Resolve the concrete model to use for a given agent and tier.
+ * Priority: per-agent override in agent_models > first model in tier array.
+ * Returns null if neither is available.
+ */
+function resolveModelForAgent(agentName, tier, config) {
+  // 1. Check per-agent override (skip keys starting with '_')
+  const agentModels = config.agent_models || {};
+  if (agentName && agentModels[agentName]) {
+    const model = agentModels[agentName];
+    // Validate model string: must be provider/model-name format, no newlines or YAML-breaking chars
+    const MODEL_SAFE_RE = /^[a-zA-Z0-9._-]+\/[a-zA-Z0-9._:@-]+$/;
+    if (typeof model === 'string' && MODEL_SAFE_RE.test(model)) {
+      return model;
+    } else if (typeof model === 'string') {
+      console.warn(`  Warning: Invalid or unsafe model format for agent '${agentName}': '${model}' (must match provider/model-name)`);
+    }
+  }
+  // 2. Fall back to tier
+  const tiers = config.model_tiers || {};
+  if (tier && tiers[tier] && tiers[tier].length > 0) {
+    return tiers[tier][0];
+  }
+  return null;
+}
+
+/**
  * Install a file that needs model_tier resolution, replacing model_tier:
  * with model: from config. Always copies (never symlinks) because content
  * is transformed. Used for both agent and command files.
+ *
+ * @param {string} source - Source file path
+ * @param {string} target - Target file path
+ * @param {object|null} config - Full workflow config from loadWorkflowConfig()
+ * @param {boolean} dryRun - Preview mode
+ * @param {string|null} agentName - Agent name for per-agent model override lookup
  */
-function installWithModelResolution(source, target, tierModels, dryRun) {
+function installWithModelResolution(source, target, config, dryRun, agentName = null) {
   const actions = [];
 
   if (!fs.existsSync(source)) {
@@ -219,13 +269,21 @@ function installWithModelResolution(source, target, tierModels, dryRun) {
 
   let content = fs.readFileSync(source, "utf-8");
 
-  if (tierModels) {
+  if (config) {
     // Replace model_tier: <tier> with model: <resolved_model>
     content = content.replace(
       /^(model_tier:\s*)(low|mid|high)\s*$/m,
       (_, _prefix, tier) => {
-        const model = tierModels[tier];
-        return model ? `model: ${model}` : `model_tier: ${tier}`;
+        const resolvedModel = resolveModelForAgent(agentName, tier, config);
+        if (resolvedModel) {
+          // Log per-agent overrides
+          const agentModels = config.agent_models || {};
+          if (agentName && agentModels[agentName] === resolvedModel) {
+            console.log(`  -> ${agentName}: ${resolvedModel} (per-agent override)`);
+          }
+          return `model: ${resolvedModel}`;
+        }
+        return `model_tier: ${tier}`;
       }
     );
   }
@@ -484,15 +542,20 @@ function install(modules, mode, dryRun) {
   if (dryRun) console.log("(dry run — no changes will be made)\n");
   else console.log();
 
-  // Load model tiers for agent model resolution
-  const tierModels = loadModelTiers();
+  // Load full workflow config for agent model resolution
+  const workflowConfig = loadWorkflowConfig();
 
   // Install each file
   for (const { source, target, isAgent, needsModelResolution } of files) {
     // Files with model_tier use copy + resolution (never symlinked)
-    const actions = (isAgent || needsModelResolution)
-      ? installWithModelResolution(source, target, tierModels, dryRun)
-      : installFile(source, target, mode, dryRun);
+    let actions;
+    if (isAgent || needsModelResolution) {
+      // Derive agent name from target basename without extension
+      const agentName = path.basename(target, '.md') || null;
+      actions = installWithModelResolution(source, target, workflowConfig, dryRun, agentName);
+    } else {
+      actions = installFile(source, target, mode, dryRun);
+    }
     allActions.push(...actions);
     for (const a of actions) {
       if (a.action === "symlink" || a.action === "copy") {

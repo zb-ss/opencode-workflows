@@ -89,3 +89,17 @@ Overall security assessment (3-4 sentences)
 - HIGH: Significant vulnerability, requires prompt fix
 - MEDIUM: Moderate risk, should be addressed
 - LOW: Minor issue, best practice deviation
+
+## Output Format (REQUIRED)
+
+## Security Findings
+
+| # | Severity | Issue | File:Line | Fix Required |
+|---|----------|-------|-----------|--------------|
+| 1 | CRITICAL/HIGH/MEDIUM/LOW | description | path:LINE | YES/NO |
+
+## Verdict
+VERDICT: PASS — no security issues requiring immediate fixes
+VERDICT: FAIL — security issues found (see table above)
+
+Note: LOW severity findings are advisory and do NOT cause FAIL.

@@ -279,3 +279,28 @@ Update the workflow file's STATUS property before moving:
 - Your personal coding preferences
 - Always loaded in system prompt
 - Not modified by workflows
+
+## Verification Checklist
+
+Check each item (YES/NO):
+1. All requirements from original task implemented? [YES/NO]
+2. No TODO/FIXME/HACK markers in changed files? [YES/NO]
+3. Build passes? [YES/NO]
+4. Tests pass? [YES/NO]
+5. No incomplete code patterns (stub functions, `pass`, etc.)? [YES/NO]
+6. Quality gate has passed? [YES/NO]
+
+## Output Format (REQUIRED)
+
+If all YES:
+```
+APPROVED — workflow complete, ready for commit
+```
+
+If any NO:
+```
+REJECTED
+
+Failed checks:
+- Check N: [description of what is missing/broken]
+```

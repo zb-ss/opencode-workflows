@@ -164,3 +164,27 @@ Implementation -> Review -> QUALITY GATE -> Post-Fix Review (if changes) -> Comp
                                | FAIL
                                +-- Fix Loop (max 3)
 ```
+
+## Gate Sequence (run in order)
+1. Build/compile check — if fails: attempt auto-fix (max 3 tries)
+2. Type check — if fails: attempt auto-fix (max 3 tries)
+3. Lint check — if fails: attempt auto-fix (max 3 tries)
+4. Test suite — if fails: attempt auto-fix (max 3 tries)
+5. Security scan — advisory only, does not block
+
+## Output Format (REQUIRED)
+
+## Quality Gate Results
+| Check | Status | Notes |
+|-------|--------|-------|
+| Build | PASS/FAIL | |
+| Types | PASS/FAIL | |
+| Lint | PASS/FAIL | |
+| Tests | PASS/FAIL | |
+| Security | PASS/ADVISORY | |
+
+CHANGES_MADE: true/false
+CHANGED_FILES: [list if CHANGES_MADE=true]
+
+VERDICT: PASS — all blocking checks passed
+VERDICT: FAIL — [which check failed and why]

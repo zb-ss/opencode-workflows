@@ -123,6 +123,18 @@ export interface PluginInput {
 }
 
 /**
+ * Swarm mode parallel execution settings from workflows.json.
+ * Controls concurrency limits, staleness detection, and polling intervals.
+ */
+export interface SwarmUserConfig {
+  default_concurrency?: number;
+  stale_timeout_ms?: number;
+  poll_interval_ms?: number;
+  provider_concurrency?: Record<string, number>;
+  progress_timeout_ms?: number;
+}
+
+/**
  * Workflow user config from workflows.json.
  */
 export interface WorkflowUserConfig {
@@ -131,8 +143,25 @@ export interface WorkflowUserConfig {
     mid: string[];
     high: string[];
   };
+  agent_models?: Record<string, string>;
   fallback_order: string[];
   default_mode: string;
+  swarm_config?: SwarmUserConfig;
+}
+
+/**
+ * A session actively tracked by the swarm manager.
+ * Used for concurrency management and staleness detection.
+ */
+export interface TrackedSession {
+  sessionId: string;
+  taskId: string;
+  agent: string;
+  provider: string;
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
+  startedAt: number;
+  lastMessageCount: number;
+  lastProgressAt: number;
 }
 
 /**

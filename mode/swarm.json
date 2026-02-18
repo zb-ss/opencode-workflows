@@ -34,6 +34,7 @@
     "security_escalate_to": "security-deep"
   },
   "swarm": {
+    "_note": "These values set agent-role limits for the supervisor's planning. Runtime concurrency (per-provider slot limits, staleness detection, poll interval) is controlled by swarm_config in ~/.config/opencode/workflows.json — those settings override the hardcoded defaults in swarm-manager.ts.",
     "max_parallel_executors": 4,
     "max_parallel_reviewers": 3,
     "max_parallel_security": 3,
