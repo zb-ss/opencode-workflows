@@ -275,7 +275,7 @@ Update the workflow file's STATUS property before moving:
 - Auto-loaded for ALL sessions (not just workflows)
 - Shared with team via git
 
-**Global `~/.claude/CLAUDE.md`**:
+**Global `~/.config/opencode/CONVENTIONS.md`**:
 - Your personal coding preferences
 - Always loaded in system prompt
 - Not modified by workflows

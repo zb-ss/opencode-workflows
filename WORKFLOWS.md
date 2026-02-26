@@ -535,7 +535,7 @@ Escalate to higher tier agent or manual intervention
 
 ### State File Format
 
-**Location**: `~/.claude/workflows/<session-id>/.state.json`
+**Location**: `~/.config/opencode/workflows/active/<workflow-id>.state.json`
 
 **Structure**:
 ```json
@@ -581,15 +581,14 @@ Escalate to higher tier agent or manual intervention
 
 ### Sidecar Files
 
-Each workflow creates `.state.json` in workflow directory:
+Each workflow creates `.state.json` alongside the `.org` file:
 ```
-~/.claude/workflows/
-├── sess-abc123/
-│   ├── .state.json          # Workflow state
-│   ├── 2026-02-14-jwt-auth.org  # Human-readable org file
-│   └── logs/                # Detailed logs
-└── sess-def456/
-    └── .state.json
+~/.config/opencode/workflows/
+├── active/
+│   ├── 2026-02-14-jwt-auth.state.json  # Machine-readable state
+│   └── 2026-02-14-jwt-auth.org         # Human-readable org file
+└── completed/
+    └── 2026-02-13-user-service.state.json
 ```
 
 ### Session Binding
@@ -798,7 +797,7 @@ View details and fix, then /workflow-resume
 **Solutions**:
 1. Verify supervisor agent exists: `ls ~/.config/opencode/agent/supervisor.md`
 2. Check OpenCode config: `opencode --help`
-3. Ensure workflow directories exist: `mkdir -p ~/.claude/workflows`
+3. Ensure workflow directories exist: `mkdir -p ~/.config/opencode/workflows/active ~/.config/opencode/workflows/completed`
 4. Check for conflicting workflows in session
 
 ### Workflow Stuck
