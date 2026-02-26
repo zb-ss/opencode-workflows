@@ -122,8 +122,19 @@ Read the workflow template using its absolute path:
 | `figma` | `<HOME>/.config/opencode/templates/figma-to-code.org` |
 | `translate` | See Translation section below |
 
-Create workflow state file in: `<HOME>/.config/opencode/workflows/active/`
-Bind session with `workflow_bind_session`.
+Create the workflow `.org` file in: `<HOME>/.config/opencode/workflows/active/`
+Then call `workflow_bind_session` with **named JSON parameters** — this automatically creates the `.state.json` tracking sidecar:
+```json
+{
+  "sessionId": "<session-id>",
+  "workflowPath": "<HOME>/.config/opencode/workflows/active/YYYY-MM-DD-slug.org",
+  "workflowId": "wf-YYYY-MM-DD-NNN",
+  "workflowType": "<type>",
+  "mode": "<mode>",
+  "phases": ["planning", "implementation", "code_review", "security_review", "tests", "quality_gate", "completion_guard"]
+}
+```
+The `phases` array should match the keys from the mode config's `agent_routing` object (loaded in Step 4).
 
 ### Step 8: Execute
 

@@ -29,25 +29,35 @@ You are the supervisor agent. Resume an interrupted workflow.
 ### Instructions
 
 1. **Find Active Workflow(s)**
-   
-   List workflow files in `workflows/active/`
-   
+
+   Resolve the config directory: run `echo $HOME` then use `<HOME>/.config/opencode`.
+   Scan `<HOME>/.config/opencode/workflows/active/` for `.state.json` files.
+   These are the machine-readable tracking files — each has a companion `.org` file.
+
+   If no `.state.json` files found, check for orphaned `.org` files (org files
+   without a matching `.state.json`). If found, report them and suggest running
+   `/workflow` to recreate the tracking state.
+
    If $ARGUMENTS is empty:
    - If only one active workflow: use it
    - If multiple: show list and ask which to resume
    - If none: report "No active workflows found"
-   
+
    If $ARGUMENTS specifies an ID:
-   - Find matching workflow file
+   - Find the matching `.state.json` file (check `workflow_id` field)
    - Report error if not found
 
 2. **Load Workflow State**
-   
-   Read the workflow org file and extract:
-   - Current step (CURRENT_STEP property or first non-DONE step)
-   - Step status (FAILED, IN-PROGRESS, or PENDING)
-   - Previous outputs/artifacts
-   - Any error context from Error Log
+
+   Read the `.state.json` file and extract:
+   - Current phase from `phase.current`
+   - Gate statuses from `gates` object
+   - Execution mode from `mode.current`
+   - Companion `.org` file path from `org_file`
+
+   Also read the `.org` file for human-readable context:
+   - Previous outputs/artifacts from step properties
+   - Any error context from Error Log section
 
 3. **Report Status to User**
    

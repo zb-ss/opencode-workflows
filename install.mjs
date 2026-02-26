@@ -632,9 +632,9 @@ function install(modules, mode, dryRun) {
 
   // Ensure runtime directories exist in repo
   const runtimeDirs = [
-    path.join(REPO_ROOT, "plans"),
-    path.join(REPO_ROOT, "workflows", "active"),
-    path.join(REPO_ROOT, "workflows", "completed"),
+    path.join(configDir, "plans"),
+    path.join(configDir, "workflows", "active"),
+    path.join(configDir, "workflows", "completed"),
   ];
   for (const dir of runtimeDirs) {
     if (!dryRun) {

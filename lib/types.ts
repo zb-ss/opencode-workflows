@@ -147,6 +147,7 @@ export interface WorkflowUserConfig {
   fallback_order: string[];
   default_mode: string;
   swarm_config?: SwarmUserConfig;
+  plans_dir?: string;
 }
 
 /**

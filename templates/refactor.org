@@ -88,7 +88,7 @@ Path: {REPOSITORY}
 Branch: {BRANCH}
 
 ## Requirements
-1. Save the plan to plans/{DATE}-{SLUG}-refactor.org
+1. Save the plan to the plans directory (check `plans_dir` in `~/.config/opencode/workflows.json`, default: `~/.config/opencode/plans/`). Filename: {DATE}-{SLUG}-refactor.org
 2. Break refactoring into small, safe increments
 3. Each increment should:
    - Be independently committable

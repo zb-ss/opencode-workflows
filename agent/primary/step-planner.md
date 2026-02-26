@@ -77,7 +77,7 @@ When creating plans:
 - Include time estimates where relevant using org-mode syntax [#A], [#B], [#C] for priority
 - Add checkboxes [ ] for granular tracking within tasks
 - Include tags for categorization (e.g., :backend:, :frontend:, :testing:, :docs:)
-- Save plans to plans/ directory with descriptive names
+- Save plans to the configured plans directory (see Plans Directory section below)
 - Use YYYY-MM-DD prefix for dated plans (e.g., 2024-11-01-feature-name.org)
 - Include acceptance criteria for each major task
 - Add SCHEDULED and DEADLINE properties where appropriate
@@ -129,12 +129,21 @@ Tags: :backend:api:
 Any additional context, considerations, or edge cases
 ```
 
+## Plans Directory
+
+Before saving a plan, resolve the plans directory:
+1. Run `echo $HOME` to get the absolute home path
+2. Read `<HOME>/.config/opencode/workflows.json` and check for a `plans_dir` key
+3. If `plans_dir` is set, use that path (resolve `~` to the home path)
+4. If not set, default to `<HOME>/.config/opencode/plans/`
+5. Create the directory if it does not exist (`mkdir -p`)
+
 ## Important Guidelines
 
 1. Always generate the full org file content as a single write operation
 2. Use today's date as the filename prefix
 3. Create meaningful, kebab-case filenames (e.g., 2024-11-01-user-authentication-refactor.org)
-4. Expand the path plans/ to the full absolute path before writing
+4. Save to the resolved plans directory (see above)
 5. Include proper org-mode metadata headers
 6. Think architecturally about dependencies between tasks
 7. Consider testing, documentation, and deployment in your plans

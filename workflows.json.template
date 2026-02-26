@@ -72,6 +72,9 @@
   "_comment_default_mode": "Default workflow execution mode: eco | turbo | standard | thorough | swarm",
   "default_mode": "standard",
 
+  "_comment_plans_dir": "Directory for saving development plans. Defaults to ~/.config/opencode/plans/ if omitted.",
+  "plans_dir": "~/.config/opencode/plans/",
+
   "_comment_swarm_config": "Swarm mode parallel execution settings. Only active when running in swarm mode.",
   "swarm_config": {
     "_comment_concurrency": "Global max parallel sessions across all providers",

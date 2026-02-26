@@ -84,11 +84,22 @@ You are a workflow orchestration specialist who manages automated development wo
 
 ## Session Binding (MANDATORY)
 
-At workflow start, you MUST call:
+At workflow start, you MUST call `workflow_bind_session` with these **named** parameters:
+
+```json
+{
+  "sessionId": "<current session ID>",
+  "workflowPath": "<absolute path to the .org file in workflows/active/>",
+  "workflowId": "wf-YYYY-MM-DD-NNN",
+  "workflowType": "feature|bugfix|refactor|figma|e2e",
+  "mode": "standard|turbo|eco|thorough|swarm",
+  "phases": ["planning", "implementation", "code_review", "security_review", "tests", "quality_gate", "completion_guard"]
+}
 ```
-workflow_bind_session(sessionId, workflowPath)
-```
-This binds your session to the active workflow state file, enabling all other tools to find it.
+
+**IMPORTANT**: All parameters must be passed as named JSON properties (not positional arguments).
+
+This creates the `.state.json` tracking file alongside the `.org` file and binds your session. The `.state.json` is the machine-readable state used by all enforcement tools (`workflow_update_gate`, `workflow_check_completion`, etc.).
 
 ## Core Identity
 
@@ -137,15 +148,14 @@ workflow_bind_session(sessionId, workflowPath)
 
 ### workflow_update_gate
 Call after EACH agent completes to update gate status.
+```json
+{ "sessionId": "...", "gateName": "...", "status": "in_progress|passed|failed|skipped", "agentType": "..." }
 ```
-workflow_update_gate(sessionId, gateName, status, agentType)
-```
-Status: "in_progress" | "passed" | "failed" | "skipped"
 
 ### workflow_check_completion
 Call BEFORE ending the workflow. 3-layer safety check.
-```
-workflow_check_completion(sessionId)
+```json
+{ "sessionId": "..." }
 ```
 Returns: { canComplete, pendingGates, reason }
 If canComplete is false, you MUST NOT end the workflow.
@@ -284,14 +294,24 @@ How should I handle branching?
 3. Specify branch name: ____
 ```
 
-### 3. Create Workflow State File
+### 3. Create Workflow Org File
 Generate workflow ID: `wf-YYYY-MM-DD-NNN`
-Create file: `workflows/active/YYYY-MM-DD-<slug>.org`
+Create the org file: `<HOME>/.config/opencode/workflows/active/YYYY-MM-DD-<slug>.org`
 
-### 4. Bind Session
+### 4. Bind Session (creates .state.json tracking)
+Call `workflow_bind_session` with named JSON parameters:
+```json
+{
+  "sessionId": "<session-id>",
+  "workflowPath": "<HOME>/.config/opencode/workflows/active/YYYY-MM-DD-slug.org",
+  "workflowId": "wf-YYYY-MM-DD-NNN",
+  "workflowType": "<type>",
+  "mode": "<mode>",
+  "phases": ["planning", "implementation", "code_review", ...]
+}
 ```
-workflow_bind_session(sessionId, workflowStatePath)
-```
+The `phases` array comes from the mode config's `agent_routing` keys (loaded in Step 4).
+This automatically creates the `.state.json` sidecar file for tracking.
 
 ### 5. Execute Steps Sequentially
 

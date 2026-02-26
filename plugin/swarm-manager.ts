@@ -18,6 +18,7 @@
 import type { Plugin } from "@opencode-ai/plugin"
 import { log } from "../lib/logger.ts"
 import { extractProvider } from "../lib/model-registry.ts"
+import { findActiveStates } from "../lib/state.ts"
 import type { SwarmUserConfig, SwarmTask, TrackedSession } from "../lib/types.ts"
 import fs from "node:fs"
 import path from "node:path"
@@ -152,6 +153,36 @@ class StalenessDetector {
 // Plugin export
 // ---------------------------------------------------------------------------
 
+/**
+ * Build a workflow context prefix to prepend to spawned agent prompts.
+ * Ensures agents always have the correct workflow ID, paths, and phase info.
+ */
+function buildWorkflowContextPrefix(): string {
+  try {
+    const states = findActiveStates()
+    if (states.length === 0) return ''
+
+    const active = states[0]
+    const state = active.state
+
+    return [
+      `## Workflow Context (AUTHORITATIVE — do NOT guess or change these values)`,
+      `- **Workflow ID**: ${state.workflow_id}`,
+      `- **Type**: ${state.workflow_type}`,
+      `- **Mode**: ${state.mode?.current || 'standard'}`,
+      `- **Phase**: ${state.phase?.current || 'unknown'}`,
+      state.org_file ? `- **Org File**: ${state.org_file}` : '',
+      `- **State File**: ${active.path}`,
+      state.workflow?.description ? `- **Description**: ${state.workflow.description}` : '',
+      ``,
+      `Use the exact Workflow ID above in all references. Do NOT invent a different ID.`,
+      ``,
+    ].filter(Boolean).join('\n')
+  } catch {
+    return ''
+  }
+}
+
 export const SwarmManager: Plugin = async ({ client, $ }) => {
   // Load config at plugin initialization
   const swarmConfig = loadSwarmConfig();
@@ -196,6 +227,9 @@ export const SwarmManager: Plugin = async ({ client, $ }) => {
           const spawned: string[] = [];
           const queued: string[] = [];
 
+          // Resolve workflow context once, prepend to all prompts
+          const wfContext = buildWorkflowContextPrefix();
+
           for (const task of tasks) {
             const provider = task.model ? extractProvider(task.model) : 'unknown';
 
@@ -219,6 +253,7 @@ export const SwarmManager: Plugin = async ({ client, $ }) => {
               });
 
               // Fire-and-forget prompt — pass model and agent so OpenCode routes correctly
+              // Prepend workflow context so agent has authoritative IDs/paths
               await client.session.promptAsync({
                 path: { id: session.id },
                 body: {
@@ -229,7 +264,7 @@ export const SwarmManager: Plugin = async ({ client, $ }) => {
                     }
                   } : {}),
                   ...(task.agent ? { agent: task.agent } : {}),
-                  content: task.prompt,
+                  content: wfContext + task.prompt,
                 },
               });
 
@@ -382,6 +417,7 @@ export const SwarmManager: Plugin = async ({ client, $ }) => {
         },
         async execute(args: { workingDir?: string; summary: string; changedFiles: string }) {
           const batchId = `validation-${Date.now()}`;
+          const wfContext = buildWorkflowContextPrefix();
           const tasks: SwarmTask[] = [
             {
               id: 'functional-review',
@@ -428,7 +464,7 @@ export const SwarmManager: Plugin = async ({ client, $ }) => {
                     }
                   } : {}),
                   ...(task.agent ? { agent: task.agent } : {}),
-                  content: task.prompt,
+                  content: wfContext + task.prompt,
                 },
               });
 
