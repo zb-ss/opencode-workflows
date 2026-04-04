@@ -30,3 +30,4 @@ workflows/hook.log
 .idea/
 .vscode/
 /.projectile
+plugin/node_modules/

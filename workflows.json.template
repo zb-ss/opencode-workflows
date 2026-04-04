@@ -75,6 +75,22 @@
   "_comment_plans_dir": "Directory for saving development plans. Defaults to ~/.config/opencode/plans/ if omitted.",
   "plans_dir": "~/.config/opencode/plans/",
 
+  "_comment_delegation": "External CLI delegation settings. Controls model/timeout for delegated prompts to Claude/Gemini CLIs.",
+  "delegation": {
+    "_comment_claude": "Settings for Claude Code CLI delegation. 'model' is passed as --model flag.",
+    "claude": {
+      "_example_model": "sonnet",
+      "_example_timeout_ms": 120000
+    },
+    "_comment_gemini": "Settings for Gemini CLI delegation. 'model' is passed as --model flag.",
+    "gemini": {
+      "_example_model": "gemini-2.5-pro",
+      "_example_timeout_ms": 120000
+    },
+    "_comment_fallback_order": "Provider order for 'auto' mode. First available provider wins.",
+    "fallback_order": ["claude", "gemini"]
+  },
+
   "_comment_swarm_config": "Swarm mode parallel execution settings. Only active when running in swarm mode.",
   "swarm_config": {
     "_comment_concurrency": "Global max parallel sessions across all providers",

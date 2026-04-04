@@ -1,23 +1,9 @@
-/**
- * OpenCode External CLI Delegation Plugin
- *
- * Provides tool wrappers for delegating prompts to official provider CLIs:
- * - Claude Code CLI (`claude`)
- * - Gemini CLI (`gemini`)
- *
- * Design goals:
- * - Headless execution only (stdout/stderr capture)
- * - Non-blocking diagnostics (warn instead of hard-fail where possible)
- * - Safe process spawning (no shell interpolation)
- * - Run metadata persistence for follow-up chaining
- */
-
-import type { Plugin } from '@opencode-ai/plugin'
-import { spawn, spawnSync } from 'node:child_process'
-import crypto from 'node:crypto'
-import fs from 'node:fs'
-import os from 'node:os'
-import path from 'node:path'
+import { tool } from "@opencode-ai/plugin"
+import { spawn, spawnSync } from "node:child_process"
+import crypto from "node:crypto"
+import fs from "node:fs"
+import os from "node:os"
+import path from "node:path"
 
 type Provider = 'claude' | 'gemini'
 type OutputFormat = 'text' | 'json'
@@ -83,6 +69,19 @@ interface DelegationConfig {
   fallback_order?: Provider[]
 }
 
+interface ExecuteDelegationArgs {
+  provider: Provider | 'auto' | string | null | undefined
+  prompt: string | null | undefined
+  outputFormat?: OutputFormat
+  timeoutMs?: number
+  workflowId?: string
+  allowFallback?: boolean
+  fallbackOrder?: Array<Provider | string>
+  resumeToken?: string | null
+  parentRunId?: string | null
+  model?: string | null
+}
+
 const xdg = process.env.XDG_CONFIG_HOME
 const CONFIG_DIR = xdg
   ? path.join(xdg, 'opencode')
@@ -103,12 +102,10 @@ function loadDelegationConfig(): DelegationConfig {
       const section = raw?.delegation
       if (!section || typeof section !== 'object') return {}
 
-      // Resolve _example_ prefixed keys: only active (non-prefixed) keys take effect
       const resolveProviderConfig = (provider: string): { model?: string; timeout_ms?: number } | undefined => {
         const cfg = section[provider]
         if (!cfg || typeof cfg !== 'object') return undefined
         const result: { model?: string; timeout_ms?: number } = {}
-        // Active key takes precedence over _example_ key
         if (typeof cfg.model === 'string') result.model = cfg.model
         else if (typeof cfg._example_model === 'string') { /* skip inactive */ }
         if (typeof cfg.timeout_ms === 'number') result.timeout_ms = cfg.timeout_ms
@@ -163,7 +160,7 @@ function commandExists(command: string): { available: boolean; path: string | nu
       shell: false,
     })
     if (result.status === 0) {
-      const first = (result.stdout || '').split('\n').map(v => v.trim()).find(Boolean) || null
+      const first = (result.stdout || '').split('\n').map((v: string) => v.trim()).find(Boolean) || null
       return { available: true, path: first }
     }
     return { available: false, path: null }
@@ -222,7 +219,6 @@ async function execCommand(command: string, args: string[], timeoutMs: number): 
       } catch {
         // best-effort
       }
-      // If process does not emit close after kill, finish anyway.
       setTimeout(() => finish(null), 250)
     }, timeoutMs)
 
@@ -233,7 +229,6 @@ async function execCommand(command: string, args: string[], timeoutMs: number): 
 }
 
 function detectAuthState(text: string, provider: Provider): 'authenticated' | 'unauthenticated' | 'unknown' {
-  // Claude `auth status` returns JSON: {"loggedIn": true/false, ...}
   if (provider === 'claude') {
     try {
       const json = JSON.parse(text.trim())
@@ -295,8 +290,6 @@ function extractResponseText(responseJson: unknown, fallback: string): string {
   if (typeof responseJson === 'string') return responseJson
   if (responseJson && typeof responseJson === 'object') {
     const obj = responseJson as Record<string, unknown>
-    // Claude JSON: { result: "response text", ... }
-    // Gemini JSON: may use response, output, text, or message
     const candidates = [
       obj.result,
       obj.response,
@@ -340,11 +333,6 @@ function getProviderArgs(
   return getGeminiArgs(prompt, outputFormat, model)
 }
 
-/**
- * Claude CLI: `--print` is a boolean flag (non-interactive mode),
- * prompt is a positional argument, `--resume SESSION_ID` for continuation.
- * Always request JSON output to get session_id for resume capability.
- */
 function getClaudeArgs(
   prompt: string,
   outputFormat: OutputFormat,
@@ -361,20 +349,12 @@ function getClaudeArgs(
     args.push('--model', model)
   }
 
-  // Always use JSON internally for structured parsing + session_id extraction.
-  // We extract the human-readable text from the JSON response.
   args.push('--output-format', 'json')
-
-  // -- separates flags from positional prompt (prevents prompts starting with - from being misinterpreted)
   args.push('--', prompt)
 
   return args
 }
 
-/**
- * Gemini CLI: `--prompt TEXT` takes the prompt as a string value (non-interactive mode).
- * Resume uses `--resume latest|INDEX`, NOT session IDs — native resume is unsupported.
- */
 function getGeminiArgs(
   prompt: string,
   outputFormat: OutputFormat,
@@ -390,7 +370,6 @@ function getGeminiArgs(
     args.push('--output-format', 'json')
   }
 
-  // Gemini uses --prompt as a string option (not a boolean flag like Claude)
   args.push('--prompt', prompt)
 
   return args
@@ -419,7 +398,7 @@ function listRuns(limit: number): DelegationRunRecord[] {
   ensureDirs()
   const safeLimit = Math.max(1, Math.min(limit, 100))
   const files = fs.readdirSync(RUNS_DIR)
-    .filter(name => name.endsWith('.json'))
+    .filter((name: string) => name.endsWith('.json'))
 
   const records: DelegationRunRecord[] = []
   for (const file of files) {
@@ -467,19 +446,16 @@ async function preflightProvider(
   if (versionResult.timed_out) {
     warnings.push(`${provider} --version timed out after ${versionTimeoutMs}ms.`)
   }
-  const versionLine = (versionResult.stdout || versionResult.stderr).split('\n').map(v => v.trim()).find(Boolean)
+  const versionLine = (versionResult.stdout || versionResult.stderr).split('\n').map((v: string) => v.trim()).find(Boolean)
   if (versionLine) {
     version = versionLine
   }
 
-  // Claude: `auth status` returns JSON {"loggedIn": true/false, ...}
-  // Gemini: no dedicated auth subcommand; probe with a minimal headless prompt
   const authProbeCommands: Record<Provider, string[][]> = {
     claude: [
       ['auth', 'status'],
     ],
     gemini: [
-      // Gemini has no auth subcommand. Run a trivial headless prompt to detect auth errors.
       ['--prompt', 'ping', '--output-format', 'text'],
     ],
   }
@@ -498,7 +474,6 @@ async function preflightProvider(
       if (!probeOutput) continue
       authState = detectAuthState(probeOutput, provider)
 
-      // For Gemini's trivial-prompt probe: exit 0 with output means authenticated
       if (provider === 'gemini' && authState === 'unknown') {
         authState = probe.exit_code === 0 && probeOutput.length > 0 ? 'authenticated' : 'unknown'
       }
@@ -555,7 +530,6 @@ async function runAttempt(
     }
   }
 
-  // Gemini does not support session-ID-based resume
   const effectiveResumeToken = provider === 'gemini' ? null : resumeToken
   const warnings: string[] = []
 
@@ -648,8 +622,6 @@ async function runAttempt(
     }
   }
 
-  // Claude always returns JSON (we request --output-format json).
-  // Gemini returns JSON only when explicitly requested.
   const shouldParseJson = provider === 'claude' || outputFormat === 'json'
   let parsed: unknown | null = null
   if (shouldParseJson) {
@@ -663,7 +635,6 @@ async function runAttempt(
 
   const responseText = extractResponseText(parsed, rawText)
 
-  // Claude: is_error flag in JSON means the request failed even with exit 0
   if (provider === 'claude' && parsed && typeof parsed === 'object') {
     const obj = parsed as Record<string, unknown>
     if (obj.is_error === true) {
@@ -741,180 +712,6 @@ function splitArgs(input: string): string[] {
   return tokens
 }
 
-async function executeDelegateCommand(rawInput: string): Promise<Record<string, unknown>> {
-  const input = (rawInput || '').trim()
-  const cleaned = input.startsWith('/delegate ') ? input.slice('/delegate '.length).trim() : input
-  const tokens = splitArgs(cleaned)
-    .map(token => token.trim())
-    .filter(Boolean)
-    .filter(token => !/^\$\d+$/.test(token) && token !== '$ARGUMENTS')
-
-  if (tokens.length === 0) {
-    return {
-      success: false,
-      error: 'Missing subcommand',
-      usage: [
-        '/delegate status [provider] [--auth]',
-        '/delegate ask <provider|auto> <prompt>',
-        '/delegate followup <run-id> <prompt>',
-        '/delegate runs [limit]',
-        '/delegate show <run-id>',
-      ],
-    }
-  }
-
-  const subcommand = tokens[0].toLowerCase()
-
-  if (subcommand === 'status') {
-    const hasAuthFlag = tokens.includes('--auth')
-    const providerToken = tokens.find(t => t === 'claude' || t === 'gemini') as Provider | undefined
-    const providers = providerToken ? [providerToken] : ['claude', 'gemini']
-
-    const checks = await Promise.all(
-      providers.map(provider => preflightProvider(provider, {
-        checkAuth: hasAuthFlag,
-        versionTimeoutMs: 3000,
-        authTimeoutMs: 2500,
-      })),
-    )
-
-    const warnings = checks.flatMap((check) => {
-      const list = (check as Record<string, unknown>).warnings
-      return Array.isArray(list) ? (list as string[]) : []
-    })
-
-    return {
-      success: true,
-      command: 'status',
-      checkAuth: hasAuthFlag,
-      providers: checks,
-      warnings,
-    }
-  }
-
-  if (subcommand === 'ask') {
-    // Extract --model flag if present
-    let model: string | null = null
-    const modelIdx = tokens.indexOf('--model')
-    const filteredTokens = [...tokens]
-    if (modelIdx !== -1 && modelIdx + 1 < filteredTokens.length) {
-      model = filteredTokens[modelIdx + 1]
-      filteredTokens.splice(modelIdx, 2)
-    }
-
-    const maybeProvider = filteredTokens[1]
-    const provider: Provider | 'auto' = maybeProvider === 'claude' || maybeProvider === 'gemini' || maybeProvider === 'auto'
-      ? maybeProvider
-      : 'auto'
-
-    const promptStart = provider === 'auto' && maybeProvider !== 'auto' && maybeProvider !== 'claude' && maybeProvider !== 'gemini'
-      ? 1
-      : 2
-    const prompt = filteredTokens.slice(promptStart).join(' ').trim()
-
-    const result = await executeDelegation({ provider, prompt, model })
-    return {
-      command: 'ask',
-      ...result.payload,
-    }
-  }
-
-  if (subcommand === 'followup') {
-    const runId = tokens[1]
-    const prompt = tokens.slice(2).join(' ').trim()
-    if (!runId || !prompt) {
-      return {
-        success: false,
-        error: 'followup requires <run-id> and <prompt>',
-        usage: '/delegate followup <run-id> <prompt>',
-      }
-    }
-
-    const previous = loadRun(runId)
-    if (!previous) {
-      return { success: false, error: `Run not found: ${runId}` }
-    }
-
-    const useNative = Boolean(previous.resume_token)
-    const composedPrompt = useNative
-      ? prompt
-      : buildStatelessFollowupPrompt(previous, prompt)
-
-    const result = await executeDelegation({
-      provider: previous.provider,
-      prompt: composedPrompt,
-      outputFormat: previous.output_format,
-      timeoutMs: 120000,
-      allowFallback: false,
-      resumeToken: useNative ? previous.resume_token : null,
-      parentRunId: previous.id,
-      workflowId: previous.workflow_id || undefined,
-    })
-
-    return {
-      command: 'followup',
-      followup_of: previous.id,
-      used_native_resume: useNative,
-      ...result.payload,
-    }
-  }
-
-  if (subcommand === 'runs') {
-    const limitToken = tokens[1]
-    const parsed = Number.parseInt(limitToken || '20', 10)
-    const limit = Number.isFinite(parsed) ? parsed : 20
-    const runs = listRuns(limit)
-    return {
-      success: true,
-      command: 'runs',
-      count: runs.length,
-      runs: runs.map(run => ({
-        id: run.id,
-        provider: run.provider,
-        created_at: run.created_at,
-        status: run.status,
-        workflow_id: run.workflow_id,
-        prompt_preview: run.prompt_preview,
-      })),
-    }
-  }
-
-  if (subcommand === 'show') {
-    const runId = tokens[1]
-    if (!runId) {
-      return { success: false, error: 'show requires <run-id>', usage: '/delegate show <run-id>' }
-    }
-    const run = loadRun(runId)
-    if (!run) return { success: false, error: `Run not found: ${runId}` }
-    return { success: true, command: 'show', run }
-  }
-
-  return {
-    success: false,
-    error: `Unknown subcommand: ${subcommand}`,
-    usage: [
-      '/delegate status [provider] [--auth]',
-      '/delegate ask <provider|auto> <prompt>',
-      '/delegate followup <run-id> <prompt>',
-      '/delegate runs [limit]',
-      '/delegate show <run-id>',
-    ],
-  }
-}
-
-interface ExecuteDelegationArgs {
-  provider: Provider | 'auto' | string | null | undefined
-  prompt: string | null | undefined
-  outputFormat?: OutputFormat
-  timeoutMs?: number
-  workflowId?: string
-  allowFallback?: boolean
-  fallbackOrder?: Array<Provider | string>
-  resumeToken?: string | null
-  parentRunId?: string | null
-  model?: string | null
-}
-
 async function executeDelegation(args: ExecuteDelegationArgs): Promise<{ ok: boolean; payload: Record<string, unknown> }> {
   const config = loadDelegationConfig()
   const inputWarnings: string[] = []
@@ -965,7 +762,6 @@ async function executeDelegation(args: ExecuteDelegationArgs): Promise<{ ok: boo
 
   for (let i = 0; i < providers.length; i++) {
     const provider = providers[i]
-    // Resolve model: explicit arg > config per-provider > null (use CLI default)
     const providerConfig = config[provider]
     const model = (args.model ? args.model : providerConfig?.model) || null
     const timeoutMs = providerConfig?.timeout_ms
@@ -1061,213 +857,179 @@ async function executeDelegation(args: ExecuteDelegationArgs): Promise<{ ok: boo
   }
 }
 
-export const ExternalCliDelegation: Plugin = async () => {
-  // Get zod schema builder. Bun's require() resolves from the OpenCode config
-  // node_modules even for symlinked plugins (unlike ESM static import).
-  const { tool: pluginTool } = require('@opencode-ai/plugin')
-  const z = pluginTool.schema
+async function executeDelegateCommand(rawInput: string): Promise<Record<string, unknown>> {
+  const input = (rawInput || '').trim()
+  const cleaned = input.startsWith('/delegate ') ? input.slice('/delegate '.length).trim() : input
+  const tokens = splitArgs(cleaned)
+    .map((token: string) => token.trim())
+    .filter(Boolean)
+    .filter((token: string) => !/^\$\d+$/.test(token) && token !== '$ARGUMENTS')
+
+  if (tokens.length === 0) {
+    return {
+      success: false,
+      error: 'Missing subcommand',
+      usage: [
+        '/delegate status [provider] [--auth]',
+        '/delegate ask <provider|auto> <prompt>',
+        '/delegate followup <run-id> <prompt>',
+        '/delegate runs [limit]',
+        '/delegate show <run-id>',
+      ],
+    }
+  }
+
+  const subcommand = tokens[0].toLowerCase()
+
+  if (subcommand === 'status') {
+    const hasAuthFlag = tokens.includes('--auth')
+    const providerToken = tokens.find((t: string) => t === 'claude' || t === 'gemini') as Provider | undefined
+    const providers = providerToken ? [providerToken] : ['claude', 'gemini']
+
+    const checks = await Promise.all(
+      providers.map((provider: string) => preflightProvider(provider as Provider, {
+        checkAuth: hasAuthFlag,
+        versionTimeoutMs: 3000,
+        authTimeoutMs: 2500,
+      })),
+    )
+
+    const warnings = checks.flatMap((check) => {
+      const list = (check as Record<string, unknown>).warnings
+      return Array.isArray(list) ? (list as string[]) : []
+    })
+
+    return {
+      success: true,
+      command: 'status',
+      checkAuth: hasAuthFlag,
+      providers: checks,
+      warnings,
+    }
+  }
+
+  if (subcommand === 'ask') {
+    let model: string | null = null
+    const modelIdx = tokens.indexOf('--model')
+    const filteredTokens = [...tokens]
+    if (modelIdx !== -1 && modelIdx + 1 < filteredTokens.length) {
+      model = filteredTokens[modelIdx + 1]
+      filteredTokens.splice(modelIdx, 2)
+    }
+
+    const maybeProvider = filteredTokens[1]
+    const provider: Provider | 'auto' = maybeProvider === 'claude' || maybeProvider === 'gemini' || maybeProvider === 'auto'
+      ? maybeProvider
+      : 'auto'
+
+    const promptStart = provider === 'auto' && maybeProvider !== 'auto' && maybeProvider !== 'claude' && maybeProvider !== 'gemini'
+      ? 1
+      : 2
+    const prompt = filteredTokens.slice(promptStart).join(' ').trim()
+
+    const result = await executeDelegation({ provider, prompt, model })
+    return {
+      command: 'ask',
+      ...result.payload,
+    }
+  }
+
+  if (subcommand === 'followup') {
+    const runId = tokens[1]
+    const prompt = tokens.slice(2).join(' ').trim()
+    if (!runId || !prompt) {
+      return {
+        success: false,
+        error: 'followup requires <run-id> and <prompt>',
+        usage: '/delegate followup <run-id> <prompt>',
+      }
+    }
+
+    const previous = loadRun(runId)
+    if (!previous) {
+      return { success: false, error: `Run not found: ${runId}` }
+    }
+
+    const useNative = Boolean(previous.resume_token)
+    const composedPrompt = useNative
+      ? prompt
+      : buildStatelessFollowupPrompt(previous, prompt)
+
+    const result = await executeDelegation({
+      provider: previous.provider,
+      prompt: composedPrompt,
+      outputFormat: previous.output_format,
+      timeoutMs: 120000,
+      allowFallback: false,
+      resumeToken: useNative ? previous.resume_token : null,
+      parentRunId: previous.id,
+      workflowId: previous.workflow_id || undefined,
+    })
+
+    return {
+      command: 'followup',
+      followup_of: previous.id,
+      used_native_resume: useNative,
+      ...result.payload,
+    }
+  }
+
+  if (subcommand === 'runs') {
+    const limitToken = tokens[1]
+    const parsed = Number.parseInt(limitToken || '20', 10)
+    const limit = Number.isFinite(parsed) ? parsed : 20
+    const runs = listRuns(limit)
+    return {
+      success: true,
+      command: 'runs',
+      count: runs.length,
+      runs: runs.map((run: DelegationRunRecord) => ({
+        id: run.id,
+        provider: run.provider,
+        created_at: run.created_at,
+        status: run.status,
+        workflow_id: run.workflow_id,
+        prompt_preview: run.prompt_preview,
+      })),
+    }
+  }
+
+  if (subcommand === 'show') {
+    const runId = tokens[1]
+    if (!runId) {
+      return { success: false, error: 'show requires <run-id>', usage: '/delegate show <run-id>' }
+    }
+    const run = loadRun(runId)
+    if (!run) return { success: false, error: `Run not found: ${runId}` }
+    return { success: true, command: 'show', run }
+  }
 
   return {
-    tool: {
-      delegate_command: {
-        description: 'Execute a /delegate subcommand. Pass the full command string in "input" (e.g. "status claude --auth", "ask auto Summarize this repo").',
-        args: {
-          input: z.string().default('').describe('Raw arguments string, e.g. "status claude --auth" or "ask claude Explain the auth flow"'),
-        },
-        async execute(args: { input?: string }) {
-          try {
-            const input = (args?.input || '').trim()
-            const result = await executeDelegateCommand(input)
-            return JSON.stringify(result, null, 2)
-          } catch (err: unknown) {
-            const message = err instanceof Error ? err.message : String(err)
-            return JSON.stringify({ success: false, error: `delegate_command crashed: ${message}` })
-          }
-        },
-      },
-
-      delegate_preflight: {
-        description: 'Check external CLI delegation readiness for Claude and Gemini CLIs.',
-        args: {
-          providers: z.string().optional().describe('Comma-separated providers to check (claude,gemini). Defaults to both.'),
-          checkAuth: z.boolean().optional().describe('Whether to probe provider auth state'),
-        },
-        async execute(args) {
-          const requestedProviders = (args.providers || '').split(',').map(s => s.trim()).filter(Boolean)
-          const providers = requestedProviders
-            .filter((provider): provider is Provider => provider === 'claude' || provider === 'gemini')
-
-          const finalProviders: string[] = providers.length > 0 ? providers : ['claude', 'gemini']
-          const warningsFromInput: string[] = []
-
-          if (requestedProviders.length > 0 && providers.length !== requestedProviders.length) {
-            warningsFromInput.push('Some invalid providers were ignored. Valid values: claude, gemini.')
-          }
-
-          const checks = await Promise.all(
-            finalProviders.map(provider => preflightProvider(provider as Provider, {
-              checkAuth: args.checkAuth !== false,
-              versionTimeoutMs: 3000,
-              authTimeoutMs: 2500,
-            })),
-          )
-
-          const warnings = checks.flatMap((check) => {
-            const list = (check as Record<string, unknown>).warnings
-            return Array.isArray(list) ? (list as string[]) : []
-          })
-
-          return JSON.stringify({
-            success: true,
-            checked_at: nowIso(),
-            providers: checks,
-            warnings: [...warningsFromInput, ...warnings],
-          }, null, 2)
-        },
-      },
-
-      delegate_run: {
-        description: 'Run a prompt through Claude CLI, Gemini CLI, or auto-fallback and persist metadata.',
-        args: {
-          provider: z.string().describe('Target provider: claude, gemini, or auto'),
-          prompt: z.string().describe('Prompt to send to provider CLI'),
-          outputFormat: z.string().optional().describe('Output format: text or json'),
-          timeoutMs: z.number().optional().describe('Process timeout in milliseconds'),
-          workflowId: z.string().optional().describe('Optional workflow ID for traceability'),
-          allowFallback: z.boolean().optional().describe('Allow fallback to next provider on failure'),
-          resumeToken: z.string().optional().describe('Optional provider-native session token for resume'),
-          parentRunId: z.string().optional().describe('Optional run ID that this invocation follows'),
-          model: z.string().optional().describe('Model override for the provider CLI (e.g. "sonnet", "gemini-2.5-pro")'),
-        },
-        async execute(args) {
-          const result = await executeDelegation({
-            provider: args.provider as Provider | 'auto',
-            prompt: args.prompt,
-            outputFormat: args.outputFormat as OutputFormat | undefined,
-            timeoutMs: args.timeoutMs,
-            workflowId: args.workflowId,
-            allowFallback: args.allowFallback,
-            resumeToken: args.resumeToken || null,
-            parentRunId: args.parentRunId || null,
-            model: args.model || null,
-          })
-
-          return JSON.stringify(result.payload, null, 2)
-        },
-      },
-
-      delegate_followup: {
-        description: 'Send a follow-up prompt based on a previous delegation run.',
-        args: {
-          runId: z.string().describe('Previous run ID to continue from'),
-          prompt: z.string().describe('Follow-up prompt'),
-          outputFormat: z.string().optional().describe('Output format: text or json'),
-          timeoutMs: z.number().optional().describe('Process timeout in milliseconds'),
-          preferNativeResume: z.boolean().optional().describe('Try provider-native resume first if token exists'),
-        },
-        async execute(args) {
-          const previous = loadRun(args.runId)
-          if (!previous) {
-            return JSON.stringify({ success: false, error: `Run not found: ${args.runId}` }, null, 2)
-          }
-
-          const preferNative = args.preferNativeResume !== false
-          let useNative = false
-          let composedPrompt = args.prompt
-          let resumeToken: string | null = null
-          const warnings: string[] = []
-
-          if (preferNative && previous.resume_token) {
-            useNative = true
-            resumeToken = previous.resume_token
-          } else {
-            composedPrompt = buildStatelessFollowupPrompt(previous, args.prompt)
-            warnings.push('Stateless follow-up fallback used (no provider resume token available).')
-          }
-
-          const result = await executeDelegation({
-            provider: previous.provider,
-            prompt: composedPrompt,
-            outputFormat: (args.outputFormat as OutputFormat) || previous.output_format,
-            timeoutMs: args.timeoutMs || 120000,
-            workflowId: previous.workflow_id || undefined,
-            allowFallback: false,
-            resumeToken,
-            parentRunId: previous.id,
-          })
-
-          if (!result.ok) {
-            return JSON.stringify({
-              success: false,
-              error: 'Follow-up delegation failed',
-              used_native_resume: useNative,
-              warnings,
-              provider: previous.provider,
-              details: result.payload,
-            }, null, 2)
-          }
-
-          const parsed = result.payload
-
-          const mergedWarnings = [
-            ...warnings,
-            ...((Array.isArray(parsed.warnings) ? parsed.warnings : []) as string[]),
-          ]
-
-          return JSON.stringify({
-            ...parsed,
-            followup_of: previous.id,
-            used_native_resume: useNative,
-            warnings: mergedWarnings,
-          }, null, 2)
-        },
-      },
-
-      delegate_get_run: {
-        description: 'Get a stored delegation run record by ID.',
-        args: {
-          runId: z.string().describe('Delegation run ID'),
-        },
-        async execute(args) {
-          const run = loadRun(args.runId)
-          if (!run) {
-            return JSON.stringify({ success: false, error: `Run not found: ${args.runId}` }, null, 2)
-          }
-
-          return JSON.stringify({
-            success: true,
-            run,
-          }, null, 2)
-        },
-      },
-
-      delegate_list_runs: {
-        description: 'List recent delegation runs.',
-        args: {
-          limit: z.number().optional().describe('Maximum records to return (1-100)'),
-        },
-        async execute(args) {
-          const limit = args?.limit || 20
-          const runs = listRuns(limit)
-
-          return JSON.stringify({
-            success: true,
-            count: runs.length,
-            runs: runs.map(run => ({
-              id: run.id,
-              provider: run.provider,
-              created_at: run.created_at,
-              status: run.status,
-              workflow_id: run.workflow_id,
-              parent_run_id: run.parent_run_id,
-              prompt_preview: run.prompt_preview,
-              warnings: run.warnings,
-            })),
-          }, null, 2)
-        },
-      },
-    },
+    success: false,
+    error: `Unknown subcommand: ${subcommand}`,
+    usage: [
+      '/delegate status [provider] [--auth]',
+      '/delegate ask <provider|auto> <prompt>',
+      '/delegate followup <run-id> <prompt>',
+      '/delegate runs [limit]',
+      '/delegate show <run-id>',
+    ],
   }
 }
 
-export default ExternalCliDelegation
+export default tool({
+  description: 'Execute a /delegate subcommand. Pass the full command string in "input" (e.g. "status claude --auth", "ask auto Summarize this repo").',
+  args: {
+    input: tool.schema.string().default('').describe('Raw arguments string, e.g. "status claude --auth" or "ask claude Explain the auth flow"'),
+  },
+  async execute(args) {
+    try {
+      const input = (args?.input || '').trim()
+      const result = await executeDelegateCommand(input)
+      return JSON.stringify(result, null, 2)
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err)
+      return JSON.stringify({ success: false, error: `delegate_command crashed: ${message}` })
+    }
+  },
+})

@@ -20,6 +20,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import { execSync } from "node:child_process";
 
 // ---------------------------------------------------------------------------
 // Module definitions
@@ -93,12 +94,14 @@ const MODULES = {
       "bash-conventions",
       "python-conventions",
     ],
+    tools: [
+      "delegate_command.ts",
+    ],
     plugins: [
       "workflow-notifications.ts",
       "workflow-enforcer.ts",
       "file-validator.ts",
       "model-router.ts",
-      "external-cli-delegation.ts",
       "swarm-manager.ts",
       "package.json",
     ],
@@ -635,11 +638,14 @@ function buildFileList(modules) {
       }
     }
 
+    // Tools import @opencode-ai/plugin at runtime and must resolve from the config
+    // directory's node_modules. Always copy (never symlink) to avoid resolution issues.
     if (def.tools) {
       for (const f of def.tools) {
         files.push({
           source: path.join(REPO_ROOT, "tool", f),
           target: path.join(configDir, "tool", f),
+          forceCopy: true,
         });
       }
     }
@@ -694,7 +700,7 @@ function install(modules, mode, dryRun, options = {}) {
   const workflowConfig = modelStrategy === "resolve" ? loadWorkflowConfig() : null;
 
   // Install each file
-  for (const { source, target, isAgent, needsModelResolution } of files) {
+  for (const { source, target, isAgent, needsModelResolution, forceCopy } of files) {
     // Files with model_tier use copy + resolution (never symlinked)
     let actions;
     if (isAgent || needsModelResolution) {
@@ -702,7 +708,8 @@ function install(modules, mode, dryRun, options = {}) {
       const agentName = path.basename(target, '.md') || null;
       actions = installWithModelResolution(source, target, workflowConfig, dryRun, agentName, modelStrategy);
     } else {
-      actions = installFile(source, target, mode, dryRun);
+      // Tools with runtime imports must be copied so they resolve from config dir
+      actions = installFile(source, target, forceCopy ? "copy" : mode, dryRun);
     }
     allActions.push(...actions);
     for (const a of actions) {
@@ -846,6 +853,44 @@ function install(modules, mode, dryRun, options = {}) {
     const manifestPath = path.join(configDir, MANIFEST_NAME);
     fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
     allActions.push({ action: "write", target: manifestPath });
+  }
+
+  // Install plugin dependencies (zod, etc.) so plugins can resolve imports.
+  // In symlink mode, module resolution follows the symlink target path (the repo),
+  // so we also install deps in the repo's plugin/ directory.
+  // In copy mode, the config dir's node_modules suffice since files are local.
+  const pluginsDir = path.join(configDir, "plugins");
+  const pluginPkgJson = path.join(pluginsDir, "package.json");
+  if (!dryRun && fs.existsSync(pluginPkgJson)) {
+    // Always install in the config plugins dir
+    try {
+      execSync("npm install --no-audit --no-fund --silent", {
+        cwd: pluginsDir,
+        stdio: "pipe",
+        timeout: 30000,
+      });
+      allActions.push({ action: "npm-install", path: pluginsDir });
+    } catch (e) {
+      console.warn(`Warning: npm install in ${pluginsDir} failed: ${e.message}`);
+    }
+    // In symlink mode, Bun resolves imports from the symlink target (the repo).
+    // Install deps at both the repo root and plugin/ dir for reliable resolution.
+    if (mode === "symlink") {
+      for (const depDir of [REPO_ROOT, path.join(REPO_ROOT, "plugin")]) {
+        const pkg = path.join(depDir, "package.json");
+        if (!fs.existsSync(pkg)) continue;
+        try {
+          execSync("npm install --no-audit --no-fund --silent", {
+            cwd: depDir,
+            stdio: "pipe",
+            timeout: 30000,
+          });
+          allActions.push({ action: "npm-install", path: depDir });
+        } catch (e) {
+          console.warn(`Warning: npm install in ${depDir} failed: ${e.message}`);
+        }
+      }
+    }
   }
 
   // Print summary
@@ -1017,11 +1062,14 @@ function printSummary(actions, modules, mode, dryRun, modelStrategy = "resolve")
     console.log("  4. Start OpenCode and verify agents are available");
     if (mode === "symlink") {
       console.log(
-        "\nTo update: just `git pull` — symlinks track repo changes automatically."
+        "\nTo update: just `git pull` — symlinks track most changes automatically."
+      );
+      console.log(
+        "Note: tools are always copied. Re-run installer after tool changes."
       );
     } else {
       console.log(
-        "\nTo update: `git pull && node install.mjs --copy`"
+        "\nTo update: `git pull && node install.mjs`"
       );
     }
     console.log("To uninstall: `node install.mjs --uninstall`");
@@ -1037,7 +1085,7 @@ Usage:
   node install.mjs [options]
 
 Options:
-  --copy              Use copy mode instead of symlinks (default: symlink)
+  --symlink           Use symlink mode instead of copies (for development only)
   --runtime-models    Do not materialize model_tier; use OpenCode runtime model config
   --no-model-resolve  Alias for --runtime-models
   --all               Install all modules (core + translate)
@@ -1060,8 +1108,8 @@ Features (core module):
   - Skills for framework-specific conventions
 
 Examples:
-  node install.mjs                       # Install core with symlinks
-  node install.mjs --copy                # Install core with copies
+  node install.mjs                       # Install core (copy mode, default)
+  node install.mjs --symlink             # Install with symlinks (dev only)
   node install.mjs --runtime-models      # Keep model selection in opencode.jsonc
   node install.mjs --all                 # Install everything
   node install.mjs --module translate    # Add translate module
@@ -1083,8 +1131,8 @@ function main() {
   }
 
   const dryRun = args.includes("--dry-run");
-  const copyMode = args.includes("--copy");
-  const mode = copyMode ? "copy" : "symlink";
+  const symlinkMode = args.includes("--symlink");
+  const mode = symlinkMode ? "symlink" : "copy";
   const runtimeModels = args.includes("--runtime-models") || args.includes("--no-model-resolve");
   const modelStrategy = runtimeModels ? "strip" : "resolve";
   const doUninstall = args.includes("--uninstall");

@@ -17,7 +17,7 @@ Supported providers:
 ```bash
 /delegate status [provider]
 /delegate status [provider] --auth
-/delegate ask <provider|auto> <prompt>
+/delegate ask <provider|auto> [--model <model>] <prompt>
 /delegate followup <run-id> <prompt>
 /delegate runs [limit]
 /delegate show <run-id>
@@ -68,9 +68,39 @@ Workflows should not crash solely because delegation is unavailable.
 
 If no token is available, it falls back to stateless follow-up by prepending prior context. The fallback is explicitly reported in warnings.
 
+## Model configuration
+
+Default models can be configured per-provider in `~/.config/opencode/workflows.json`:
+
+```json
+{
+  "delegation": {
+    "claude": { "model": "sonnet", "timeout_ms": 120000 },
+    "gemini": { "model": "gemini-2.5-pro", "timeout_ms": 120000 },
+    "fallback_order": ["claude", "gemini"]
+  }
+}
+```
+
+Per-request override: `/delegate ask claude --model opus "your prompt"`
+
+## Provider differences
+
+| Feature | Claude CLI | Gemini CLI |
+|---------|-----------|------------|
+| Non-interactive | `--print` (flag) + positional prompt | `--prompt TEXT` (option) |
+| JSON output | `--output-format json` | `--output-format json` |
+| Resume | `--resume SESSION_ID` | Not supported (stateless fallback) |
+| Auth check | `claude auth status` (JSON) | Probe with minimal prompt |
+| Model flag | `--model sonnet` | `--model gemini-2.5-pro` |
+
+Claude always uses JSON output internally for reliable response parsing and session ID extraction.
+Gemini does not support session-based resume — follow-ups always use stateless context injection.
+
 ## Security notes
 
 - Commands are spawned without shell interpolation (`shell: false`).
+- Prompts use `--` separator to prevent flag injection (Claude).
 - Run metadata is stored locally under:
   - `~/.config/opencode/workflows/context/delegation/runs/*.json`
 - Prompts and responses are truncated for storage safety.
