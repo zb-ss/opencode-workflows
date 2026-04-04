@@ -1,9 +1,12 @@
 ---
 description: "Test generation following project conventions"
+model_tier: mid
 mode: subagent
-temperature: 0.2
+temperature: 0.1
 steps: 20
 permission:
+  external_directory:
+    "~/.config/opencode/**": allow
   edit: allow
   write: allow
   read: allow

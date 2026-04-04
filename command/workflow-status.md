@@ -1,6 +1,7 @@
 ---
 description: Show workflow status: /workflow-status [workflow-id]
 agent: supervisor
+model_tier: mid
 ---
 
 Display the status of active workflows.

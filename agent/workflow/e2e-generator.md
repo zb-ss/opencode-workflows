@@ -1,9 +1,12 @@
 ---
 description: "Generates Playwright E2E test specs from app exploration maps"
+model_tier: mid
 mode: subagent
-temperature: 0.2
+temperature: 0.1
 steps: 25
 permission:
+  external_directory:
+    "~/.config/opencode/**": allow
   edit: allow
   write: allow
   read: allow

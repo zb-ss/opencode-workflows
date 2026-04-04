@@ -1,6 +1,7 @@
 ---
 description: Create plan: /plan <feature-or-task>
 agent: org-planner
+model_tier: low
 ---
 
 Create a comprehensive development plan for: $ARGUMENTS

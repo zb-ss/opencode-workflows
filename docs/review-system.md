@@ -303,21 +303,21 @@ All issues resolved. Code meets quality standards.
 
 ## Configuration
 
-Configure review behavior in `opencode.jsonc`:
+Review iterations and escalation are configured per-mode in `mode/*.json`:
 
-```jsonc
+```json
 {
-  "workflows": {
-    "review": {
-      "zero_tolerance": true,
-      "max_iterations": {
-        "lite": 2,
-        "standard": 3,
-        "deep": 5
-      },
-      "auto_escalate": true,
-      "escalation_chain": ["reviewer-lite", "reviewer", "reviewer-deep"]
+  "settings": {
+    "max_review_iterations": 3,
+    "max_security_iterations": 2,
+    "escalation": {
+      "review_after": 2,
+      "review_escalate_to": "reviewer-deep",
+      "security_after": 1,
+      "security_escalate_to": "security-deep"
     }
   }
 }
 ```
+
+See `mode/standard.json`, `mode/thorough.json`, etc. for mode-specific defaults.

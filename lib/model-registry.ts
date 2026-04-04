@@ -2,15 +2,34 @@
  * Model capability database and tier resolution.
  * Maps model IDs to capabilities and resolves abstract tiers
  * to concrete models based on user configuration.
+ *
+ * This registry is used for tier inference in the model-router plugin.
+ * Models not listed here still work — the router falls back to keyword
+ * matching (e.g., "flash" → mid, "pro" → high). Add entries here to
+ * override the default keyword-based inference or set specific context
+ * window limits.
+ *
+ * Entries use provider families rather than exact versions so they
+ * remain valid as providers release new model versions.
  */
 
 import type { ModelCapability, ModelTier, WorkflowUserConfig } from './types.ts';
 
 export const MODEL_REGISTRY: Record<string, ModelCapability> = {
+  // Zhipu AI — GLM family
   'glm-5':          { id: 'glm-5', provider: 'zhipu', tier: 'high', contextWindow: 200_000, apiFormat: 'openai', costTier: 'standard' },
+  'glm-4':          { id: 'glm-4', provider: 'zhipu', tier: 'mid', contextWindow: 128_000, apiFormat: 'openai', costTier: 'budget' },
+
+  // MiniMax — M family
   'minimax-m2.5':   { id: 'minimax-m2.5', provider: 'minimax', tier: 'high', contextWindow: 200_000, apiFormat: 'openai', costTier: 'budget' },
+
+  // Google — Gemini family
   'gemini-3-pro':   { id: 'gemini-3-pro', provider: 'google', tier: 'high', contextWindow: 1_000_000, apiFormat: 'google', costTier: 'standard' },
   'gemini-3-flash': { id: 'gemini-3-flash', provider: 'google', tier: 'mid', contextWindow: 1_000_000, apiFormat: 'google', costTier: 'budget' },
+
+  // OpenAI — GPT family
+  'gpt-5.3':        { id: 'gpt-5.3', provider: 'openai', tier: 'high', contextWindow: 1_000_000, apiFormat: 'openai', costTier: 'premium' },
+  'gpt-5.2':        { id: 'gpt-5.2', provider: 'openai', tier: 'high', contextWindow: 1_000_000, apiFormat: 'openai', costTier: 'premium' },
   'gpt-4.1':        { id: 'gpt-4.1', provider: 'openai', tier: 'high', contextWindow: 1_000_000, apiFormat: 'openai', costTier: 'premium' },
   'gpt-4.1-mini':   { id: 'gpt-4.1-mini', provider: 'openai', tier: 'mid', contextWindow: 1_000_000, apiFormat: 'openai', costTier: 'budget' },
   'gpt-4.1-nano':   { id: 'gpt-4.1-nano', provider: 'openai', tier: 'low', contextWindow: 1_000_000, apiFormat: 'openai', costTier: 'budget' },
@@ -56,4 +75,14 @@ export function shouldChunkForModel(modelId: string, estimatedTokens: number): b
  */
 export function getModelCapability(modelId: string): ModelCapability | null {
   return MODEL_REGISTRY[modelId] ?? null;
+}
+
+/**
+ * Extract the provider prefix from a model ID (e.g. "google/gemini-3-pro" -> "google").
+ * Returns "unknown" if the model ID contains no slash.
+ */
+export function extractProvider(modelId: string): string {
+  const slashIdx = modelId.indexOf('/');
+  if (slashIdx === -1) return 'unknown';
+  return modelId.substring(0, slashIdx).toLowerCase();
 }

@@ -229,22 +229,23 @@ Overhead > benefit for small tasks
 
 ## Configuration
 
-Configure swarm behavior in `opencode.jsonc`:
+Swarm behavior is configured in `mode/swarm.json`:
 
-```jsonc
+```json
 {
-  "workflows": {
+  "settings": {
+    "parallel_execution": true,
     "swarm": {
-      "enabled": true,
-      "max_parallel_agents": 4,
-      "validation_consensus": "2/3",
-      "sdk_path": "/path/to/@opencode-ai/sdk",
-      "fallback_to_cli": true,
-      "timeout_per_agent": 300000
+      "max_parallel_executors": 4,
+      "max_parallel_reviewers": 3,
+      "max_parallel_security": 2,
+      "validation_architects": 3
     }
   }
 }
 ```
+
+Model tiers for swarm agents are configured in `~/.config/opencode/workflows.json`.
 
 ## Example: Full Swarm Workflow
 

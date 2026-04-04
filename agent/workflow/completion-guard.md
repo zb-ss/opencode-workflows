@@ -1,9 +1,12 @@
 ---
 description: "Final architect verification before workflow completion - MANDATORY sign-off"
+model_tier: mid
 mode: subagent
-temperature: 0.2
+temperature: 0.1
 steps: 12
 permission:
+  external_directory:
+    "~/.config/opencode/**": allow
   read: allow
   grep: allow
   glob: allow
@@ -272,7 +275,32 @@ Update the workflow file's STATUS property before moving:
 - Auto-loaded for ALL sessions (not just workflows)
 - Shared with team via git
 
-**Global `~/.claude/CLAUDE.md`**:
+**Global `~/.config/opencode/CONVENTIONS.md`**:
 - Your personal coding preferences
 - Always loaded in system prompt
 - Not modified by workflows
+
+## Verification Checklist
+
+Check each item (YES/NO):
+1. All requirements from original task implemented? [YES/NO]
+2. No TODO/FIXME/HACK markers in changed files? [YES/NO]
+3. Build passes? [YES/NO]
+4. Tests pass? [YES/NO]
+5. No incomplete code patterns (stub functions, `pass`, etc.)? [YES/NO]
+6. Quality gate has passed? [YES/NO]
+
+## Output Format (REQUIRED)
+
+If all YES:
+```
+APPROVED — workflow complete, ready for commit
+```
+
+If any NO:
+```
+REJECTED
+
+Failed checks:
+- Check N: [description of what is missing/broken]
+```

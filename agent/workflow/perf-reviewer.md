@@ -1,9 +1,12 @@
 ---
 description: "Performance review with optimization suggestions"
+model_tier: high
 mode: subagent
-temperature: 0.2
+temperature: 0.1
 steps: 10
 permission:
+  external_directory:
+    "~/.config/opencode/**": allow
   read: allow
   grep: allow
   glob: allow

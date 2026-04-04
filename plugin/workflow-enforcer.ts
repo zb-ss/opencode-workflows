@@ -26,8 +26,10 @@ import {
   findActiveStates,
   findOrphanedOrgFiles,
   writeSessionMarker,
+  createInitialState,
 } from "../lib/state.ts"
 import { getGateForAgent, PHASE_ORDER } from "../lib/mode-rules.ts"
+import path from "node:path"
 import { log } from "../lib/logger.ts"
 import type { GateStatus } from "../lib/types.ts"
 
@@ -69,7 +71,7 @@ export const WorkflowEnforcer: Plugin = async ({ client, directory }) => {
       }
     },
 
-    // Inject workflow context into agent system prompts
+    // Inject workflow context into ALL agent system prompts (including child sessions)
     "experimental.chat.system.transform": async ({ agent, output }) => {
       try {
         const states = findActiveStates()
@@ -81,14 +83,22 @@ export const WorkflowEnforcer: Plugin = async ({ client, directory }) => {
         const nextPhase = getNextPhase(state)
 
         const context = [
-          `\n\n--- WORKFLOW CONTEXT ---`,
-          `Workflow: ${state.workflow_id} (${state.workflow_type})`,
+          `\n\n--- WORKFLOW CONTEXT (AUTHORITATIVE — use these values, do NOT infer or guess) ---`,
+          `Workflow ID: ${state.workflow_id}`,
+          `Workflow Type: ${state.workflow_type}`,
           `Mode: ${state.mode?.current || 'standard'}`,
-          `Phase: ${state.phase?.current || 'unknown'}`,
-          `Pending gates: ${pending.map(g => g.name).join(', ') || 'none'}`,
-          nextPhase ? `Next phase: ${nextPhase}` : 'All phases complete',
+          `Current Phase: ${state.phase?.current || 'unknown'}`,
+          `Completed Phases: ${(state.phase?.completed || []).join(', ') || 'none'}`,
+          `Pending Gates: ${pending.map(g => g.name).join(', ') || 'none'}`,
+          nextPhase ? `Next Phase: ${nextPhase}` : 'All phases complete',
+          `State File: ${active.path}`,
+          state.org_file ? `Org File: ${state.org_file}` : '',
+          state.workflow?.description ? `Description: ${state.workflow.description}` : '',
+          ``,
+          `IMPORTANT: When referencing this workflow, you MUST use the exact Workflow ID above.`,
+          `Do NOT invent, guess, or substitute a different workflow ID.`,
           `--- END WORKFLOW CONTEXT ---\n`,
-        ].join('\n')
+        ].filter(Boolean).join('\n')
 
         output.system = (output.system || '') + context
       } catch {
@@ -231,24 +241,72 @@ export const WorkflowEnforcer: Plugin = async ({ client, directory }) => {
       },
 
       workflow_bind_session: {
-        description: "Bind the current session to a workflow. Call this at workflow start.",
+        description: "Bind the current session to a workflow. Creates .state.json tracking file if given an .org path. Call this at workflow start.",
         parameters: {
           type: "object",
           properties: {
             sessionId: { type: "string", description: "Current session ID" },
-            workflowPath: { type: "string", description: "Path to the workflow .state.json file" }
+            workflowPath: { type: "string", description: "Path to the workflow .org file or .state.json file" },
+            workflowId: { type: "string", description: "Workflow ID (e.g., wf-2026-02-26-001)" },
+            workflowType: { type: "string", description: "Workflow type (feature, bugfix, refactor, figma, e2e)" },
+            mode: { type: "string", description: "Execution mode (standard, turbo, eco, thorough, swarm)" },
+            phases: {
+              type: "array",
+              items: { type: "string" },
+              description: "Ordered list of gate names (e.g., ['planning', 'implementation', 'code_review', ...])"
+            }
           },
           required: ["sessionId", "workflowPath"]
         },
-        async execute(args: { sessionId: string; workflowPath: string }) {
-          const state = readState(args.workflowPath)
-          const workflowId = state?.workflow_id || null
+        async execute(args: {
+          sessionId: string;
+          workflowPath: string;
+          workflowId?: string;
+          workflowType?: string;
+          mode?: string;
+          phases?: string[];
+        }) {
+          if (!args.workflowPath || typeof args.workflowPath !== 'string') {
+            return "Error: workflowPath is required. Provide the path to the workflow .org or .state.json file."
+          }
+          let statePath = args.workflowPath
 
-          const success = bindSessionToWorkflow(args.sessionId, args.workflowPath, workflowId)
+          // If path points to an org/md file, create or find the .state.json sidecar
+          if (statePath.endsWith('.org') || statePath.endsWith('.md')) {
+            const derivedStatePath = statePath.replace(/\.(org|md)$/, '.state.json')
+
+            // Try to read existing state first
+            const existingState = readState(derivedStatePath)
+            if (existingState) {
+              statePath = derivedStatePath
+            } else {
+              // Create initial state alongside the org file
+              const created = createInitialState(
+                statePath,
+                args.workflowId || path.basename(statePath, path.extname(statePath)),
+                args.workflowType || 'unknown',
+                args.mode || 'standard',
+                args.phases || PHASE_ORDER,
+              )
+              if (created) {
+                statePath = created
+              } else {
+                log('enforcer', `Failed to create .state.json for ${statePath}`)
+                return "Failed to create workflow state file"
+              }
+            }
+          }
+
+          const state = readState(statePath)
+          const workflowId = state?.workflow_id || args.workflowId || null
+
+          const success = bindSessionToWorkflow(args.sessionId, statePath, workflowId)
           writeSessionMarker(args.sessionId)
 
-          log('enforcer', `Session ${args.sessionId} bound to workflow ${workflowId}`)
-          return success ? `Session bound to workflow ${workflowId}` : "Failed to bind session"
+          log('enforcer', `Session ${args.sessionId} bound to workflow ${workflowId} at ${statePath}`)
+          return success
+            ? `Session bound to workflow ${workflowId} (state: ${statePath})`
+            : "Failed to bind session"
         }
       },
 

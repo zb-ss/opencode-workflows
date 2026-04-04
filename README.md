@@ -10,7 +10,7 @@ A comprehensive collection of agents, commands, skills, plugins, and workflow te
 - **5 Execution Modes**: eco, turbo, standard, thorough, swarm
 - **5 Plugins**: workflow-enforcer, file-validator, model-router, swarm-manager, external-cli-delegation
 - **Zero-Tolerance Review**: [ISSUE-N] tracking with auto-escalation
-- **Model-Agnostic**: GLM-5, MiniMax M2.5, Gemini 3 Pro/Flash, GPT-4.1
+- **Model-Agnostic**: Works with any LLM provider (tested on Zhipu, MiniMax, Google, OpenAI)
 - **E2E Testing Pipeline**: 6-phase Playwright workflow with accessibility-first selectors
 - **Parallel Execution**: SDK-based swarm mode for 3-5x speed improvement
 - **13 Skills**: PHP, Laravel, Vue, Joomla, Symfony, API design, and more
@@ -18,6 +18,17 @@ A comprehensive collection of agents, commands, skills, plugins, and workflow te
 
 ## Quick Start
 
+**Linux/macOS**:
+```bash
+curl -fsSL https://raw.githubusercontent.com/zb-ss/opencode-workflows/master/bootstrap.mjs | node --input-type=module
+```
+
+**Windows (PowerShell)**:
+```powershell
+curl.exe -fsSL https://raw.githubusercontent.com/zb-ss/opencode-workflows/master/bootstrap.mjs | node --input-type=module
+```
+
+Or clone manually:
 ```bash
 git clone https://github.com/zb-ss/opencode-workflows.git ~/projects/opencode-workflows
 cd ~/projects/opencode-workflows
@@ -79,48 +90,27 @@ node install.mjs
 
 ## Configuration
 
-Customize `~/.config/opencode/opencode.jsonc`:
+Configure model tiers in `~/.config/opencode/workflows.json`:
 
-```jsonc
+```json
 {
-  "$schema": "https://opencode.ai/config.json",
-  "model": "google/gemini-3-pro",
-  "small_model": "google/gemini-3-flash",
-  "agent": {
-    "supervisor": { "model": "google/gemini-3-pro" },
-    "org-planner": { "model": "zhipu/glm-5" },
-    "delegator": { "model": "google/gemini-3-pro" },
-    "web-tester": {
-      "tools": {
-        "playwright_*": true,
-        "chrome-devtools_*": true
-      }
-    }
-  }
+  "model_tiers": {
+    "low":  ["google/gemini-3-flash", "minimax/m2.5"],
+    "mid":  ["minimax/m2.5", "zhipu/glm-5", "google/gemini-3-pro"],
+    "high": ["zhipu/glm-5", "google/gemini-3-pro", "openai/gpt-5.2"]
+  },
+  "fallback_order": ["minimax/m2.5", "zhipu/glm-5", "google/gemini-3-pro"],
+  "default_mode": "standard"
 }
 ```
 
-### Centralized model control
+Each tier is an array — first model is preferred, rest are fallbacks. Use any model ID your provider supports. Swarm and review settings are configured per-mode in `mode/*.json`. See [WORKFLOWS.md](./WORKFLOWS.md) for mode configuration.
 
-This repository now keeps model selection centralized in OpenCode config (instead of hardcoded command frontmatter).
+### Model configuration modes
 
-- Set global defaults with `model` and `small_model`
-- Override specific agents in `agent.<name>.model`
-- Commands inherit the model of their configured agent
-
-Example:
-
-```jsonc
-{
-  "model": "google/gemini-3-pro",
-  "small_model": "google/gemini-3-flash",
-  "agent": {
-    "supervisor": { "model": "google/gemini-3-pro" },
-    "org-planner": { "model": "zhipu/glm-5" },
-    "delegator": { "model": "google/gemini-3-pro" }
-  }
-}
-```
+- Default installer mode (`node install.mjs`) resolves `model_tier` into concrete `model:` values from `workflows.json`.
+- Runtime model mode (`node install.mjs --runtime-models`) strips `model_tier` and lets OpenCode use `opencode.jsonc` (`model`, `small_model`, `agent.<name>.model`).
+- Use default mode for repository-level tiered orchestration consistency; use runtime mode for simpler per-user model switching in OpenCode.
 
 ## Documentation
 
@@ -219,18 +209,6 @@ The `/delegate` command lets you run official provider CLIs in headless mode and
 - [OpenCode](https://opencode.ai) installed
 - [Node.js](https://nodejs.org/) v18+
 
-### One-Liner
-
-**Linux/macOS**:
-```bash
-curl -fsSL https://raw.githubusercontent.com/zb-ss/opencode-workflows/main/bootstrap.mjs | node --input-type=module
-```
-
-**Windows (PowerShell)**:
-```powershell
-curl.exe -fsSL https://raw.githubusercontent.com/zb-ss/opencode-workflows/main/bootstrap.mjs | node --input-type=module
-```
-
 ### Manual Install
 
 ```bash
@@ -239,11 +217,14 @@ cd opencode-workflows
 node install.mjs
 ```
 
+Both methods install the **core** module via symlinks into `~/.config/opencode/`. On Windows, copy mode is used by default since symlinks require Developer Mode.
+
 ### Install Options
 
 ```bash
 node install.mjs                  # Core (symlinks)
 node install.mjs --copy           # Core (copies)
+node install.mjs --runtime-models # Do not materialize model_tier (use opencode.jsonc models)
 node install.mjs --all            # Core + translate module
 node install.mjs --dry-run        # Preview
 node install.mjs --uninstall      # Remove
@@ -253,6 +234,38 @@ Installer backup policy:
 
 - Keeps a single backup per managed path (`*.backup`)
 - Removes older legacy timestamped backups (`*.backup.<timestamp>`) on reinstall
+
+### Bootstrap Environment Variables
+
+The bootstrap installer supports the following environment variables:
+
+- `INSTALL_DIR=~/my/path` — Custom clone location (default: `~/.local/share/opencode-workflows`)
+- `INSTALL_MODE=copy` — Copy files instead of symlinks
+- `INSTALL_MODULES=all` — Install all modules including translate
+
+Example:
+```bash
+INSTALL_DIR=~/projects/opencode-workflows curl -fsSL https://raw.githubusercontent.com/zb-ss/opencode-workflows/master/bootstrap.mjs | node --input-type=module
+```
+
+### Post-Install
+
+1. Review/edit `~/.config/opencode/opencode.jsonc` for MCP servers and permissions
+2. Configure models in `~/.config/opencode/workflows.json` (or in `opencode.jsonc` if installed with `--runtime-models`)
+3. Start OpenCode and verify agents are available
+
+### Updating
+
+- **Symlink mode** (default): `git pull` — changes propagate automatically
+- **Copy mode**: `git pull && node install.mjs --copy`
+
+### Uninstalling
+
+```bash
+node install.mjs --uninstall
+```
+
+Removes all installed symlinks/copies and the manifest. Your `opencode.jsonc` is never removed.
 
 ### Modules
 

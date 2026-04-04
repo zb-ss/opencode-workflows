@@ -1,6 +1,7 @@
 ---
 description: Translate one view: /translate-view <next|view_path>
 agent: translation-coder
+model_tier: mid
 ---
 
 Process a single Joomla view file for translation.

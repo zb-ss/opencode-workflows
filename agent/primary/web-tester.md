@@ -1,8 +1,11 @@
 ---
 description: Tests, debugs, and automates web applications using browser tools
+model_tier: mid
 mode: primary
-temperature: 0.3
+temperature: 0.2
 permission:
+  external_directory:
+    "~/.config/opencode/**": allow
   write: ask
   edit: ask
   bash:

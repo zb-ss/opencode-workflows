@@ -20,6 +20,7 @@ const CONFIG_DIR = xdg
 export const WORKFLOWS_DIR = path.join(CONFIG_DIR, 'workflows');
 export const ACTIVE_DIR = path.join(WORKFLOWS_DIR, 'active');
 export const COMPLETED_DIR = path.join(WORKFLOWS_DIR, 'completed');
+export const PLANS_DIR = path.join(CONFIG_DIR, 'plans');
 
 /**
  * Validate a file path to prevent traversal attacks.
@@ -90,6 +91,49 @@ export function writeState(statePath: string, obj: WorkflowState): boolean {
     try { fs.unlinkSync(tmpPath); } catch {}
     return false;
   }
+}
+
+/**
+ * Create an initial .state.json for a new workflow.
+ * Derives the state file path from the org file path by replacing the extension.
+ * Returns the state file path on success, null on error.
+ */
+export function createInitialState(
+  orgFilePath: string,
+  workflowId: string,
+  workflowType: string,
+  mode: string,
+  phases: string[],
+): string | null {
+  const stateFilePath = orgFilePath.replace(/\.(org|md)$/, '.state.json');
+
+  const validated = validatePath(stateFilePath);
+  if (!validated) return null;
+
+  // Don't overwrite existing state
+  if (fs.existsSync(validated)) return validated;
+
+  const gates: Record<string, { status: 'pending'; iteration: number }> = {};
+  for (const phase of phases) {
+    gates[phase] = { status: 'pending', iteration: 0 };
+  }
+
+  const state: WorkflowState = {
+    workflow_id: workflowId,
+    workflow_type: workflowType,
+    phase: {
+      current: phases[0] || 'unknown',
+      completed: [],
+      remaining: [...phases],
+    },
+    gates,
+    agent_log: [],
+    mode: { current: mode },
+    updated_at: new Date().toISOString(),
+    org_file: orgFilePath,
+  };
+
+  return writeState(validated, state) ? validated : null;
 }
 
 /**

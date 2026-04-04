@@ -1,9 +1,12 @@
 ---
 description: "Documentation updates for code changes"
+model_tier: low
 mode: subagent
 temperature: 0.2
 steps: 10
 permission:
+  external_directory:
+    "~/.config/opencode/**": allow
   edit: allow
   write: allow
   read: allow

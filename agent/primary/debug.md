@@ -1,8 +1,11 @@
 ---
 description: Systematic bug hunting and root cause analysis without codebase pollution
+model_tier: mid
 mode: primary
 temperature: 0.4
 permission:
+  external_directory:
+    "~/.config/opencode/**": allow
   write:
     "*.md": ask
     "README.md": allow

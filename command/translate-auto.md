@@ -1,6 +1,7 @@
 ---
 description: Auto-translate Joomla component: /translate-auto <component> <target>
 agent: supervisor
+model_tier: mid
 ---
 
 # Auto Translation Workflow
