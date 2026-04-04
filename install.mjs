@@ -28,6 +28,7 @@ const MODULES = {
   core: {
     agents_primary: [
       "primary/supervisor.md",
+      "primary/delegator.md",
       "primary/editor.md",
       "primary/focused-build.md",
       "primary/debug.md",
@@ -62,11 +63,19 @@ const MODULES = {
     ],
     commands: [
       "plan.md",
+      "delegate.md",
+      "git-commit.md",
+      "git-pr.md",
+      "git-pr-checkout.md",
+      "git-pr-review.md",
+      "git-pr-merge.md",
+      "git-release.md",
+      "git-issue.md",
+      "git-browse.md",
+      "git-workflow-run.md",
       "workflow.md",
       "workflow-resume.md",
       "workflow-status.md",
-      "commit.md",
-      "pr.md",
     ],
     skills: [
       "php-conventions",
@@ -88,6 +97,7 @@ const MODULES = {
       "workflow-enforcer.ts",
       "file-validator.ts",
       "model-router.ts",
+      "external-cli-delegation.ts",
       "swarm-manager.ts",
       "package.json",
     ],
@@ -151,8 +161,102 @@ function getConfigDir() {
 const MANIFEST_NAME = ".opencode-workflows-manifest.json";
 const ENV_FILE_NAME = "opencode-workflows.env";
 
-function timestamp() {
-  return new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+/** Remove old timestamped backups from previous installer versions */
+function cleanupLegacyBackups(target) {
+  try {
+    const dir = path.dirname(target);
+    const base = path.basename(target);
+    const legacyPrefix = `${base}.backup.`;
+
+    for (const entry of fs.readdirSync(dir)) {
+      if (entry.startsWith(legacyPrefix)) {
+        removePath(path.join(dir, entry));
+      }
+    }
+  } catch {
+    // best-effort cleanup
+  }
+}
+
+/**
+ * Normalize old timestamped backups across config dir.
+ * Keeps at most one backup per base path as `<target>.backup`.
+ */
+function normalizeLegacyBackups(configDir, dryRun) {
+  const actions = [];
+
+  if (!fs.existsSync(configDir)) return actions;
+
+  /** @type {Map<string, Array<{path: string, mtimeMs: number}>>} */
+  const groups = new Map();
+
+  function walk(dir) {
+    let entries = [];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry.name);
+
+      if (entry.isDirectory()) {
+        walk(fullPath);
+        continue;
+      }
+
+      const marker = ".backup.";
+      const idx = entry.name.indexOf(marker);
+      if (idx === -1) continue;
+
+      const baseName = entry.name.slice(0, idx);
+      if (!baseName) continue;
+
+      let mtimeMs = 0;
+      try {
+        mtimeMs = fs.lstatSync(fullPath).mtimeMs;
+      } catch {
+        // ignore stat failures
+      }
+
+      const basePath = path.join(dir, baseName);
+      if (!groups.has(basePath)) groups.set(basePath, []);
+      groups.get(basePath).push({ path: fullPath, mtimeMs });
+    }
+  }
+
+  walk(configDir);
+
+  for (const [basePath, entries] of groups.entries()) {
+    const canonical = `${basePath}.backup`;
+    entries.sort((a, b) => b.mtimeMs - a.mtimeMs);
+
+    const canonicalExists = fs.existsSync(canonical);
+    let startDeleteAt = 0;
+
+    if (!canonicalExists && entries.length > 0) {
+      const latest = entries[0];
+      if (dryRun) {
+        actions.push({ action: "backup-normalize", from: latest.path, to: canonical, dryRun: true });
+      } else {
+        fs.renameSync(latest.path, canonical);
+        actions.push({ action: "backup-normalize", from: latest.path, to: canonical });
+      }
+      startDeleteAt = 1;
+    }
+
+    for (let i = startDeleteAt; i < entries.length; i++) {
+      const legacy = entries[i].path;
+      if (dryRun) {
+        actions.push({ action: "backup-clean", target: legacy, dryRun: true });
+      } else if (removePath(legacy)) {
+        actions.push({ action: "backup-clean", target: legacy });
+      }
+    }
+  }
+
+  return actions;
 }
 
 /** Recursively copy a directory */
@@ -188,9 +292,13 @@ function backupIfNeeded(target) {
     return null; // doesn't exist, nothing to back up
   }
 
+  cleanupLegacyBackups(target);
+
   if (isOurSymlink(target)) return null; // our own symlink, safe to replace
 
-  const backup = `${target}.backup.${timestamp()}`;
+  // Keep exactly one backup per target path.
+  const backup = `${target}.backup`;
+  removePath(backup);
   fs.renameSync(target, backup);
   return backup;
 }
@@ -386,12 +494,29 @@ function install(modules, mode, dryRun) {
   const files = buildFileList(modules);
   const allActions = [];
   const installedTargets = [];
+  const previousManifestPath = path.join(configDir, MANIFEST_NAME);
+  let previousManagedTargets = [];
+
+  if (fs.existsSync(previousManifestPath)) {
+    try {
+      const previousManifest = JSON.parse(fs.readFileSync(previousManifestPath, "utf-8"));
+      if (Array.isArray(previousManifest.files)) {
+        previousManagedTargets = previousManifest.files;
+      }
+    } catch {
+      // best-effort; ignore invalid manifest
+    }
+  }
 
   console.log(`\nInstalling modules: ${modules.join(", ")}`);
   console.log(`Mode: ${mode}`);
   console.log(`Config dir: ${configDir}`);
   if (dryRun) console.log("(dry run — no changes will be made)\n");
   else console.log();
+
+  // Normalize legacy timestamped backups before install.
+  const backupCleanupActions = normalizeLegacyBackups(configDir, dryRun);
+  allActions.push(...backupCleanupActions);
 
   // Install each file
   for (const { source, target } of files) {
@@ -466,6 +591,22 @@ function install(modules, mode, dryRun) {
     installedTargets.push(envTarget);
   }
   allActions.push({ action: "write", target: envTarget, content: envContent });
+
+  // Remove stale managed files from previous installs (eg removed commands)
+  const currentManaged = new Set(installedTargets);
+  for (const oldTarget of previousManagedTargets) {
+    if (currentManaged.has(oldTarget)) continue;
+    if (path.basename(oldTarget) === "opencode.jsonc" || path.basename(oldTarget) === "opencode.json") continue;
+
+    if (dryRun) {
+      allActions.push({ action: "remove", target: oldTarget, note: "stale managed file", dryRun: true });
+      continue;
+    }
+
+    if (removePath(oldTarget)) {
+      allActions.push({ action: "remove", target: oldTarget, note: "stale managed file" });
+    }
+  }
 
   // Write manifest
   if (!dryRun) {
@@ -574,6 +715,9 @@ function printSummary(actions, modules, mode, dryRun) {
   const symlinks = actions.filter((a) => a.action === "symlink");
   const copies = actions.filter((a) => a.action === "copy");
   const backups = actions.filter((a) => a.action === "backup");
+  const backupNormalized = actions.filter((a) => a.action === "backup-normalize");
+  const backupCleaned = actions.filter((a) => a.action === "backup-clean");
+  const removed = actions.filter((a) => a.action === "remove");
   const skips = actions.filter((a) => a.action === "skip");
   const dirs = actions.filter((a) => a.action === "mkdir");
 
@@ -587,6 +731,27 @@ function printSummary(actions, modules, mode, dryRun) {
     console.log(`\nBacked up: ${backups.length} existing files`);
     for (const b of backups) {
       console.log(`  ${b.original} → ${b.backup}`);
+    }
+  }
+
+  const totalBackupCleanup = backupNormalized.length + backupCleaned.length;
+  if (totalBackupCleanup > 0) {
+    console.log(`\nLegacy backup cleanup: ${totalBackupCleanup} items`);
+    for (const a of backupNormalized) {
+      const prefix = dryRun ? "[dry-run] " : "";
+      console.log(`  ${prefix}normalize: ${a.from} → ${a.to}`);
+    }
+    for (const a of backupCleaned) {
+      const prefix = dryRun ? "[dry-run] " : "";
+      console.log(`  ${prefix}remove: ${a.target}`);
+    }
+  }
+
+  if (removed.length > 0) {
+    console.log(`\nRemoved stale managed files: ${removed.length}`);
+    for (const r of removed) {
+      const prefix = dryRun ? "[dry-run] " : "";
+      console.log(`  ${prefix}${r.target}`);
     }
   }
 

@@ -1,7 +1,6 @@
 ---
-description: Show status of active workflows
+description: Show workflow status: /workflow-status [workflow-id]
 agent: supervisor
-model: anthropic/claude-sonnet-4-5
 ---
 
 Display the status of active workflows.

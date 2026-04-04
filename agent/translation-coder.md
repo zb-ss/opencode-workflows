@@ -1,7 +1,6 @@
 ---
 description: Translates Joomla language files with context-aware, locale-specific translations
 mode: subagent
-model: anthropic/claude-sonnet-4-5
 temperature: 0.1
 tools:
   write: true

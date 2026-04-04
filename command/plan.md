@@ -1,7 +1,6 @@
 ---
-description: Create a detailed development plan saved as an org file
+description: Create plan: /plan <feature-or-task>
 agent: org-planner
-model: anthropic/claude-haiku-4-5
 ---
 
 Create a comprehensive development plan for: $ARGUMENTS

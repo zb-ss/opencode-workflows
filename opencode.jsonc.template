@@ -4,6 +4,10 @@
     "CONVENTIONS.md"
   ],
 
+  // Global model defaults (official OpenCode keys)
+  "model": "google/gemini-3-pro",
+  "small_model": "google/gemini-3-flash",
+
   // MCP servers - add your own here
   // See: https://opencode.ai/docs/config/mcp
   //
@@ -40,30 +44,33 @@
   // Example: "github_*": false
   "tools": {},
 
-  // Workflow configuration (read by workflow plugins)
-  // Customize model tiers based on your API access
-  "workflows": {
-    "model_tiers": {
-      "low":  ["google/gemini-3-flash", "minimax/m2.5"],
-      "mid":  ["minimax/m2.5", "zhipu/glm-5", "google/gemini-3-pro"],
-      "high": ["zhipu/glm-5", "google/gemini-3-pro", "openai/gpt-4.1"]
-    },
-    "fallback_order": ["minimax/m2.5", "zhipu/glm-5", "google/gemini-3-pro"],
-    "default_mode": "standard"
-  },
-
-  // Per-agent tool access and permission overrides
+  // Centralized model configuration
+  //
+  // 1) Set a global default model + small model
+  // "model": "google/gemini-3-pro",
+  // "small_model": "google/gemini-3-flash",
+  //
+  // 2) Override per-agent model in one place
+  //    (recommended: commands in this repository intentionally do not pin models)
   //
   // "agent": {
-  //   "discussion": {
-  //     "tools": { "github_*": true }
-  //   },
-  //   "web-tester": {
-  //     "tools": { "playwright_*": true, "chrome-devtools_*": true }
-  //   },
-  //   "commit": {
-  //     "permission": { "bash": { "git commit*": "allow" } }
-  //   }
-  // }
-  "agent": {}
+  //   "build": { "model": "google/gemini-3-flash" },
+  //   "supervisor": { "model": "google/gemini-3-pro" },
+  //   "org-planner": { "model": "zhipu/glm-5" },
+  //   "delegator": { "model": "google/gemini-3-pro" }
+  // },
+  //
+  // 3) Commands inherit their configured agent model.
+  //    (Use command-level overrides only when defining full command templates in config.)
+
+  // Per-agent model/tool/permission overrides
+  //
+  "agent": {
+    // "supervisor": { "model": "google/gemini-3-pro" },
+    // "org-planner": { "model": "zhipu/glm-5" },
+    // "delegator": { "model": "google/gemini-3-pro" },
+    // "web-tester": {
+    //   "tools": { "playwright_*": true, "chrome-devtools_*": true }
+    // }
+  }
 }

@@ -1,7 +1,6 @@
 ---
-description: Process a single view file for translation (part of translation workflow)
+description: Translate one view: /translate-view <next|view_path>
 agent: translation-coder
-model: anthropic/claude-sonnet-4-5
 ---
 
 Process a single Joomla view file for translation.

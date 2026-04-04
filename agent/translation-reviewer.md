@@ -1,7 +1,6 @@
 ---
 description: Reviews Joomla translations for accuracy, completeness, and placeholder preservation
 mode: subagent
-model: anthropic/claude-opus-4-5
 temperature: 0.1
 tools:
   write: true

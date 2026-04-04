@@ -1,8 +1,8 @@
 # Agent Reference
 
-Complete documentation for all 30 agents in OpenCode Workflows v2.0.
+Complete documentation for all 31 agents in OpenCode Workflows v2.0.
 
-## Primary Agents (9)
+## Primary Agents (10)
 
 ### org-planner
 
@@ -194,6 +194,35 @@ Orchestrates multi-step automated workflows from start to finish.
 ```bash
 /workflow feature Add JWT authentication
 /workflow e2e http://localhost:3000 "Test checkout"
+```
+
+---
+
+### delegator
+
+Delegates prompts to official Claude and Gemini CLIs in headless mode.
+
+- **Model**: mid tier
+- **Temperature**: 0.2
+- **Permissions**: Read-only + delegation tools
+
+**When to Use**:
+- Preflight checks for external CLI readiness
+- Delegating one-off prompts to provider CLIs
+- Chaining follow-up prompts with run metadata
+- Comparing provider responses in automation flows
+
+**Key Features**:
+- Warning-first diagnostics (binary/auth/readiness)
+- Provider routing (`claude`, `gemini`, `auto`)
+- Run persistence for follow-ups and auditability
+- Stateless fallback when native resume is unavailable
+
+**Usage**:
+```bash
+/delegate status
+/delegate ask auto "Summarize this repository"
+/delegate followup <run-id> "Now focus on security"
 ```
 
 ---
@@ -636,6 +665,7 @@ Quick feature                      → focused-build
 Critical production change         → editor
 Bug investigation                  → debug
 Automated workflow                 → supervisor
+External CLI delegation            → delegator
 Figma to code                      → figma-builder
 E2E testing                        → web-tester
 ```

@@ -1,7 +1,6 @@
 ---
-description: Resume an interrupted workflow
+description: Resume workflow: /workflow-resume [workflow-id]
 agent: supervisor
-model: anthropic/claude-sonnet-4-5
 ---
 
 Resume a paused or interrupted workflow.

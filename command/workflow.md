@@ -1,7 +1,6 @@
 ---
-description: Start an automated development workflow
+description: Start workflow: /workflow <type> <description>
 agent: supervisor
-model: anthropic/claude-sonnet-4-5
 ---
 
 Start a new automated workflow.

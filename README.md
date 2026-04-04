@@ -6,15 +6,15 @@ A comprehensive collection of agents, commands, skills, plugins, and workflow te
 
 ## Features
 
-- **30 Agents**: 9 primary + 21 workflow specialists
+- **31 Agents**: 10 primary + 21 workflow specialists
 - **5 Execution Modes**: eco, turbo, standard, thorough, swarm
-- **4 Enforcement Plugins**: workflow-enforcer, file-validator, model-router, swarm-manager
+- **5 Plugins**: workflow-enforcer, file-validator, model-router, swarm-manager, external-cli-delegation
 - **Zero-Tolerance Review**: [ISSUE-N] tracking with auto-escalation
 - **Model-Agnostic**: GLM-5, MiniMax M2.5, Gemini 3 Pro/Flash, GPT-4.1
 - **E2E Testing Pipeline**: 6-phase Playwright workflow with accessibility-first selectors
 - **Parallel Execution**: SDK-based swarm mode for 3-5x speed improvement
 - **13 Skills**: PHP, Laravel, Vue, Joomla, Symfony, API design, and more
-- **6 Commands, 6 Templates**: Complete automation toolkit
+- **14 Commands, 6 Templates**: Complete automation toolkit
 
 ## Quick Start
 
@@ -36,7 +36,7 @@ node install.mjs
 
 ## Agents
 
-### Primary Agents (9)
+### Primary Agents (10)
 
 | Agent | Purpose | Model Tier |
 |-------|---------|------------|
@@ -47,6 +47,7 @@ node install.mjs
 | **focused-build** | Fast implementation, auto-cleanup | mid |
 | **debug** | Systematic bug hunting | mid |
 | **supervisor** | Orchestrates multi-step workflows | high |
+| **delegator** | External CLI delegation orchestration | mid |
 | **figma-builder** | Pixel-perfect UI from Figma | mid |
 | **web-tester** | E2E testing with Playwright | mid |
 
@@ -82,25 +83,41 @@ Customize `~/.config/opencode/opencode.jsonc`:
 
 ```jsonc
 {
-  "workflows": {
-    "model_tiers": {
-      "low": "gemini/3-flash",
-      "mid": "glm-5",
-      "high": "openai/gpt-4.1"
-    },
-    "fallback_chain": ["high", "mid", "low"],
-    "swarm": {
-      "enabled": true,
-      "max_parallel_agents": 4
-    },
-    "review": {
-      "zero_tolerance": true,
-      "max_iterations": {
-        "lite": 2,
-        "standard": 3,
-        "deep": 5
+  "$schema": "https://opencode.ai/config.json",
+  "model": "google/gemini-3-pro",
+  "small_model": "google/gemini-3-flash",
+  "agent": {
+    "supervisor": { "model": "google/gemini-3-pro" },
+    "org-planner": { "model": "zhipu/glm-5" },
+    "delegator": { "model": "google/gemini-3-pro" },
+    "web-tester": {
+      "tools": {
+        "playwright_*": true,
+        "chrome-devtools_*": true
       }
     }
+  }
+}
+```
+
+### Centralized model control
+
+This repository now keeps model selection centralized in OpenCode config (instead of hardcoded command frontmatter).
+
+- Set global defaults with `model` and `small_model`
+- Override specific agents in `agent.<name>.model`
+- Commands inherit the model of their configured agent
+
+Example:
+
+```jsonc
+{
+  "model": "google/gemini-3-pro",
+  "small_model": "google/gemini-3-flash",
+  "agent": {
+    "supervisor": { "model": "google/gemini-3-pro" },
+    "org-planner": { "model": "zhipu/glm-5" },
+    "delegator": { "model": "google/gemini-3-pro" }
   }
 }
 ```
@@ -111,6 +128,7 @@ Customize `~/.config/opencode/opencode.jsonc`:
 - [Review System](./docs/review-system.md) - Zero-tolerance protocol, [ISSUE-N] format, escalation
 - [Swarm Mode](./docs/swarm-mode.md) - Parallel execution, SDK spawning, 3-architect validation
 - [E2E Testing](./docs/e2e-testing.md) - 6-phase Playwright pipeline, selector priority, flakiness detection
+- [External CLI Delegation](./docs/external-cli-delegation.md) - Setup and headless delegation flow for Claude/Gemini CLIs
 - [AGENTS.md](./AGENTS.md) - Comprehensive agent reference
 - [WORKFLOWS.md](./WORKFLOWS.md) - Workflow lifecycle, mode selection, templates
 
@@ -119,13 +137,51 @@ Customize `~/.config/opencode/opencode.jsonc`:
 | Command | Description |
 |---------|-------------|
 | `/plan` | Create development plan (org-planner) |
+| `/delegate` | Delegate prompts to official Claude/Gemini CLIs |
 | `/workflow` | Start automated workflow (feature, figma, bug-fix, refactor, e2e) |
 | `/workflow-resume` | Resume interrupted workflow |
 | `/workflow-status` | Show workflow status |
-| `/commit` | Commit with conventional commit message |
-| `/pr` | Create pull request |
+| `/git-commit` | Commit staged changes (git plugin style) |
+| `/git-pr` | Create PR with `gh` |
+| `/git-pr-checkout` | Checkout PR locally |
+| `/git-pr-review` | Submit PR review |
+| `/git-pr-merge` | Merge PR with strategy flags |
+| `/git-release` | Create GitHub release + changelog |
+| `/git-issue` | Create/view/list/close issues |
+| `/git-browse` | Open repo/PR/issue/file in browser |
+| `/git-workflow-run` | Trigger and inspect GitHub Actions runs |
 
 **Translate module** (optional): `/translate-auto`, `/translate-view`
+
+GitHub command group (`/git-*`) requires `gh` CLI installed and authenticated.
+
+## External CLI Delegation
+
+The `/delegate` command lets you run official provider CLIs in headless mode and keep run metadata for follow-ups.
+
+### Prerequisites
+
+- `claude` installed and authenticated
+- `gemini` installed and authenticated
+- binaries available on your `PATH`
+
+### Quick commands
+
+```bash
+/delegate status
+/delegate status --auth
+/delegate ask auto "Summarize this repository"
+/delegate ask claude "Review this diff for security risks"
+/delegate followup <run-id> "Now propose fixes"
+/delegate runs 10
+```
+
+### Behavior notes
+
+- Readiness checks are warning-first: missing binaries/auth do not crash workflows.
+- `/delegate status` is quick/non-interactive by default; use `--auth` for explicit auth probes.
+- Follow-ups use provider-native resume when possible; otherwise stateless fallback is clearly reported.
+- Integration calls provider-owned CLIs directly instead of reusing OAuth tokens through third-party clients.
 
 ## Skills
 
@@ -193,11 +249,16 @@ node install.mjs --dry-run        # Preview
 node install.mjs --uninstall      # Remove
 ```
 
+Installer backup policy:
+
+- Keeps a single backup per managed path (`*.backup`)
+- Removes older legacy timestamped backups (`*.backup.<timestamp>`) on reinstall
+
 ### Modules
 
 | Module | Contents | Default |
 |--------|----------|---------|
-| **core** | 30 agents, 6 commands, 13 skills, 4 plugins | Yes |
+| **core** | 31 agents, 14 commands, 13 skills, 5 plugins | Yes |
 | **translate** | 3 agents, 2 commands, 8 tools (Joomla i18n) | No |
 
 ## Examples
@@ -244,11 +305,11 @@ opencode run --mode swarm "Implement shopping cart feature"
 ```
 opencode-workflows/
 ├── agent/
-│   ├── primary/            # 9 primary agents
+│   ├── primary/            # 10 primary agents
 │   └── workflow/           # 21 workflow agents
-├── command/                # 6 slash commands
+├── command/                # 14 slash commands
 ├── skill/                  # 13 coding conventions
-├── plugin/                 # 4 enforcement plugins
+├── plugin/                 # 5 workflow plugins
 ├── mode/                   # 5 execution mode configs
 ├── templates/              # 6 workflow templates
 ├── tool/                   # Translation tools (optional)
