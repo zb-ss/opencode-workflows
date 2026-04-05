@@ -1004,6 +1004,89 @@ async function executeDelegateCommand(rawInput: string): Promise<Record<string, 
     return { success: true, command: 'show', run }
   }
 
+  if (subcommand === 'exec-worktree') {
+    // /delegate exec-worktree <provider> --task-id <id> --branch <branch> [--model <model>] [--workflow-id <wfid>] <prompt>
+    // Extract flags
+    let taskId: string | null = null
+    let branch: string | null = null
+    let model: string | null = null
+    let workflowId: string | null = null
+    const filteredTokens = [...tokens]
+
+    // Parse --task-id
+    const taskIdIdx = filteredTokens.indexOf('--task-id')
+    if (taskIdIdx !== -1 && taskIdIdx + 1 < filteredTokens.length) {
+      taskId = filteredTokens[taskIdIdx + 1]
+      filteredTokens.splice(taskIdIdx, 2)
+    }
+
+    // Parse --branch
+    const branchIdx = filteredTokens.indexOf('--branch')
+    if (branchIdx !== -1 && branchIdx + 1 < filteredTokens.length) {
+      branch = filteredTokens[branchIdx + 1]
+      filteredTokens.splice(branchIdx, 2)
+    }
+
+    // Parse --model
+    const modelIdx = filteredTokens.indexOf('--model')
+    if (modelIdx !== -1 && modelIdx + 1 < filteredTokens.length) {
+      model = filteredTokens[modelIdx + 1]
+      filteredTokens.splice(modelIdx, 2)
+    }
+
+    // Parse --workflow-id
+    const wfIdIdx = filteredTokens.indexOf('--workflow-id')
+    if (wfIdIdx !== -1 && wfIdIdx + 1 < filteredTokens.length) {
+      workflowId = filteredTokens[wfIdIdx + 1]
+      filteredTokens.splice(wfIdIdx, 2)
+    }
+
+    if (!taskId || !branch) {
+      return { success: false, error: 'exec-worktree requires --task-id and --branch', usage: '/delegate exec-worktree <provider> --task-id <id> --branch <branch> [--model <model>] <prompt>' }
+    }
+
+    const maybeProvider = filteredTokens[1]
+    const provider: Provider | 'auto' = maybeProvider === 'claude' || maybeProvider === 'gemini' ? maybeProvider : 'claude'
+    const prompt = filteredTokens.slice(2).join(' ').trim()
+
+    if (!prompt) {
+      return { success: false, error: 'exec-worktree requires a prompt' }
+    }
+
+    // Create worktree using git
+    const worktreeName = `delegate-${taskId}`
+    const worktreePath = path.join(process.cwd(), '.worktrees', worktreeName)
+    const branchName = workflowId ? `delegate/${workflowId}/${taskId}` : `delegate/${taskId}`
+
+    try {
+      fs.mkdirSync(path.join(process.cwd(), '.worktrees'), { recursive: true })
+      spawnSync('git', ['worktree', 'add', '-b', branchName, worktreePath, branch], {
+        encoding: 'utf8', timeout: 15000, stdio: 'pipe',
+      })
+    } catch (err) {
+      return { success: false, error: `Failed to create worktree: ${err instanceof Error ? err.message : String(err)}` }
+    }
+
+    // Execute delegation in the worktree context
+    // For Claude: use --worktree flag (it manages its own worktree from the base)
+    // For Gemini: we already created the worktree, just need CWD
+    const result = await executeDelegation({
+      provider,
+      prompt,
+      model,
+      timeoutMs: 300000,
+      workflowId: workflowId || undefined,
+    })
+
+    return {
+      command: 'exec-worktree',
+      task_id: taskId,
+      worktree_path: worktreePath,
+      branch_name: branchName,
+      ...result.payload,
+    }
+  }
+
   return {
     success: false,
     error: `Unknown subcommand: ${subcommand}`,
@@ -1013,6 +1096,7 @@ async function executeDelegateCommand(rawInput: string): Promise<Record<string, 
       '/delegate followup <run-id> <prompt>',
       '/delegate runs [limit]',
       '/delegate show <run-id>',
+      '/delegate exec-worktree <provider> --task-id <id> --branch <branch> [--model <model>] <prompt>',
     ],
   }
 }

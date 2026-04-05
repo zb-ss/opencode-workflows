@@ -192,3 +192,81 @@ export interface SwarmBatch {
   sessions: Map<string, { sessionId: string; taskId: string; status: string }>;
   createdAt: string;
 }
+
+// ---------------------------------------------------------------------------
+// Delegation Orchestration Types
+// ---------------------------------------------------------------------------
+
+export type DelegationProvider = 'claude' | 'gemini'
+export type DelegationTaskTag = 'code' | 'ui'
+export type DelegationTaskStatus = 'pending' | 'executing' | 'reviewing' | 'passed' | 'failed' | 'merged'
+
+export interface DelegationTask {
+  id: string
+  description: string
+  tag: DelegationTaskTag
+  provider: DelegationProvider
+  prompt: string
+  files: string[]
+  worktree_name: string | null
+  status: DelegationTaskStatus
+  attempt: number
+  max_attempts: number
+  review_feedback: string | null
+  run_id: string | null
+  session_id: string | null
+  worktree_path: string | null
+  branch_name: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface DelegationPlan {
+  workflow_id: string
+  feature_branch: string
+  tasks: DelegationTask[]
+  max_parallel: number
+  created_at: string
+}
+
+export interface WorktreeState {
+  name: string
+  path: string
+  branch: string
+  task_id: string
+  provider: DelegationProvider
+  status: 'active' | 'completed' | 'failed' | 'merged' | 'discarded'
+  created_at: string
+  merged_at: string | null
+}
+
+export interface DelegationRoutingConfig {
+  ui_patterns: string[]
+  default_provider: DelegationProvider
+}
+
+export interface DelegationProviderConfig {
+  model?: string
+  timeout_ms?: number
+  permission_mode?: string
+}
+
+export interface DelegationOrchestratorConfig {
+  claude: DelegationProviderConfig
+  gemini: DelegationProviderConfig
+  max_parallel: number
+  routing: DelegationRoutingConfig
+  fallback_order: DelegationProvider[]
+  max_review_iterations: number
+  auto_init_files: boolean
+}
+
+export const DELEGATE_PHASE_ORDER: string[] = [
+  'planning',
+  'decomposition',
+  'execution',
+  'review',
+  'merge',
+  'quality_gate',
+  'completion_guard',
+]

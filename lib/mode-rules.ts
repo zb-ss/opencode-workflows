@@ -5,6 +5,7 @@
  */
 
 import type { ModelTier, TierConstraints } from './types.ts';
+import { DELEGATE_PHASE_ORDER } from './types.ts';
 
 /**
  * Tier constraints per mode.
@@ -37,6 +38,11 @@ export const TIER_CONSTRAINTS: Record<string, TierConstraints> = {
     preferred: 'mid',
     description: 'Parallel execution, high tier for validation',
   },
+  delegate: {
+    forbidden: [],
+    preferred: 'high',
+    description: 'External delegation, high tier for planning/review',
+  },
 };
 
 /**
@@ -65,6 +71,7 @@ export const AGENT_GATE_MAP: Record<string, string> = {
   'e2e-explorer': 'e2e_exploration',
   'e2e-generator': 'e2e_generation',
   'e2e-reviewer': 'e2e_validation',
+  'delegator': 'execution',
 };
 
 /**
@@ -91,6 +98,19 @@ export const E2E_PHASE_ORDER: string[] = [
   'quality_gate',
   'completion_guard',
 ];
+
+/**
+ * Maps workflow type to its canonical phase ordering.
+ */
+export const PHASE_ORDER_BY_TYPE: Record<string, string[]> = {
+  'feature': PHASE_ORDER,
+  'bug-fix': PHASE_ORDER,
+  'refactor': PHASE_ORDER,
+  'figma': PHASE_ORDER,
+  'translate': PHASE_ORDER,
+  'e2e': E2E_PHASE_ORDER,
+  'delegate': DELEGATE_PHASE_ORDER,
+};
 
 /**
  * Check if a tier is forbidden for a given mode.

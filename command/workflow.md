@@ -17,6 +17,7 @@ Start a new automated workflow with configurable execution modes.
 - `bugfix` - Bug investigation and fix (investigate → plan → implement → review → test)
 - `refactor` - Code refactoring (analyze → plan → implement → review → test)
 - `translate` - Joomla component translation (scan → process views → review)
+- `delegate` - External CLI delegation (plan → decompose → execute in parallel worktrees → review → merge)
 
 ## Execution Modes
 
@@ -37,6 +38,9 @@ Start a new automated workflow with configurable execution modes.
 /workflow refactor Extract validation logic --mode=eco
 /workflow figma https://figma.com/file/xxx Dashboard header
 /workflow translate ./com_mycomponent fr-CA
+/workflow delegate Add user authentication with OAuth providers
+/workflow delegate Build responsive dashboard with charts and data tables
+/workflow delegate Refactor API layer and add new payment endpoints
 ```
 
 ## Your Task
@@ -50,11 +54,11 @@ You are the supervisor agent. A new workflow has been requested.
 Parse `$ARGUMENTS` using these rules in order:
 
 1. **Extract the workflow type** — the FIRST word is always the type:
-   `feature`, `bugfix`, `refactor`, `figma`, `translate`
+   `feature`, `bugfix`, `refactor`, `figma`, `translate`, `delegate`
 
 2. **Detect the mode** — check for EITHER:
    - A `--mode=<mode>` flag anywhere in the input (remove it from description)
-   - A keyword prefix right after the type: `swarm:`, `thorough:`, `careful:`, `production:`, `quick:`, `fast:`, `prototype:`, `eco:`, `simple:`, `minor:`
+   - A keyword prefix right after the type: `swarm:`, `thorough:`, `careful:`, `production:`, `quick:`, `fast:`, `prototype:`, `eco:`, `simple:`, `minor:`, `delegate:`
    - If neither found, use default mode from `workflows.json` (usually `standard`)
 
 3. **Everything remaining** after removing type and mode is the **description**

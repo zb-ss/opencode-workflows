@@ -103,6 +103,7 @@ const MODULES = {
       "file-validator.ts",
       "model-router.ts",
       "swarm-manager.ts",
+      "delegation-orchestrator.ts",
       "package.json",
     ],
     modes: [
@@ -111,6 +112,7 @@ const MODULES = {
       "standard.json",
       "thorough.json",
       "swarm.json",
+      "delegate.json",
     ],
     lib: [
       "types.ts",
@@ -118,6 +120,9 @@ const MODULES = {
       "state.ts",
       "model-registry.ts",
       "mode-rules.ts",
+      "worktree-manager.ts",
+      "task-router.ts",
+      "init-file-generator.ts",
     ],
     templates: [
       "feature-development.org",
@@ -125,6 +130,7 @@ const MODULES = {
       "refactor.org",
       "figma-to-code.org",
       "e2e-testing.org",
+      "delegation.org",
     ],
     rootFiles: ["CONVENTIONS.md"],
   },
