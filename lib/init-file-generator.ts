@@ -1,8 +1,12 @@
 /**
- * Init File Generator for Delegation Orchestration
+ * Init File Generator for Delegation Orchestration (Static Fallback)
  *
- * Auto-generates CLAUDE.md and GEMINI.md files for projects that don't have them.
- * These files provide context to the external CLIs about the project.
+ * Generates CLAUDE.md and GEMINI.md files using static project stack detection.
+ * This is the OFFLINE FALLBACK — the primary path uses LLM-based generation
+ * via the delegation-orchestrator plugin (delegation_init_files tool).
+ *
+ * Used when: LLM generation fails, no OpenCode session is available,
+ * or for quick non-interactive init file creation.
  */
 
 import fs from 'node:fs'

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-OpenCode Workflows v2.0 is a multi-agent automation framework for [OpenCode](https://opencode.ai). It orchestrates development workflows (feature, bug-fix, refactor, figma, e2e, translate) through 30 specialized agents, 5 execution modes, and 4 enforcement plugins. Designed to be model-agnostic — works with any LLM provider.
+OpenCode Workflows v2.0 is a multi-agent automation framework for [OpenCode](https://opencode.ai). It orchestrates development workflows (feature, bug-fix, refactor, figma, e2e, translate, delegate) through 31 specialized agents, 6 execution modes, and 6 plugins. Supports delegated execution to external CLIs (Claude Code, Gemini) in parallel git worktrees. Designed to be model-agnostic — works with any LLM provider.
 
 ## Installation & Development
 

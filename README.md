@@ -7,14 +7,15 @@ A comprehensive collection of agents, commands, skills, plugins, and workflow te
 ## Features
 
 - **31 Agents**: 10 primary + 21 workflow specialists
-- **5 Execution Modes**: eco, turbo, standard, thorough, swarm
-- **5 Plugins**: workflow-enforcer, file-validator, model-router, swarm-manager, external-cli-delegation
+- **6 Execution Modes**: eco, turbo, standard, thorough, swarm, delegate
+- **6 Plugins**: workflow-enforcer, file-validator, model-router, swarm-manager, delegation-orchestrator, external-cli-delegation
+- **Delegated Execution**: Route tasks to Claude Code CLI and Gemini CLI in parallel git worktrees
 - **Zero-Tolerance Review**: [ISSUE-N] tracking with auto-escalation
 - **Model-Agnostic**: Works with any LLM provider (tested on Zhipu, MiniMax, Google, OpenAI)
 - **E2E Testing Pipeline**: 6-phase Playwright workflow with accessibility-first selectors
 - **Parallel Execution**: SDK-based swarm mode for 3-5x speed improvement
 - **13 Skills**: PHP, Laravel, Vue, Joomla, Symfony, API design, and more
-- **14 Commands, 6 Templates**: Complete automation toolkit
+- **14 Commands, 7 Templates**: Complete automation toolkit
 
 ## Quick Start
 
@@ -44,6 +45,7 @@ node install.mjs
 | **standard** | Medium | Good | No | reviewer | Production features |
 | **thorough** | Slow | Excellent | No | reviewer-deep | Critical, security-sensitive |
 | **swarm** | Fastest | Excellent | Yes (4x) | 3x architect | Large, modular projects |
+| **delegate** | Variable | Excellent | Yes (worktrees) | reviewer-deep | Multi-provider orchestration |
 
 ## Agents
 
@@ -128,7 +130,7 @@ Each tier is an array — first model is preferred, rest are fallbacks. Use any 
 |---------|-------------|
 | `/plan` | Create development plan (org-planner) |
 | `/delegate` | Delegate prompts to official Claude/Gemini CLIs |
-| `/workflow` | Start automated workflow (feature, figma, bug-fix, refactor, e2e) |
+| `/workflow` | Start automated workflow (feature, figma, bug-fix, refactor, e2e, delegate) |
 | `/workflow-resume` | Resume interrupted workflow |
 | `/workflow-status` | Show workflow status |
 | `/git-commit` | Commit staged changes (git plugin style) |
@@ -147,31 +149,61 @@ GitHub command group (`/git-*`) requires `gh` CLI installed and authenticated.
 
 ## External CLI Delegation
 
-The `/delegate` command lets you run official provider CLIs in headless mode and keep run metadata for follow-ups.
+The `/delegate` command runs official provider CLIs in headless mode. The `/workflow delegate` type orchestrates full features across providers in parallel worktrees.
+
+### Quick delegation
+
+```bash
+/delegate status claude --auth
+/delegate ask claude --model sonnet "Review this diff for security risks"
+/delegate ask gemini --model gemini-2.5-pro "Design a responsive dashboard layout"
+/delegate followup <run-id> "Now propose fixes"
+```
+
+### Delegated workflows
+
+```bash
+/workflow delegate Add user authentication with OAuth and responsive settings page
+```
+
+This plans in OpenCode, decomposes into tasks, routes code tasks to Claude Code CLI (opus) and UI tasks to Gemini CLI (gemini-3.1-pro), executes in parallel git worktrees, reviews each result, re-delegates failures, merges approved work, and runs quality gates.
+
+### Provider routing
+
+| Task Type | Provider | Flag | Worktree Mode |
+|-----------|----------|------|---------------|
+| Code/logic | Claude Code CLI | `--dangerously-skip-permissions` | `--worktree` |
+| UI/design | Gemini CLI | `--yolo` | CWD-based |
+
+Routing is automatic based on task description (configurable patterns in `workflows.json`), or explicit via `[code]`/`[ui]` tags in the plan.
+
+### Configuration
+
+```json
+{
+  "delegation": {
+    "claude": { "model": "opus", "timeout_ms": 300000 },
+    "gemini": { "model": "gemini-3.1-pro-preview", "timeout_ms": 300000 },
+    "max_parallel": 4,
+    "routing": {
+      "ui_patterns": ["ui", "layout", "design", "css", "styling", "responsive"],
+      "default_provider": "claude"
+    },
+    "max_review_iterations": 3,
+    "auto_init_files": true
+  }
+}
+```
 
 ### Prerequisites
 
-- `claude` installed and authenticated
-- `gemini` installed and authenticated
-- binaries available on your `PATH`
+- `claude` CLI installed and authenticated
+- `gemini` CLI installed and authenticated (optional — only needed for UI tasks)
+- Both binaries available on `PATH`
 
-### Quick commands
+### Auto-init
 
-```bash
-/delegate status
-/delegate status --auth
-/delegate ask auto "Summarize this repository"
-/delegate ask claude "Review this diff for security risks"
-/delegate followup <run-id> "Now propose fixes"
-/delegate runs 10
-```
-
-### Behavior notes
-
-- Readiness checks are warning-first: missing binaries/auth do not crash workflows.
-- `/delegate status` is quick/non-interactive by default; use `--auth` for explicit auth probes.
-- Follow-ups use provider-native resume when possible; otherwise stateless fallback is clearly reported.
-- Integration calls provider-owned CLIs directly instead of reusing OAuth tokens through third-party clients.
+On first delegation, `CLAUDE.md` and `GEMINI.md` are auto-generated if missing — providing each CLI with project context (detected languages, frameworks, directory structure, build commands).
 
 ## Skills
 
@@ -199,6 +231,7 @@ The `/delegate` command lets you run official provider CLIs in headless mode and
 | figma-to-code | Design → Build → Review → E2E → A11y | Standard, Thorough |
 | bug-fix | Investigate → Fix → Review → Test | All |
 | refactor | Analyze → Plan → Implement → Review | Standard, Thorough |
+| delegation | Plan → Decompose → Execute (worktrees) → Review → Merge | Delegate |
 | e2e-testing | Setup → Explore → Generate → Validate → QA | All |
 | joomla-translation | Scan → Process → Review (translate module) | Standard |
 
@@ -217,18 +250,20 @@ cd opencode-workflows
 node install.mjs
 ```
 
-Both methods install the **core** module via symlinks into `~/.config/opencode/`. On Windows, copy mode is used by default since symlinks require Developer Mode.
+Both methods install the **core** module via copies into `~/.config/opencode/`.
 
 ### Install Options
 
 ```bash
-node install.mjs                  # Core (symlinks)
-node install.mjs --copy           # Core (copies)
+node install.mjs                  # Core (copy mode, default)
+node install.mjs --symlink        # Core (symlinks, for development)
 node install.mjs --runtime-models # Do not materialize model_tier (use opencode.jsonc models)
 node install.mjs --all            # Core + translate module
 node install.mjs --dry-run        # Preview
 node install.mjs --uninstall      # Remove
 ```
+
+To update after `git pull`: `node install.mjs`
 
 Installer backup policy:
 
