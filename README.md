@@ -1,8 +1,8 @@
 # OpenCode Workflows
 
-A comprehensive collection of agents, commands, skills, plugins, and workflow templates for [OpenCode](https://opencode.ai).
+A multi-agent automation framework for [OpenCode](https://opencode.ai).
 
-> **Note**: This is v2.0 - a breaking rewrite with multi-model support, swarm execution, and zero-tolerance review system.
+> **Plan in OpenCode. Execute across Claude Code and Gemini CLI in parallel git worktrees.** Route code tasks to Claude Opus for deep implementation, UI tasks to Gemini for pixel-perfect layouts — all running simultaneously in isolated worktrees, reviewed automatically, and merged when approved. Your subscriptions, your CLIs, fully TOS-compliant. See [Delegated Workflows](./docs/delegated-workflows.md).
 
 ## Features
 
@@ -116,11 +116,12 @@ Each tier is an array — first model is preferred, rest are fallbacks. Use any 
 
 ## Documentation
 
+- [Delegated Workflows](./docs/delegated-workflows.md) - Multi-provider orchestration, parallel worktrees, task routing, auto-init
+- [External CLI Delegation](./docs/external-cli-delegation.md) - Simple `/delegate` command for one-off CLI prompts
 - [Model Compatibility](./docs/model-compatibility.md) - Multi-model setup, tier configuration, fallback chains
 - [Review System](./docs/review-system.md) - Zero-tolerance protocol, [ISSUE-N] format, escalation
 - [Swarm Mode](./docs/swarm-mode.md) - Parallel execution, SDK spawning, 3-architect validation
 - [E2E Testing](./docs/e2e-testing.md) - 6-phase Playwright pipeline, selector priority, flakiness detection
-- [External CLI Delegation](./docs/external-cli-delegation.md) - Setup and headless delegation flow for Claude/Gemini CLIs
 - [AGENTS.md](./AGENTS.md) - Comprehensive agent reference
 - [WORKFLOWS.md](./WORKFLOWS.md) - Workflow lifecycle, mode selection, templates
 
@@ -147,63 +148,24 @@ Each tier is an array — first model is preferred, rest are fallbacks. Use any 
 
 GitHub command group (`/git-*`) requires `gh` CLI installed and authenticated.
 
-## External CLI Delegation
+## Delegated Workflows
 
-The `/delegate` command runs official provider CLIs in headless mode. The `/workflow delegate` type orchestrates full features across providers in parallel worktrees.
-
-### Quick delegation
-
-```bash
-/delegate status claude --auth
-/delegate ask claude --model sonnet "Review this diff for security risks"
-/delegate ask gemini --model gemini-2.5-pro "Design a responsive dashboard layout"
-/delegate followup <run-id> "Now propose fixes"
-```
-
-### Delegated workflows
+Orchestrate full features across Claude Code and Gemini CLI in parallel git worktrees:
 
 ```bash
 /workflow delegate Add user authentication with OAuth and responsive settings page
 ```
 
-This plans in OpenCode, decomposes into tasks, routes code tasks to Claude Code CLI (opus) and UI tasks to Gemini CLI (gemini-3.1-pro), executes in parallel git worktrees, reviews each result, re-delegates failures, merges approved work, and runs quality gates.
+OpenCode plans the feature, breaks it into tasks, routes code tasks to Claude and UI tasks to Gemini, executes in parallel worktrees, reviews each result, and merges approved work. See [full documentation](./docs/delegated-workflows.md).
 
-### Provider routing
+For one-off prompts without the full workflow pipeline:
 
-| Task Type | Provider | Flag | Worktree Mode |
-|-----------|----------|------|---------------|
-| Code/logic | Claude Code CLI | `--dangerously-skip-permissions` | `--worktree` |
-| UI/design | Gemini CLI | `--yolo` | CWD-based |
-
-Routing is automatic based on task description (configurable patterns in `workflows.json`), or explicit via `[code]`/`[ui]` tags in the plan.
-
-### Configuration
-
-```json
-{
-  "delegation": {
-    "claude": { "model": "opus", "timeout_ms": 300000 },
-    "gemini": { "model": "gemini-3.1-pro-preview", "timeout_ms": 300000 },
-    "max_parallel": 4,
-    "routing": {
-      "ui_patterns": ["ui", "layout", "design", "css", "styling", "responsive"],
-      "default_provider": "claude"
-    },
-    "max_review_iterations": 3,
-    "auto_init_files": true
-  }
-}
+```bash
+/delegate ask claude --model sonnet "Review this diff for security risks"
+/delegate ask gemini --model gemini-2.5-pro "Design a responsive dashboard"
 ```
 
-### Prerequisites
-
-- `claude` CLI installed and authenticated
-- `gemini` CLI installed and authenticated (optional — only needed for UI tasks)
-- Both binaries available on `PATH`
-
-### Auto-init
-
-On first delegation, `CLAUDE.md` and `GEMINI.md` are auto-generated if missing — providing each CLI with project context (detected languages, frameworks, directory structure, build commands).
+See [CLI delegation docs](./docs/external-cli-delegation.md) for setup and commands.
 
 ## Skills
 

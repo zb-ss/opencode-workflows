@@ -19,9 +19,18 @@ import type {
  */
 export function inferTag(description: string, uiPatterns: string[]): DelegationTaskTag {
   for (const pattern of uiPatterns) {
-    const regex = new RegExp(`\\b${pattern}\\b`, 'i')
-    if (regex.test(description)) {
-      return 'ui'
+    try {
+      // Escape regex special chars in pattern before building regex
+      const escaped = pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      const regex = new RegExp(`\\b${escaped}\\b`, 'i')
+      if (regex.test(description)) {
+        return 'ui'
+      }
+    } catch {
+      // If regex fails, fall back to simple includes check
+      if (description.toLowerCase().includes(pattern.toLowerCase())) {
+        return 'ui'
+      }
     }
   }
   return 'code'
@@ -84,17 +93,15 @@ export function buildPrompt(
 
 /**
  * Builds CLI argument array for the claude command.
+ * NOTE: No --worktree flag — we manage worktrees ourselves and set CWD
+ * to the worktree path when spawning. This ensures changes land in OUR
+ * worktree, not a separate one created by the CLI.
  */
 export function buildClaudeArgs(
   prompt: string,
   config: DelegationOrchestratorConfig,
-  worktreeName: string | null,
 ): string[] {
   const args: string[] = ['--print']
-
-  if (worktreeName !== null) {
-    args.push('--worktree', worktreeName)
-  }
 
   if (config.claude.permission_mode) {
     args.push(`--${config.claude.permission_mode}`)
@@ -132,17 +139,17 @@ export function buildGeminiArgs(
 
 /**
  * Builds the full CLI command and args for the given provider.
+ * worktreePath is used as CWD when spawning (not as a CLI flag).
  */
 export function buildCliArgs(
   provider: DelegationProvider,
   prompt: string,
   config: DelegationOrchestratorConfig,
-  worktreeName: string | null,
 ): { command: string; args: string[] } {
   if (provider === 'claude') {
     return {
       command: 'claude',
-      args: buildClaudeArgs(prompt, config, worktreeName),
+      args: buildClaudeArgs(prompt, config),
     }
   }
 

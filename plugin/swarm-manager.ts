@@ -184,6 +184,10 @@ function buildWorkflowContextPrefix(): string {
 }
 
 export const SwarmManager: Plugin = async ({ client, $ }) => {
+  // Get zod for tool arg schemas. Dynamic import resolves from config dir's node_modules.
+  const { tool: pluginTool } = await import('@opencode-ai/plugin')
+  const z = pluginTool.schema
+
   // Load config at plugin initialization
   const swarmConfig = loadSwarmConfig();
   const concurrencyManager = new ConcurrencyManager(swarmConfig);
@@ -199,27 +203,15 @@ export const SwarmManager: Plugin = async ({ client, $ }) => {
     tool: {
       swarm_spawn_batch: {
         description: "Spawn a batch of parallel agent sessions. Respects per-provider concurrency limits. Tasks that cannot acquire a slot are returned as queued.",
-        parameters: {
-          type: "object",
-          properties: {
-            batchId: { type: "string", description: "Unique batch identifier" },
-            tasks: {
-              type: "array",
-              items: {
-                type: "object",
-                properties: {
-                  id: { type: "string" },
-                  agent: { type: "string" },
-                  prompt: { type: "string" },
-                  model: { type: "string" },
-                },
-                required: ["id", "agent", "prompt"],
-              },
-              description: "Tasks to spawn in parallel",
-            },
-            workingDir: { type: "string", description: "Working directory for sessions" },
-          },
-          required: ["batchId", "tasks"],
+        args: {
+          batchId: z.string().describe("Unique batch identifier"),
+          tasks: z.array(z.object({
+            id: z.string(),
+            agent: z.string(),
+            prompt: z.string(),
+            model: z.string().optional(),
+          })).describe("Tasks to spawn in parallel"),
+          workingDir: z.string().optional().describe("Working directory for sessions"),
         },
         async execute(args: { batchId: string; tasks: SwarmTask[]; workingDir?: string }) {
           const { batchId, tasks } = args;
@@ -316,13 +308,9 @@ export const SwarmManager: Plugin = async ({ client, $ }) => {
 
       swarm_await_batch: {
         description: "Wait for all sessions in a batch to complete. Polls at the configured interval with staleness detection. Cancels stale or stuck sessions automatically.",
-        parameters: {
-          type: "object",
-          properties: {
-            batchId: { type: "string", description: "Batch ID to wait for" },
-            timeoutMs: { type: "number", description: "Max wait time in ms (default 300000)" },
-          },
-          required: ["batchId"],
+        args: {
+          batchId: z.string().describe("Batch ID to wait for"),
+          timeoutMs: z.number().optional().describe("Max wait time in ms (default 300000)"),
         },
         async execute(args: { batchId: string; timeoutMs?: number }) {
           const batch = batches.get(args.batchId);
@@ -406,14 +394,10 @@ export const SwarmManager: Plugin = async ({ client, $ }) => {
 
       swarm_spawn_validation: {
         description: "Spawn 3 parallel validation sessions (functional, security, quality). ALL must PASS.",
-        parameters: {
-          type: "object",
-          properties: {
-            workingDir: { type: "string", description: "Working directory" },
-            summary: { type: "string", description: "Implementation summary to review" },
-            changedFiles: { type: "string", description: "List of changed files" },
-          },
-          required: ["summary", "changedFiles"],
+        args: {
+          workingDir: z.string().optional().describe("Working directory"),
+          summary: z.string().describe("Implementation summary to review"),
+          changedFiles: z.string().describe("List of changed files"),
         },
         async execute(args: { workingDir?: string; summary: string; changedFiles: string }) {
           const batchId = `validation-${Date.now()}`;
@@ -504,12 +488,8 @@ export const SwarmManager: Plugin = async ({ client, $ }) => {
 
       swarm_collect_results: {
         description: "Collect full results from a completed batch. Call after swarm_await_batch confirms completion.",
-        parameters: {
-          type: "object",
-          properties: {
-            batchId: { type: "string", description: "Batch ID to collect results from" },
-          },
-          required: ["batchId"],
+        args: {
+          batchId: z.string().describe("Batch ID to collect results from"),
         },
         async execute(args: { batchId: string }) {
           const batch = batches.get(args.batchId);
@@ -544,13 +524,9 @@ export const SwarmManager: Plugin = async ({ client, $ }) => {
 
       swarm_cancel_task: {
         description: "Cancel a specific tracked session and release its concurrency slot.",
-        parameters: {
-          type: "object",
-          properties: {
-            task_id: { type: "string", description: "Task ID to cancel" },
-            batch_id: { type: "string", description: "Batch ID containing the task" },
-          },
-          required: ["task_id", "batch_id"],
+        args: {
+          task_id: z.string().describe("Task ID to cancel"),
+          batch_id: z.string().describe("Batch ID containing the task"),
         },
         async execute(args: { task_id: string; batch_id: string }) {
           const batch = batches.get(args.batch_id);

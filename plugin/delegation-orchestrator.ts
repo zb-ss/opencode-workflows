@@ -376,6 +376,11 @@ function extractResponseText(stdout: string, provider: DelegationProvider): stri
 // ---------------------------------------------------------------------------
 
 export const DelegationOrchestrator: Plugin = async ({ client, directory, worktree }) => {
+  // Get zod for tool arg schemas. Dynamic import resolves from config dir's node_modules
+  // since plugins are copied (not symlinked) during install.
+  const { tool: pluginTool } = await import('@opencode-ai/plugin')
+  const z = pluginTool.schema
+
   const config = loadDelegationConfig()
 
   // Batch tracking: batchId -> (taskId -> TrackedExecution)
@@ -393,22 +398,14 @@ export const DelegationOrchestrator: Plugin = async ({ client, directory, worktr
       // -----------------------------------------------------------------
       delegation_decompose: {
         description: "Parse plan text into discrete DelegationTasks with provider routing. Saves plan to context directory.",
-        parameters: {
-          type: "object",
-          properties: {
-            planText: { type: "string", description: "Plan text with numbered/bulleted task descriptions" },
-            workflowId: { type: "string", description: "Workflow ID for plan tracking" },
-            featureBranch: { type: "string", description: "Git branch to base worktrees on" },
-            routingConfig: {
-              type: "object",
-              description: "Optional routing config override",
-              properties: {
-                ui_patterns: { type: "array", items: { type: "string" } },
-                default_provider: { type: "string", enum: ["claude", "gemini"] },
-              },
-            },
-          },
-          required: ["planText", "workflowId", "featureBranch"],
+        args: {
+          planText: z.string().describe("Plan text with numbered/bulleted task descriptions"),
+          workflowId: z.string().describe("Workflow ID for plan tracking"),
+          featureBranch: z.string().describe("Git branch to base worktrees on"),
+          routingConfig: z.object({
+            ui_patterns: z.array(z.string()),
+            default_provider: z.string(),
+          }).optional().describe("Optional routing config override"),
         },
         async execute(args: {
           planText: string
@@ -485,13 +482,9 @@ export const DelegationOrchestrator: Plugin = async ({ client, directory, worktr
       // 2. delegation_init_files
       // -----------------------------------------------------------------
       delegation_init_files: {
-        description: "Ensure CLAUDE.md and GEMINI.md init files exist in the project root. Uses the LLM to analyze the repo and generate context-rich init files. Falls back to static detection if LLM is unavailable.",
-        parameters: {
-          type: "object",
-          properties: {
-            projectRoot: { type: "string", description: "Absolute path to the project root directory" },
-          },
-          required: ["projectRoot"],
+        description: "Ensure CLAUDE.md and GEMINI.md init files exist in the project root. Uses the LLM to analyze the repo and generate context-aware init files. Falls back to static detection on timeout.",
+        args: {
+          projectRoot: z.string().describe("Absolute path to the project root directory"),
         },
         async execute(args: { projectRoot: string }) {
           const results: Record<string, { created: boolean; path: string; method: string }> = {}
@@ -507,7 +500,7 @@ export const DelegationOrchestrator: Plugin = async ({ client, directory, worktr
               continue
             }
 
-            // Try LLM-first: spawn an OpenCode session to analyze the repo
+            // LLM-first: spawn an OpenCode session to analyze the repo and write the file
             let generated = false
             try {
               log('delegation', `Generating ${fileName} via LLM analysis...`)
@@ -515,78 +508,64 @@ export const DelegationOrchestrator: Plugin = async ({ client, directory, worktr
 
               const cliName = provider === 'claude' ? 'Claude Code' : 'Gemini CLI'
               const prompt = [
-                `You are generating a ${fileName} file for the project at ${args.projectRoot}.`,
-                `This file will be used by ${cliName} as context when working on this project.`,
+                `Analyze the project at ${args.projectRoot} and generate a ${fileName} file.`,
+                `This file provides context to ${cliName} when working on this project.`,
                 '',
-                'Analyze the project by reading key files (package.json, composer.json, Cargo.toml,',
-                'go.mod, pyproject.toml, Makefile, etc.) and scanning the directory structure.',
+                'Read key files (package.json, composer.json, Cargo.toml, go.mod, pyproject.toml,',
+                'Makefile, Dockerfile, etc.) and scan the directory structure to understand the project.',
                 '',
-                'Generate a concise, useful markdown file (under 150 lines) with:',
-                `# Project Name`,
+                `Write a concise, useful ${fileName} (under 150 lines) with these sections:`,
+                '- # Project Name',
+                '- ## Project Overview (what it does, languages, frameworks, architecture)',
+                '- ## Development (install, build, test, lint commands)',
+                '- ## Key Directories (brief descriptions)',
+                '- ## Conventions (coding style, reference config files)',
+                '- ## Important Notes (architectural decisions, gotchas)',
                 '',
-                '## Project Overview',
-                '- What the project does (1-2 sentences)',
-                '- Languages and frameworks used',
-                '- Architecture overview',
-                '',
-                '## Development',
-                '- How to install dependencies',
-                '- How to build',
-                '- How to run tests',
-                '- How to lint',
-                '',
-                '## Key Directories',
-                '- Brief description of important directories',
-                '',
-                '## Conventions',
-                '- Coding style, naming conventions',
-                '- Reference existing config files (.editorconfig, eslint, prettier, etc.)',
-                '',
-                '## Important Notes',
-                '- Any critical architectural decisions or gotchas',
-                '',
-                `Write the file directly to: ${filePath}`,
                 `Start the file with: <!-- Auto-generated by OpenCode Workflows for ${cliName}. Edit freely. -->`,
-                'Do NOT include any explanation, just write the file.',
+                `Write the file to: ${filePath}`,
+                'Write ONLY the file. No explanations.',
               ].join('\n')
 
-              // Fire prompt and poll for completion
               await client.session.promptAsync({
                 path: { id: session.id },
                 body: { content: prompt },
               })
 
-              // Poll until session goes idle (file written) or timeout
-              const initTimeout = 120_000
-              const initStart = Date.now()
-              while (Date.now() - initStart < initTimeout) {
-                await new Promise(r => setTimeout(r, 3000))
-                try {
-                  const statuses = await client.session.status()
-                  const sess = (statuses as any[])?.find?.((s: any) => s.id === session.id)
-                  if (sess?.status === 'idle' || sess?.status === 'stopped') break
-                } catch {
+              // Poll for the FILE to appear (not session status — simpler and more reliable)
+              const timeoutMs = 90_000
+              const pollMs = 2_000
+              const start = Date.now()
+              while (Date.now() - start < timeoutMs) {
+                await new Promise(r => setTimeout(r, pollMs))
+                if (fs.existsSync(filePath)) {
+                  // File exists — wait a bit more for write to complete
+                  await new Promise(r => setTimeout(r, 1000))
+                  generated = true
                   break
                 }
               }
 
-              // Check if the file was created
-              if (fs.existsSync(filePath)) {
-                generated = true
+              // Clean up session
+              try { await client.session.cancel({ path: { id: session.id } }) } catch { /* best effort */ }
+
+              if (generated) {
                 results[provider] = { created: true, path: filePath, method: 'llm' }
                 log('delegation', `Init file for ${provider}: generated via LLM at ${filePath}`)
+              } else {
+                log('delegation', `LLM generation timed out for ${provider} after ${timeoutMs}ms`)
               }
             } catch (err) {
               log('delegation', `LLM generation failed for ${provider}: ${err}`)
             }
 
-            // Fallback to static detection
+            // Fallback to static detection if LLM didn't produce the file
             if (!generated) {
               try {
                 log('delegation', `Falling back to static detection for ${fileName}`)
                 const result = ensureInitFile(provider, args.projectRoot)
                 results[provider] = { created: result.created, path: result.path, method: 'static' }
-                log('delegation', `Init file for ${provider}: ${result.created ? 'created (static)' : 'exists'} at ${result.path}`)
+                log('delegation', `Init file for ${provider}: ${result.created ? 'created (static)' : 'failed'} at ${result.path}`)
               } catch (err) {
                 results[provider] = { created: false, path: `error: ${err}`, method: 'failed' }
                 log('delegation', `Failed to ensure init file for ${provider}: ${err}`)
@@ -603,32 +582,20 @@ export const DelegationOrchestrator: Plugin = async ({ client, directory, worktr
       // -----------------------------------------------------------------
       delegation_execute_batch: {
         description: "Spawn CLI processes in git worktrees for a batch of delegation tasks. Respects max_parallel concurrency.",
-        parameters: {
-          type: "object",
-          properties: {
-            batchId: { type: "string", description: "Unique batch identifier" },
-            tasks: {
-              type: "array",
-              items: {
-                type: "object",
-                properties: {
-                  id: { type: "string" },
-                  description: { type: "string" },
-                  tag: { type: "string", enum: ["code", "ui"] },
-                  provider: { type: "string", enum: ["claude", "gemini"] },
-                  files: { type: "array", items: { type: "string" } },
-                  branch_name: { type: "string" },
-                  review_feedback: { type: "string" },
-                },
-                required: ["id", "description", "provider"],
-              },
-              description: "Tasks to execute in parallel",
-            },
-            projectRoot: { type: "string", description: "Absolute path to project root" },
-            workflowId: { type: "string", description: "Workflow ID for worktree branch naming" },
-            featureBranch: { type: "string", description: "Base branch for worktrees" },
-          },
-          required: ["batchId", "tasks", "projectRoot"],
+        args: {
+          batchId: z.string().describe("Unique batch identifier"),
+          tasks: z.array(z.object({
+            id: z.string(),
+            description: z.string(),
+            tag: z.string().optional(),
+            provider: z.string(),
+            files: z.array(z.string()).optional(),
+            branch_name: z.string().optional(),
+            review_feedback: z.string().optional(),
+          })).describe("Tasks to execute in parallel"),
+          projectRoot: z.string().describe("Absolute path to project root"),
+          workflowId: z.string().optional().describe("Workflow ID for worktree branch naming"),
+          featureBranch: z.string().optional().describe("Base branch for worktrees"),
         },
         async execute(args: {
           batchId: string
@@ -708,7 +675,6 @@ export const DelegationOrchestrator: Plugin = async ({ client, directory, worktr
               provider,
               prompt,
               config,
-              worktreeState.name,
             )
 
             // Create tracked execution
@@ -764,13 +730,9 @@ export const DelegationOrchestrator: Plugin = async ({ client, directory, worktr
       // -----------------------------------------------------------------
       delegation_await_batch: {
         description: "Wait for all CLI processes in a batch to complete. Polls at 3s intervals with timeout support.",
-        parameters: {
-          type: "object",
-          properties: {
-            batchId: { type: "string", description: "Batch ID to wait for" },
-            timeoutMs: { type: "number", description: "Max wait time in ms (default 600000)" },
-          },
-          required: ["batchId"],
+        args: {
+          batchId: z.string().describe("Batch ID to wait for"),
+          timeoutMs: z.number().optional().describe("Max wait time in ms (default 600000)"),
         },
         async execute(args: { batchId: string; timeoutMs?: number }) {
           const batch = batches.get(args.batchId)
@@ -860,12 +822,8 @@ export const DelegationOrchestrator: Plugin = async ({ client, directory, worktr
       // -----------------------------------------------------------------
       delegation_collect_results: {
         description: "Collect full results from a completed batch: stdout, changed files, diff stats.",
-        parameters: {
-          type: "object",
-          properties: {
-            batchId: { type: "string", description: "Batch ID to collect results from" },
-          },
-          required: ["batchId"],
+        args: {
+          batchId: z.string().describe("Batch ID to collect results from"),
         },
         async execute(args: { batchId: string }) {
           const batch = batches.get(args.batchId)
@@ -928,15 +886,11 @@ export const DelegationOrchestrator: Plugin = async ({ client, directory, worktr
       // -----------------------------------------------------------------
       delegation_redelegate: {
         description: "Re-run a failed task with review feedback. Resets the worktree and re-spawns the CLI process.",
-        parameters: {
-          type: "object",
-          properties: {
-            taskId: { type: "string", description: "Task ID to redelegate" },
-            feedback: { type: "string", description: "Review feedback for the task" },
-            batchId: { type: "string", description: "Batch ID containing the task" },
-            projectRoot: { type: "string", description: "Absolute path to project root" },
-          },
-          required: ["taskId", "feedback", "batchId"],
+        args: {
+          taskId: z.string().describe("Task ID to redelegate"),
+          feedback: z.string().describe("Review feedback for the task"),
+          batchId: z.string().describe("Batch ID containing the task"),
+          projectRoot: z.string().optional().describe("Absolute path to project root"),
         },
         async execute(args: {
           taskId: string
@@ -1007,7 +961,6 @@ export const DelegationOrchestrator: Plugin = async ({ client, directory, worktr
             tracked.provider,
             prompt,
             config,
-            task.worktree_name,
           )
 
           // Reset tracked state
@@ -1043,15 +996,11 @@ export const DelegationOrchestrator: Plugin = async ({ client, directory, worktr
       // -----------------------------------------------------------------
       delegation_merge_task: {
         description: "Merge a completed task's worktree branch into the target branch.",
-        parameters: {
-          type: "object",
-          properties: {
-            taskId: { type: "string", description: "Task ID to merge" },
-            targetBranch: { type: "string", description: "Branch to merge into" },
-            batchId: { type: "string", description: "Batch ID containing the task" },
-            projectRoot: { type: "string", description: "Absolute path to project root" },
-          },
-          required: ["taskId", "targetBranch", "batchId", "projectRoot"],
+        args: {
+          taskId: z.string().describe("Task ID to merge"),
+          targetBranch: z.string().describe("Branch to merge into"),
+          batchId: z.string().describe("Batch ID containing the task"),
+          projectRoot: z.string().describe("Absolute path to project root"),
         },
         async execute(args: {
           taskId: string
@@ -1101,13 +1050,9 @@ export const DelegationOrchestrator: Plugin = async ({ client, directory, worktr
       // -----------------------------------------------------------------
       delegation_cleanup: {
         description: "Remove all delegation worktrees for a workflow. Cleans up branches and worktree directories.",
-        parameters: {
-          type: "object",
-          properties: {
-            workflowId: { type: "string", description: "Workflow ID to clean up" },
-            projectRoot: { type: "string", description: "Absolute path to project root" },
-          },
-          required: ["workflowId", "projectRoot"],
+        args: {
+          workflowId: z.string().describe("Workflow ID to clean up"),
+          projectRoot: z.string().describe("Absolute path to project root"),
         },
         async execute(args: { workflowId: string; projectRoot: string }) {
           const removed = cleanupStaleWorktrees(args.projectRoot, args.workflowId)

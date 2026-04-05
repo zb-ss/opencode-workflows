@@ -67,10 +67,60 @@ export function readState(statePath: string): WorkflowState | null {
 
   try {
     const content = fs.readFileSync(validated, 'utf8');
-    return JSON.parse(content) as WorkflowState;
+    const raw = JSON.parse(content);
+    return normalizeState(raw);
   } catch {
     return null;
   }
+}
+
+/**
+ * Normalize state from different schema conventions.
+ * The supervisor may create state with camelCase keys (workflowId, workflowType)
+ * while the enforcer expects snake_case (workflow_id, workflow_type).
+ * Also ensures required nested objects exist.
+ */
+function normalizeState(raw: Record<string, unknown>): WorkflowState {
+  const state = raw as WorkflowState & Record<string, unknown>;
+
+  // Normalize camelCase → snake_case field names
+  if (!state.workflow_id && state.workflowId) {
+    state.workflow_id = state.workflowId as string;
+  }
+  if (!state.workflow_type && state.workflowType) {
+    state.workflow_type = state.workflowType as string;
+  }
+  if (!state.updated_at && state.updatedAt) {
+    state.updated_at = state.updatedAt as string;
+  }
+
+  // Ensure phase object exists
+  if (!state.phase || typeof state.phase !== 'object') {
+    // Try to infer from delegatePhases or phases array
+    const phases = (state.delegatePhases || state.phases || []) as string[];
+    const gates = (state.gates || {}) as Record<string, { status: string }>;
+    const completed = Object.entries(gates)
+      .filter(([_, g]) => g.status === 'passed' || g.status === 'skipped')
+      .map(([name]) => name);
+    const remaining = phases.filter(p => !completed.includes(p));
+    state.phase = {
+      current: remaining[0] || completed[completed.length - 1] || 'unknown',
+      completed,
+      remaining,
+    };
+  }
+
+  // Ensure gates object exists
+  if (!state.gates) {
+    state.gates = {};
+  }
+
+  // Ensure updated_at exists
+  if (!state.updated_at) {
+    state.updated_at = new Date().toISOString();
+  }
+
+  return state;
 }
 
 /**
