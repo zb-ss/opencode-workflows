@@ -1,20 +1,21 @@
 # OpenCode Workflows
 
-A comprehensive collection of agents, commands, skills, plugins, and workflow templates for [OpenCode](https://opencode.ai).
+A multi-agent automation framework for [OpenCode](https://opencode.ai).
 
-> **Note**: This is v2.0 - a breaking rewrite with multi-model support, swarm execution, and zero-tolerance review system.
+> **Plan in OpenCode. Execute across Claude Code and Gemini CLI in parallel git worktrees.** Route code tasks to Claude Opus for deep implementation, UI tasks to Gemini for pixel-perfect layouts — all running simultaneously in isolated worktrees, reviewed automatically, and merged when approved. Your subscriptions, your CLIs, fully TOS-compliant. See [Delegated Workflows](./docs/delegated-workflows.md).
 
 ## Features
 
-- **30 Agents**: 9 primary + 21 workflow specialists
-- **5 Execution Modes**: eco, turbo, standard, thorough, swarm
-- **4 Enforcement Plugins**: workflow-enforcer, file-validator, model-router, swarm-manager
+- **31 Agents**: 10 primary + 21 workflow specialists
+- **6 Execution Modes**: eco, turbo, standard, thorough, swarm, delegate
+- **6 Plugins**: workflow-enforcer, file-validator, model-router, swarm-manager, delegation-orchestrator, external-cli-delegation
+- **Delegated Execution**: Route tasks to Claude Code CLI and Gemini CLI in parallel git worktrees
 - **Zero-Tolerance Review**: [ISSUE-N] tracking with auto-escalation
 - **Model-Agnostic**: Works with any LLM provider (tested on Zhipu, MiniMax, Google, OpenAI)
 - **E2E Testing Pipeline**: 6-phase Playwright workflow with accessibility-first selectors
 - **Parallel Execution**: SDK-based swarm mode for 3-5x speed improvement
 - **13 Skills**: PHP, Laravel, Vue, Joomla, Symfony, API design, and more
-- **6 Commands, 6 Templates**: Complete automation toolkit
+- **14 Commands, 7 Templates**: Complete automation toolkit
 
 ## Quick Start
 
@@ -44,10 +45,11 @@ node install.mjs
 | **standard** | Medium | Good | No | reviewer | Production features |
 | **thorough** | Slow | Excellent | No | reviewer-deep | Critical, security-sensitive |
 | **swarm** | Fastest | Excellent | Yes (4x) | 3x architect | Large, modular projects |
+| **delegate** | Variable | Excellent | Yes (worktrees) | reviewer-deep | Multi-provider orchestration |
 
 ## Agents
 
-### Primary Agents (9)
+### Primary Agents (10)
 
 | Agent | Purpose | Model Tier |
 |-------|---------|------------|
@@ -58,6 +60,7 @@ node install.mjs
 | **focused-build** | Fast implementation, auto-cleanup | mid |
 | **debug** | Systematic bug hunting | mid |
 | **supervisor** | Orchestrates multi-step workflows | high |
+| **delegator** | External CLI delegation orchestration | mid |
 | **figma-builder** | Pixel-perfect UI from Figma | mid |
 | **web-tester** | E2E testing with Playwright | mid |
 
@@ -105,8 +108,16 @@ Configure model tiers in `~/.config/opencode/workflows.json`:
 
 Each tier is an array — first model is preferred, rest are fallbacks. Use any model ID your provider supports. Swarm and review settings are configured per-mode in `mode/*.json`. See [WORKFLOWS.md](./WORKFLOWS.md) for mode configuration.
 
+### Model configuration modes
+
+- Default installer mode (`node install.mjs`) resolves `model_tier` into concrete `model:` values from `workflows.json`.
+- Runtime model mode (`node install.mjs --runtime-models`) strips `model_tier` and lets OpenCode use `opencode.jsonc` (`model`, `small_model`, `agent.<name>.model`).
+- Use default mode for repository-level tiered orchestration consistency; use runtime mode for simpler per-user model switching in OpenCode.
+
 ## Documentation
 
+- [Delegated Workflows](./docs/delegated-workflows.md) - Multi-provider orchestration, parallel worktrees, task routing, auto-init
+- [External CLI Delegation](./docs/external-cli-delegation.md) - Simple `/delegate` command for one-off CLI prompts
 - [Model Compatibility](./docs/model-compatibility.md) - Multi-model setup, tier configuration, fallback chains
 - [Review System](./docs/review-system.md) - Zero-tolerance protocol, [ISSUE-N] format, escalation
 - [Swarm Mode](./docs/swarm-mode.md) - Parallel execution, SDK spawning, 3-architect validation
@@ -119,13 +130,42 @@ Each tier is an array — first model is preferred, rest are fallbacks. Use any 
 | Command | Description |
 |---------|-------------|
 | `/plan` | Create development plan (org-planner) |
-| `/workflow` | Start automated workflow (feature, figma, bug-fix, refactor, e2e) |
+| `/delegate` | Delegate prompts to official Claude/Gemini CLIs |
+| `/workflow` | Start automated workflow (feature, figma, bug-fix, refactor, e2e, delegate) |
 | `/workflow-resume` | Resume interrupted workflow |
 | `/workflow-status` | Show workflow status |
-| `/commit` | Commit with conventional commit message |
-| `/pr` | Create pull request |
+| `/git-commit` | Commit staged changes (git plugin style) |
+| `/git-pr` | Create PR with `gh` |
+| `/git-pr-checkout` | Checkout PR locally |
+| `/git-pr-review` | Submit PR review |
+| `/git-pr-merge` | Merge PR with strategy flags |
+| `/git-release` | Create GitHub release + changelog |
+| `/git-issue` | Create/view/list/close issues |
+| `/git-browse` | Open repo/PR/issue/file in browser |
+| `/git-workflow-run` | Trigger and inspect GitHub Actions runs |
 
 **Translate module** (optional): `/translate-auto`, `/translate-view`
+
+GitHub command group (`/git-*`) requires `gh` CLI installed and authenticated.
+
+## Delegated Workflows
+
+Orchestrate full features across Claude Code and Gemini CLI in parallel git worktrees:
+
+```bash
+/workflow delegate Add user authentication with OAuth and responsive settings page
+```
+
+OpenCode plans the feature, breaks it into tasks, routes code tasks to Claude and UI tasks to Gemini, executes in parallel worktrees, reviews each result, and merges approved work. See [full documentation](./docs/delegated-workflows.md).
+
+For one-off prompts without the full workflow pipeline:
+
+```bash
+/delegate ask claude --model sonnet "Review this diff for security risks"
+/delegate ask gemini --model gemini-2.5-pro "Design a responsive dashboard"
+```
+
+See [CLI delegation docs](./docs/external-cli-delegation.md) for setup and commands.
 
 ## Skills
 
@@ -153,6 +193,7 @@ Each tier is an array — first model is preferred, rest are fallbacks. Use any 
 | figma-to-code | Design → Build → Review → E2E → A11y | Standard, Thorough |
 | bug-fix | Investigate → Fix → Review → Test | All |
 | refactor | Analyze → Plan → Implement → Review | Standard, Thorough |
+| delegation | Plan → Decompose → Execute (worktrees) → Review → Merge | Delegate |
 | e2e-testing | Setup → Explore → Generate → Validate → QA | All |
 | joomla-translation | Scan → Process → Review (translate module) | Standard |
 
@@ -171,17 +212,25 @@ cd opencode-workflows
 node install.mjs
 ```
 
-Both methods install the **core** module via symlinks into `~/.config/opencode/`. On Windows, copy mode is used by default since symlinks require Developer Mode.
+Both methods install the **core** module via copies into `~/.config/opencode/`.
 
 ### Install Options
 
 ```bash
-node install.mjs                  # Core (symlinks)
-node install.mjs --copy           # Core (copies)
+node install.mjs                  # Core (copy mode, default)
+node install.mjs --symlink        # Core (symlinks, for development)
+node install.mjs --runtime-models # Do not materialize model_tier (use opencode.jsonc models)
 node install.mjs --all            # Core + translate module
 node install.mjs --dry-run        # Preview
 node install.mjs --uninstall      # Remove
 ```
+
+To update after `git pull`: `node install.mjs`
+
+Installer backup policy:
+
+- Keeps a single backup per managed path (`*.backup`)
+- Removes older legacy timestamped backups (`*.backup.<timestamp>`) on reinstall
 
 ### Bootstrap Environment Variables
 
@@ -199,7 +248,7 @@ INSTALL_DIR=~/projects/opencode-workflows curl -fsSL https://raw.githubuserconte
 ### Post-Install
 
 1. Review/edit `~/.config/opencode/opencode.jsonc` for MCP servers and permissions
-2. Configure model tiers in `~/.config/opencode/workflows.json`
+2. Configure models in `~/.config/opencode/workflows.json` (or in `opencode.jsonc` if installed with `--runtime-models`)
 3. Start OpenCode and verify agents are available
 
 ### Updating
@@ -219,7 +268,7 @@ Removes all installed symlinks/copies and the manifest. Your `opencode.jsonc` is
 
 | Module | Contents | Default |
 |--------|----------|---------|
-| **core** | 30 agents, 6 commands, 13 skills, 4 plugins | Yes |
+| **core** | 31 agents, 14 commands, 13 skills, 5 plugins | Yes |
 | **translate** | 3 agents, 2 commands, 8 tools (Joomla i18n) | No |
 
 ## Examples
@@ -266,11 +315,11 @@ opencode run --mode swarm "Implement shopping cart feature"
 ```
 opencode-workflows/
 ├── agent/
-│   ├── primary/            # 9 primary agents
+│   ├── primary/            # 10 primary agents
 │   └── workflow/           # 21 workflow agents
-├── command/                # 6 slash commands
+├── command/                # 14 slash commands
 ├── skill/                  # 13 coding conventions
-├── plugin/                 # 4 enforcement plugins
+├── plugin/                 # 5 workflow plugins
 ├── mode/                   # 5 execution mode configs
 ├── templates/              # 6 workflow templates
 ├── tool/                   # Translation tools (optional)

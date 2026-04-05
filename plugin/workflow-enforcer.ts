@@ -34,6 +34,10 @@ import { log } from "../lib/logger.ts"
 import type { GateStatus } from "../lib/types.ts"
 
 export const WorkflowEnforcer: Plugin = async ({ client, directory }) => {
+  // Get zod for tool arg schemas. Dynamic import resolves from config dir's node_modules.
+  const { tool: pluginTool } = await import('@opencode-ai/plugin')
+  const z = pluginTool.schema
+
   // Stop-guard counters (replaces file-based counters from Claude Code hooks)
   const stopCounters = new Map<string, number>()
   const staleTrackers = new Map<string, { updated_at: string; count: number }>()
@@ -110,16 +114,18 @@ export const WorkflowEnforcer: Plugin = async ({ client, directory }) => {
     tool: {
       workflow_check_completion: {
         description: "Check if workflow can be completed. Returns pending gates and completion status. Must be called before ending a workflow.",
-        parameters: {
-          type: "object",
-          properties: {
-            sessionId: { type: "string", description: "Current session ID" }
-          },
-          required: ["sessionId"]
+        args: {
+          sessionId: z.string().describe("Current session ID"),
+          workflowId: z.string().optional().describe("Workflow ID (direct lookup fallback if session binding missing)"),
         },
-        async execute(args: { sessionId: string }) {
+        async execute(args: { sessionId: string; workflowId?: string }) {
           const { sessionId } = args
-          const active = getWorkflowForSession(sessionId)
+          let active = getWorkflowForSession(sessionId)
+          // Fallback: search by workflow ID if session lookup fails
+          if (!active && args.workflowId) {
+            const states = findActiveStates()
+            active = states.find(s => s.state.workflow_id === args.workflowId) || null
+          }
 
           if (!active) {
             return JSON.stringify({ canComplete: true, pendingGates: [], reason: "No active workflow" })
@@ -177,18 +183,19 @@ export const WorkflowEnforcer: Plugin = async ({ client, directory }) => {
 
       workflow_update_gate: {
         description: "Update a workflow gate status after an agent completes. Call this after each agent finishes.",
-        parameters: {
-          type: "object",
-          properties: {
-            sessionId: { type: "string", description: "Current session ID" },
-            gateName: { type: "string", description: "Gate name (e.g., 'planning', 'code_review')" },
-            status: { type: "string", enum: ["pending", "in_progress", "passed", "failed", "skipped"], description: "New gate status" },
-            agentType: { type: "string", description: "Agent type that completed (e.g., 'reviewer')" }
-          },
-          required: ["sessionId", "gateName", "status"]
+        args: {
+          sessionId: z.string().describe("Current session ID"),
+          gateName: z.string().describe("Gate name (e.g., 'planning', 'code_review')"),
+          status: z.enum(["pending", "in_progress", "passed", "failed", "skipped"]).describe("New gate status"),
+          agentType: z.string().optional().describe("Agent type that completed (e.g., 'reviewer')"),
+          workflowId: z.string().optional().describe("Workflow ID (direct lookup fallback if session binding missing)"),
         },
-        async execute(args: { sessionId: string; gateName: string; status: string; agentType?: string }) {
-          const active = getWorkflowForSession(args.sessionId)
+        async execute(args: { sessionId: string; gateName: string; status: string; agentType?: string; workflowId?: string }) {
+          let active = getWorkflowForSession(args.sessionId)
+          if (!active && args.workflowId) {
+            const states = findActiveStates()
+            active = states.find(s => s.state.workflow_id === args.workflowId) || null
+          }
           if (!active) return "No active workflow found"
 
           const updated = updateState(active.path, (state) => {
@@ -242,21 +249,13 @@ export const WorkflowEnforcer: Plugin = async ({ client, directory }) => {
 
       workflow_bind_session: {
         description: "Bind the current session to a workflow. Creates .state.json tracking file if given an .org path. Call this at workflow start.",
-        parameters: {
-          type: "object",
-          properties: {
-            sessionId: { type: "string", description: "Current session ID" },
-            workflowPath: { type: "string", description: "Path to the workflow .org file or .state.json file" },
-            workflowId: { type: "string", description: "Workflow ID (e.g., wf-2026-02-26-001)" },
-            workflowType: { type: "string", description: "Workflow type (feature, bugfix, refactor, figma, e2e)" },
-            mode: { type: "string", description: "Execution mode (standard, turbo, eco, thorough, swarm)" },
-            phases: {
-              type: "array",
-              items: { type: "string" },
-              description: "Ordered list of gate names (e.g., ['planning', 'implementation', 'code_review', ...])"
-            }
-          },
-          required: ["sessionId", "workflowPath"]
+        args: {
+          sessionId: z.string().describe("Current session ID"),
+          workflowPath: z.string().describe("Path to the workflow .org file or .state.json file"),
+          workflowId: z.string().optional().describe("Workflow ID (e.g., wf-2026-02-26-001)"),
+          workflowType: z.string().optional().describe("Workflow type (feature, bugfix, refactor, figma, e2e)"),
+          mode: z.string().optional().describe("Execution mode (standard, turbo, eco, thorough, swarm)"),
+          phases: z.array(z.string()).optional().describe("Ordered list of gate names (e.g., ['planning', 'implementation', 'code_review', ...])")
         },
         async execute(args: {
           sessionId: string;
@@ -312,15 +311,16 @@ export const WorkflowEnforcer: Plugin = async ({ client, directory }) => {
 
       workflow_get_state: {
         description: "Get the current workflow state for a session.",
-        parameters: {
-          type: "object",
-          properties: {
-            sessionId: { type: "string", description: "Current session ID" }
-          },
-          required: ["sessionId"]
+        args: {
+          sessionId: z.string().describe("Current session ID"),
+          workflowId: z.string().optional().describe("Workflow ID (direct lookup fallback if session binding missing)"),
         },
-        async execute(args: { sessionId: string }) {
-          const active = getWorkflowForSession(args.sessionId)
+        async execute(args: { sessionId: string; workflowId?: string }) {
+          let active = getWorkflowForSession(args.sessionId)
+          if (!active && args.workflowId) {
+            const states = findActiveStates()
+            active = states.find(s => s.state.workflow_id === args.workflowId) || null
+          }
           if (!active) return JSON.stringify({ active: false })
 
           return JSON.stringify({

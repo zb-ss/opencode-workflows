@@ -1,5 +1,5 @@
 ---
-description: Resume an interrupted workflow
+description: Resume workflow: /workflow-resume [workflow-id]
 agent: supervisor
 model_tier: mid
 ---

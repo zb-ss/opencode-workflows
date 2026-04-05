@@ -1,0 +1,30 @@
+{
+  "name": "delegate",
+  "description": "External CLI delegation mode with parallel worktree execution",
+  "agent_routing": {
+    "planning": "architect",
+    "decomposition": "architect",
+    "execution": "delegator",
+    "review": "reviewer-deep",
+    "merge": "supervisor",
+    "quality_gate": "quality-gate",
+    "completion_guard": "completion-guard"
+  },
+  "model_tiers": {
+    "forbidden": []
+  },
+  "settings": {
+    "max_review_iterations": 3,
+    "max_security_iterations": 2,
+    "max_quality_gate_iterations": 3,
+    "max_completion_guard_iterations": 3,
+    "parallel_execution": true,
+    "test_required": false
+  },
+  "delegation": {
+    "max_parallel_worktrees": 4,
+    "review_after_each": true,
+    "merge_strategy": "no-ff",
+    "auto_init_files": true
+  }
+}

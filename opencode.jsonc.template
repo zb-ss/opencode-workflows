@@ -4,6 +4,10 @@
     "CONVENTIONS.md"
   ],
 
+  // Global model defaults (official OpenCode keys)
+  "model": "google/gemini-3-pro",
+  "small_model": "google/gemini-3-flash",
+
   // MCP servers - add your own here
   // See: https://opencode.ai/docs/config/mcp
   //
@@ -43,19 +47,29 @@
   // Workflow configuration lives in a separate file:
   //   ~/.config/opencode/workflows.json
   // See workflows.json.template for the default configuration.
-
-  // Per-agent tool access and permission overrides
+  //
+  // Default installer mode resolves command/agent model_tier values from workflows.json.
+  // If installed with --runtime-models, command/agent files do not pin models and this
+  // OpenCode config controls runtime model selection directly.
   //
   // "agent": {
-  //   "discussion": {
-  //     "tools": { "github_*": true }
-  //   },
-  //   "web-tester": {
-  //     "tools": { "playwright_*": true, "chrome-devtools_*": true }
-  //   },
-  //   "commit": {
-  //     "permission": { "bash": { "git commit*": "allow" } }
-  //   }
-  // }
-  "agent": {}
+  //   "build": { "model": "google/gemini-3-flash" },
+  //   "supervisor": { "model": "google/gemini-3-pro" },
+  //   "org-planner": { "model": "zhipu/glm-5" },
+  //   "delegator": { "model": "google/gemini-3-pro" }
+  // },
+  //
+  // 3) Commands inherit their configured agent model.
+  //    (Use command-level overrides only when defining full command templates in config.)
+
+  // Per-agent model/tool/permission overrides
+  //
+  "agent": {
+    // "supervisor": { "model": "google/gemini-3-pro" },
+    // "org-planner": { "model": "zhipu/glm-5" },
+    // "delegator": { "model": "google/gemini-3-pro" },
+    // "web-tester": {
+    //   "tools": { "playwright_*": true, "chrome-devtools_*": true }
+    // }
+  }
 }

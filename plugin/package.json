@@ -1,5 +1,6 @@
 {
   "dependencies": {
-    "@opencode-ai/sdk": "latest"
+    "@opencode-ai/sdk": "latest",
+    "zod": "^3.24.0"
   }
 }

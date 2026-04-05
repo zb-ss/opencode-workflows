@@ -1,5 +1,5 @@
 ---
-description: Create a detailed development plan saved as an org file
+description: Create plan: /plan <feature-or-task>
 agent: org-planner
 model_tier: low
 ---

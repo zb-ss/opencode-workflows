@@ -1,5 +1,5 @@
 ---
-description: Fully automatic Joomla translation workflow with review loop
+description: Auto-translate Joomla component: /translate-auto <component> <target>
 agent: supervisor
 model_tier: mid
 ---
