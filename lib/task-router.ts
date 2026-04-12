@@ -119,17 +119,23 @@ export function buildClaudeArgs(
 
 /**
  * Builds CLI argument array for the gemini command.
+ * Always emits `--model` using the value from config. Throws if
+ * `delegation.gemini.model` is not set in workflows.json — the model must
+ * be defined in config so it can be updated without touching code.
  */
 export function buildGeminiArgs(
   prompt: string,
   config: DelegationOrchestratorConfig,
 ): string[] {
-  const args: string[] = []
-
-  if (config.gemini.model) {
-    args.push('--model', config.gemini.model)
+  const model = config.gemini.model
+  if (!model) {
+    throw new Error(
+      'delegation.gemini.model is not set in workflows.json. ' +
+      'Add it under the "delegation.gemini" key (e.g. "model": "gemini-3.1-pro-preview").',
+    )
   }
 
+  const args: string[] = ['--model', model]
   args.push('--yolo')
   args.push('--output-format', 'json')
   args.push('--prompt', prompt)

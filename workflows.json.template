@@ -83,9 +83,9 @@
       "_example_timeout_ms": 300000,
       "_example_permission_mode": "dangerously-skip-permissions"
     },
-    "_comment_gemini": "Gemini CLI delegation. 'model' passed as --model.",
+    "_comment_gemini": "Gemini CLI delegation. 'model' is REQUIRED — always passed as --model. Delegation throws if unset.",
     "gemini": {
-      "_example_model": "gemini-3.1-pro-preview",
+      "model": "gemini-3.1-pro-preview",
       "_example_timeout_ms": 300000
     },
     "_comment_max_parallel": "Maximum parallel worktree executions for delegate workflows.",
