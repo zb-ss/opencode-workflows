@@ -123,6 +123,10 @@ async function sendNotification(
  * Main plugin export
  */
 export const WorkflowNotifications: Plugin = async ({ $, client }) => {
+  // Get zod for tool arg schemas. Dynamic import resolves from config dir's node_modules.
+  const { tool: pluginTool } = await import('@opencode-ai/plugin')
+  const z = pluginTool.schema
+
   // Track seen events to avoid duplicate notifications
   const seenEvents = new Set<string>()
   // Track gate states for transition detection
@@ -258,33 +262,12 @@ export const WorkflowNotifications: Plugin = async ({ $, client }) => {
     tool: {
       workflow_notify: {
         description: "Send a workflow notification to the desktop. Can also announce gate transitions.",
-        parameters: {
-          type: "object",
-          properties: {
-            title: {
-              type: "string",
-              description: "Notification title"
-            },
-            message: {
-              type: "string",
-              description: "Notification message"
-            },
-            urgency: {
-              type: "string",
-              enum: ["low", "normal", "critical"],
-              description: "Notification urgency level"
-            },
-            gate: {
-              type: "string",
-              description: "Gate name if this is a gate transition notification"
-            },
-            gateStatus: {
-              type: "string",
-              enum: ["passed", "failed", "in_progress", "skipped"],
-              description: "New gate status"
-            }
-          },
-          required: ["title", "message"]
+        args: {
+          title: z.string().describe("Notification title"),
+          message: z.string().describe("Notification message"),
+          urgency: z.enum(["low", "normal", "critical"]).optional().describe("Notification urgency level"),
+          gate: z.string().optional().describe("Gate name if this is a gate transition notification"),
+          gateStatus: z.enum(["passed", "failed", "in_progress", "skipped"]).optional().describe("New gate status"),
         },
         async execute(args: { title?: string; message?: string; urgency?: string; gate?: string; gateStatus?: string }) {
           const title = args?.title || 'OpenCode Workflow'
