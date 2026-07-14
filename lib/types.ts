@@ -242,6 +242,7 @@ export interface SwarmBatch {
 // Delegation Orchestration Types
 // ---------------------------------------------------------------------------
 
+// The `gemini` routing token executes Gemini models through Antigravity CLI (`agy`).
 export type DelegationProvider = 'claude' | 'gemini'
 export type DelegationTaskTag = 'code' | 'ui'
 export type DelegationTaskStatus = 'pending' | 'executing' | 'reviewing' | 'passed' | 'failed' | 'merged'
@@ -251,6 +252,7 @@ export interface DelegationTask {
   description: string
   tag: DelegationTaskTag
   provider: DelegationProvider
+  model: string | null
   prompt: string
   files: string[]
   worktree_name: string | null
@@ -291,7 +293,6 @@ export interface DelegationRoutingConfig {
 }
 
 export interface DelegationProviderConfig {
-  model?: string
   timeout_ms?: number
   permission_mode?: string
 }

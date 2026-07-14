@@ -152,12 +152,25 @@ describe('installer subprocess', () => {
     assert.equal(fs.readFileSync(path.join(fixture.configDir, 'opencode.json'), 'utf8'), opencodeConfig)
     assert.equal(fs.readFileSync(path.join(fixture.configDir, 'workflows.json'), 'utf8'), workflowsConfig)
 
+    const legacyWorkflowConfig = JSON.parse(workflowsConfig)
+    legacyWorkflowConfig.delegation = {
+      claude: { model: 'stale-claude-alias', timeout_ms: 10000 },
+      gemini: { model: 'stale-gemini-alias', timeout_ms: 10000 },
+    }
+    fs.writeFileSync(
+      path.join(fixture.configDir, 'workflows.json'),
+      `${JSON.stringify(legacyWorkflowConfig, null, 2)}\n`,
+    )
     fs.chmodSync(path.join(fixture.configDir, 'workflows.json'), 0o600)
     const migrated = runInstaller(fixture, ['--migrate'])
     assert.equal(migrated.status, 0, migrated.stderr || migrated.stdout)
     const migratedConfig = JSON.parse(fs.readFileSync(path.join(fixture.configDir, 'workflows.json'), 'utf8'))
     assert.deepEqual(migratedConfig.model_tiers.mid, [{ model: 'provider/primary' }])
     assert.deepEqual(migratedConfig.fallback_order, [{ model: 'provider/fallback' }])
+    assert.deepEqual(migratedConfig.delegation, {
+      claude: { timeout_ms: 10000 },
+      gemini: { timeout_ms: 10000 },
+    })
     assert.equal(fs.existsSync(path.join(fixture.configDir, 'workflows.json.backup')), true)
     assert.equal(fs.statSync(path.join(fixture.configDir, 'workflows.json')).mode & 0o777, 0o600)
 

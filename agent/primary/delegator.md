@@ -1,5 +1,5 @@
 ---
-description: Delegates prompts to official Claude and Gemini CLIs in headless mode
+description: Delegates prompts to Claude Code and Antigravity CLI in headless mode
 mode: primary
 temperature: 0.2
 steps: 4

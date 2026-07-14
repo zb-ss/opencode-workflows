@@ -945,13 +945,22 @@ export function migrateWorkflowConfig(dryRun = false) {
       changed = true
     }
   }
+  if (config.delegation && typeof config.delegation === 'object') {
+    for (const provider of ['claude', 'gemini']) {
+      const providerConfig = config.delegation[provider]
+      if (providerConfig && typeof providerConfig === 'object' && 'model' in providerConfig) {
+        delete providerConfig.model
+        changed = true
+      }
+    }
+  }
 
   if (!changed) {
     console.log('workflows.json is already current; no migration needed.')
     return
   }
   if (dryRun) {
-    console.log('Migration would normalize workflow candidates and capability flags.')
+    console.log('Migration would normalize workflow candidates, capability flags, and delegation settings.')
     return
   }
 
@@ -1031,7 +1040,7 @@ Options:
   --all                  Install core and translation modules
   --module <name>        Install core or translation module
   --doctor               Validate version, config, manifest, and managed files
-  --migrate              Migrate string model candidates and legacy capability flags
+  --migrate              Migrate model candidates, capability flags, and delegation settings
   --uninstall            Safely remove owned installed files; preserve user configs
   --dry-run              Preview install, migration, or uninstall actions
   --help                 Show this help

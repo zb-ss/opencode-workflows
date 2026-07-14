@@ -13,7 +13,7 @@ import {
 } from '../../plugin/external-cli-delegation.ts'
 
 interface LoggedInvocation {
-  provider: 'claude' | 'gemini'
+  provider: 'claude' | 'agy'
   args: string[]
   cwd: string
 }
@@ -50,7 +50,7 @@ if (provider === 'claude' && args[0] === 'auth' && args[1] === 'status') {
 }
 
 const mode = process.env['FAKE_' + provider.toUpperCase() + '_MODE'] || 'success'
-const promptIndex = provider === 'claude' ? args.lastIndexOf('--') + 1 : args.indexOf('--prompt') + 1
+const promptIndex = provider === 'claude' ? args.lastIndexOf('--') + 1 : args.indexOf('--print') + 1
 const prompt = promptIndex > 0 ? args[promptIndex] : ''
 
 if (mode === 'auth-fail') {
@@ -67,10 +67,8 @@ if (mode === 'slow') {
   process.stdout.write('x'.repeat(Number(process.env.FAKE_OUTPUT_BYTES || '200000')))
 } else if (provider === 'claude') {
   process.stdout.write(JSON.stringify({ result: 'claude:' + prompt, session_id: 'fake-session-token' }))
-} else if (args.includes('--output-format') && args.includes('json')) {
-  process.stdout.write(JSON.stringify({ response: 'gemini:' + prompt }))
 } else {
-  process.stdout.write('gemini:' + prompt)
+  process.stdout.write('antigravity:' + prompt)
 }
 `
 
@@ -83,7 +81,7 @@ function createHarness(test: TestContext): Harness {
   fs.mkdirSync(configDirectory, { recursive: true })
   fs.mkdirSync(worktree, { recursive: true })
   fs.mkdirSync(binaryDirectory, { recursive: true })
-  for (const provider of ['claude', 'gemini']) {
+  for (const provider of ['claude', 'agy']) {
     const binaryPath = path.join(binaryDirectory, provider)
     fs.writeFileSync(binaryPath, fakeCliSource, { mode: 0o700 })
   }
@@ -93,14 +91,14 @@ function createHarness(test: TestContext): Harness {
     path: process.env.PATH,
     log: process.env.FAKE_CLI_LOG,
     claudeMode: process.env.FAKE_CLAUDE_MODE,
-    geminiMode: process.env.FAKE_GEMINI_MODE,
+    agyMode: process.env.FAKE_AGY_MODE,
     outputBytes: process.env.FAKE_OUTPUT_BYTES,
   }
   process.env.OPENCODE_CONFIG_DIR = configDirectory
   process.env.PATH = `${binaryDirectory}${path.delimiter}${previousEnvironment.path ?? ''}`
   process.env.FAKE_CLI_LOG = logPath
   delete process.env.FAKE_CLAUDE_MODE
-  delete process.env.FAKE_GEMINI_MODE
+  delete process.env.FAKE_AGY_MODE
   delete process.env.FAKE_OUTPUT_BYTES
 
   test.after(() => {
@@ -112,7 +110,7 @@ function createHarness(test: TestContext): Harness {
     restore('PATH', previousEnvironment.path)
     restore('FAKE_CLI_LOG', previousEnvironment.log)
     restore('FAKE_CLAUDE_MODE', previousEnvironment.claudeMode)
-    restore('FAKE_GEMINI_MODE', previousEnvironment.geminiMode)
+    restore('FAKE_AGY_MODE', previousEnvironment.agyMode)
     restore('FAKE_OUTPUT_BYTES', previousEnvironment.outputBytes)
     fs.rmSync(root, { recursive: true, force: true })
   })
@@ -278,7 +276,40 @@ describe('external CLI delegation', () => {
     assert.equal(result.success, true)
     assert.equal(result.provider, 'gemini')
     assert.deepEqual(attempts.map(attempt => attempt.category), ['auth_required', 'success'])
-    assert.deepEqual(harness.invocations().map(invocation => invocation.provider), ['claude', 'gemini'])
+    assert.deepEqual(harness.invocations().map(invocation => invocation.provider), ['claude', 'agy'])
+  })
+
+  it('uses Antigravity defaults unless a model is selected for the run', async test => {
+    const harness = createHarness(test)
+    const tools = await pluginTools()
+    harness.writeConfig({ delegation: { gemini: { model: 'stale-config-alias' } } })
+
+    const defaultResult = await executeJson(tools, 'delegate_run', {
+      provider: 'gemini',
+      prompt: 'default model',
+      allowFallback: false,
+    }, harness.context('session-antigravity-default'))
+    const selectedResult = await executeJson(tools, 'delegate_run', {
+      provider: 'gemini',
+      prompt: 'manual model',
+      model: 'manual-model-alias',
+      allowFallback: false,
+    }, harness.context('session-antigravity-model'))
+    const invocations = harness.invocations()
+
+    assert.equal(defaultResult.success, true)
+    assert.equal(selectedResult.success, true)
+    assert.deepEqual(invocations[0], {
+      provider: 'agy',
+      args: ['--print', 'default model'],
+      cwd: harness.worktree,
+    })
+    assert.deepEqual(invocations[1].args, [
+      '--print',
+      'manual model',
+      '--model',
+      'manual-model-alias',
+    ])
   })
 
   it('passes prompts and model aliases as literal argv without shell injection', async test => {
@@ -306,7 +337,7 @@ describe('external CLI delegation', () => {
   it('caps in-memory and private-file output while preserving mode-0600 records', async test => {
     const harness = createHarness(test)
     const tools = await pluginTools()
-    process.env.FAKE_GEMINI_MODE = 'large'
+    process.env.FAKE_AGY_MODE = 'large'
     process.env.FAKE_OUTPUT_BYTES = '200000'
     harness.writeConfig({ delegation: { max_output_bytes: 100_000 } })
     const context = harness.context('session-large')

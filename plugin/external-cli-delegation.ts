@@ -39,7 +39,6 @@ type AttemptCategory =
   | 'empty_output'
 
 interface ProviderConfig {
-  model?: string
   timeout_ms?: number
   permission_mode?: string
 }
@@ -154,6 +153,7 @@ export interface ExecuteDelegationArgs {
   resumeToken?: string | null
   parentRunId?: string | null
   model?: string | null
+  antigravityMode?: 'accept-edits' | 'plan'
 }
 
 interface PreflightOptions {
@@ -306,7 +306,6 @@ function loadDelegationConfig(): DelegationConfig {
       const value = section[provider]
       if (!isRecord(value)) return undefined
       const config: ProviderConfig = {}
-      if (typeof value.model === 'string') config.model = value.model
       if (typeof value.timeout_ms === 'number') config.timeout_ms = value.timeout_ms
       if (typeof value.permission_mode === 'string') config.permission_mode = value.permission_mode
       return Object.keys(config).length > 0 ? config : undefined
@@ -335,6 +334,14 @@ function loadDelegationConfig(): DelegationConfig {
 
 function isProvider(value: unknown): value is DelegationProvider {
   return value === 'claude' || value === 'gemini'
+}
+
+function providerCommand(provider: DelegationProvider): string {
+  return provider === 'claude' ? 'claude' : 'agy'
+}
+
+function providerLabel(provider: DelegationProvider): string {
+  return provider === 'claude' ? 'Claude Code' : 'Antigravity CLI'
 }
 
 export function buildProviderOrder(
@@ -781,7 +788,9 @@ function configuredUnsafeFlag(
   if (provider === 'claude' && mode === 'dangerously-skip-permissions') {
     return '--dangerously-skip-permissions'
   }
-  if (provider === 'gemini' && mode === 'yolo') return '--yolo'
+  if (provider === 'gemini' && mode === 'dangerously-skip-permissions') {
+    return '--dangerously-skip-permissions'
+  }
 
   warnings.push(`Ignored unsupported ${provider} permission_mode '${mode}'.`)
   return null
@@ -794,6 +803,7 @@ export function getProviderArgs(
   resumeToken: string | null,
   modelAlias: string | null,
   unsafeFlag: string | null = null,
+  antigravityMode?: 'accept-edits' | 'plan',
 ): string[] {
   if (provider === 'claude') {
     const args = ['--print']
@@ -806,9 +816,9 @@ export function getProviderArgs(
 
   const args: string[] = []
   if (unsafeFlag) args.push(unsafeFlag)
+  if (antigravityMode) args.push('--mode', antigravityMode)
+  args.push('--print', prompt)
   if (modelAlias) args.push('--model', modelAlias)
-  if (outputFormat === 'json') args.push('--output-format', 'json')
-  args.push('--prompt', prompt)
   return args
 }
 
@@ -959,18 +969,20 @@ async function runAttempt(
   resumeToken: string | null,
   modelAlias: string | null,
   unsafeFlag: string | null,
+  antigravityMode: 'accept-edits' | 'plan' | undefined,
   runId: string,
   attemptNumber: number,
   maxOutputBytes: number,
   executionDirectory = invocation.directory,
 ): Promise<ProviderAttempt> {
-  const binary = resolveExecutable(provider)
+  const command = providerCommand(provider)
+  const binary = resolveExecutable(command)
   const warnings: string[] = []
   if (!binary) {
     return failedAttempt(
       provider,
       'missing_binary',
-      `${provider} CLI not found in PATH`,
+      `${providerLabel(provider)} (${command}) not found in PATH`,
       null,
       warnings,
       emptyAttemptOutput(),
@@ -980,7 +992,7 @@ async function runAttempt(
 
   const effectiveResumeToken = provider === 'claude' ? resumeToken : null
   if (provider === 'gemini' && resumeToken) {
-    warnings.push('Gemini CLI does not support session-based resume; using stateless mode.')
+    warnings.push('Antigravity resume is not enabled by this integration; using stateless mode.')
   }
 
   await requestExternalExecution(context, provider, executionDirectory, unsafeFlag)
@@ -992,6 +1004,7 @@ async function runAttempt(
     effectiveResumeToken,
     modelAlias,
     unsafeFlag,
+    antigravityMode,
   )
   const result = await execCommand(binary, args, {
     timeoutMs,
@@ -1147,7 +1160,7 @@ async function executeDelegationInDirectory(
     const providerConfig = config[provider]
     const warnings: string[] = []
     const unsafeFlag = configuredUnsafeFlag(provider, providerConfig, warnings)
-    const modelAlias = explicitModelAlias ?? normalizeModelAlias(providerConfig?.model)
+    const modelAlias = explicitModelAlias
     const timeoutMs = clampTimeout(providerConfig?.timeout_ms, defaultTimeout)
     const attempt = await runAttempt(
       context,
@@ -1159,6 +1172,7 @@ async function executeDelegationInDirectory(
       resumeToken,
       modelAlias,
       unsafeFlag,
+      args.antigravityMode,
       runId,
       attempts.length + 1,
       config.max_output_bytes ?? DEFAULT_MAX_OUTPUT_BYTES,
@@ -1265,7 +1279,8 @@ async function preflightProvider(
   options: PreflightOptions = {},
 ): Promise<PreflightResult> {
   const invocation = resolveInvocationPaths(context)
-  const binary = resolveExecutable(provider)
+  const command = providerCommand(provider)
+  const binary = resolveExecutable(command)
   const warnings: string[] = []
   if (!binary) {
     return {
@@ -1274,7 +1289,7 @@ async function preflightProvider(
       binary_path: null,
       version: null,
       auth_state: 'unknown',
-      warnings: [`${provider} CLI not found in PATH`],
+      warnings: [`${providerLabel(provider)} (${command}) not found in PATH`],
       ready: false,
     }
   }
@@ -1297,7 +1312,7 @@ async function preflightProvider(
   if (options.checkAuth !== false) {
     const authArgs = provider === 'claude'
       ? ['auth', 'status']
-      : ['--prompt', 'ping', '--output-format', 'text']
+      : ['--print', 'Reply with OK only.']
     const authTimeoutMs = clampTimeout(options.authTimeoutMs, MIN_TIMEOUT_MS)
     const authResult = await execCommand(binary, authArgs, {
       timeoutMs: authTimeoutMs,
@@ -1319,9 +1334,9 @@ async function preflightProvider(
   }
 
   if (authState === 'unknown') {
-    warnings.push(`Could not confidently determine ${provider} auth state. Run '${provider}' interactively if needed.`)
+    warnings.push(`Could not confidently determine ${provider} auth state. Run '${command}' interactively if needed.`)
   } else if (authState === 'unauthenticated') {
-    warnings.push(`${provider} appears unauthenticated. Run '${provider}' interactively to complete login.`)
+    warnings.push(`${provider} appears unauthenticated. Run '${command}' interactively to complete login.`)
   }
 
   return {
@@ -1421,7 +1436,7 @@ export function splitDelegateArgs(input: string): string[] {
 
 const COMMAND_USAGE = [
   '/delegate status [provider] [--auth]',
-  '/delegate ask <provider|auto> <prompt>',
+  '/delegate ask <provider|auto> [--model <model>] <prompt>',
   '/delegate followup <run-id> <prompt>',
   '/delegate runs [limit]',
   '/delegate show <run-id>',
@@ -1505,6 +1520,7 @@ async function executeWorktreeCommand(tokens: string[], context: ToolContext): P
     provider,
     prompt,
     model,
+    antigravityMode: provider === 'gemini' ? 'accept-edits' : undefined,
     timeoutMs: 300_000,
     workflowId: effectiveWorkflowId,
   }, context, fs.realpathSync(worktreePath))
@@ -1642,9 +1658,9 @@ export const ExternalCliDelegation: Plugin = async () => {
       }),
 
       delegate_preflight: pluginTool({
-        description: 'Check external CLI delegation readiness for Claude and Gemini CLIs.',
+        description: 'Check external CLI delegation readiness for Claude Code and Antigravity CLI.',
         args: {
-          providers: z.string().optional().describe('Comma-separated providers to check (claude,gemini). Defaults to both.'),
+          providers: z.string().optional().describe('Comma-separated routing tokens to check (claude,gemini); gemini invokes agy. Defaults to both.'),
           checkAuth: z.boolean().optional().describe('Whether to probe provider auth state'),
         },
         async execute(args: { providers?: string; checkAuth?: boolean }, context: ToolContext) {
@@ -1672,9 +1688,9 @@ export const ExternalCliDelegation: Plugin = async () => {
       }),
 
       delegate_run: pluginTool({
-        description: 'Run a prompt through Claude CLI, Gemini CLI, or provider fallback and persist a session-scoped record.',
+        description: 'Run a prompt through Claude Code, Antigravity CLI, or provider fallback and persist a session-scoped record.',
         args: {
-          provider: z.string().describe('Target provider: claude, gemini, or auto'),
+          provider: z.string().describe('Target routing token: claude, gemini (Antigravity), or auto'),
           prompt: z.string().describe('Prompt to send to the provider CLI'),
           outputFormat: z.string().optional().describe('Output format: text or json'),
           timeoutMs: z.number().optional().describe('Process timeout in milliseconds'),
@@ -1682,7 +1698,7 @@ export const ExternalCliDelegation: Plugin = async () => {
           allowFallback: z.boolean().optional().describe('Allow fallback to the next external provider'),
           resumeToken: z.string().optional().describe('Optional provider-native session token for resume'),
           parentRunId: z.string().optional().describe('Optional run ID that this invocation follows'),
-          model: z.string().optional().describe('External provider CLI model alias, not an OpenCode provider/model ID'),
+          model: z.string().optional().describe('Optional request-scoped provider CLI model alias, not an OpenCode provider/model ID'),
         },
         async execute(args: {
           provider: string

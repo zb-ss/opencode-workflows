@@ -17,6 +17,12 @@ bun.lock
 # Secrets and credentials
 *.secret
 *.key
+*.pem
+*.p12
+*.pfx
+*.backup
+*.bak
+.creds
 .env
 .env.*
 

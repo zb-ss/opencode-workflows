@@ -1,6 +1,6 @@
 # Swarm Mode
 
-Swarm runs independent OpenCode subagent sessions concurrently through `@opencode-ai/sdk`. It is not a CLI process fallback, does not invoke Claude or Gemini executables, and does not create Git worktrees.
+Swarm runs independent OpenCode subagent sessions concurrently through `@opencode-ai/sdk`. It is not a CLI process fallback, does not invoke Claude Code or Antigravity executables, and does not create Git worktrees.
 
 ## Tools
 

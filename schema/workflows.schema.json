@@ -166,7 +166,6 @@
     "delegationProvider": {
       "type": "object",
       "properties": {
-        "model": { "type": "string", "minLength": 1 },
         "timeout_ms": { "type": "integer", "minimum": 1 },
         "permission_mode": { "type": "string", "minLength": 1 }
       },

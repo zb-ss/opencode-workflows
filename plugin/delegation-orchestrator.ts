@@ -1,7 +1,7 @@
 /**
  * OpenCode Delegation Orchestrator Plugin
  *
- * Manages plan decomposition, safe worktree lifecycle, external Claude/Gemini
+ * Manages plan decomposition, safe worktree lifecycle, external Claude/Antigravity
  * processes, re-delegation, merging, and cleanup.
  */
 
@@ -36,7 +36,7 @@ const DEFAULT_AWAIT_TIMEOUT_MS = 600_000
 const POLL_INTERVAL_MS = 3_000
 const CUSTOM_PERMISSION = 'delegation'
 const UNSAFE_PERMISSION = 'delegation_unsafe'
-const UNSAFE_FLAGS = new Set(['--dangerously-skip-permissions', '--yolo'])
+const UNSAFE_FLAGS = new Set(['--dangerously-skip-permissions'])
 const SAFE_SLUG = /^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?$/
 
 const DEFAULT_CONFIG: DelegationOrchestratorConfig = {
@@ -74,6 +74,7 @@ interface DelegationTaskInput {
   description: string
   tag?: DelegationTaskTag
   provider: DelegationProvider
+  model?: string
   files?: string[]
   branch_name?: string
   review_feedback?: string | null
@@ -318,8 +319,8 @@ function unsafeFlagFor(provider: DelegationProvider, config: DelegationOrchestra
   if (provider === 'claude' && config.claude.permission_mode === 'dangerously-skip-permissions') {
     return '--dangerously-skip-permissions'
   }
-  if (provider === 'gemini' && config.gemini.permission_mode === 'yolo') {
-    return '--yolo'
+  if (provider === 'gemini' && config.gemini.permission_mode === 'dangerously-skip-permissions') {
+    return '--dangerously-skip-permissions'
   }
   return null
 }
@@ -560,13 +561,14 @@ function buildAuthorizedCliArgs(
   prompt: string,
   config: DelegationOrchestratorConfig,
   allowUnsafe: boolean,
+  model?: string | null,
 ): { command: string; args: string[] } {
-  const invocation = buildCliArgs(provider, prompt, config)
+  const invocation = buildCliArgs(provider, prompt, config, model)
   if (allowUnsafe) return invocation
 
   const args = [...invocation.args]
-  const generatedFlagIndex = provider === 'claude' ? 1 : 2
-  if (UNSAFE_FLAGS.has(args[generatedFlagIndex])) args.splice(generatedFlagIndex, 1)
+  const generatedFlagIndex = args.findIndex(argument => UNSAFE_FLAGS.has(argument))
+  if (generatedFlagIndex !== -1) args.splice(generatedFlagIndex, 1)
   return {
     command: invocation.command,
     args,
@@ -611,6 +613,7 @@ function createTaskMetadata(
     description: input.description,
     tag: input.tag ?? 'code',
     provider: input.provider,
+    model: input.model ?? null,
     prompt: '',
     files: [...(input.files ?? [])],
     worktree_name: null,
@@ -674,6 +677,7 @@ async function runQueuedExecution(
       prompt,
       config,
       definition.allowUnsafe,
+      definition.input.model,
     )
     const timeoutMs = tracked.provider === 'claude'
       ? (config.claude.timeout_ms ?? DEFAULT_TIMEOUT_MS)
@@ -789,6 +793,9 @@ function normalizeTaskInputs(tasks: DelegationTaskInput[]): DelegationTaskInput[
     if (task.provider !== 'claude' && task.provider !== 'gemini') {
       throw new Error(`Unsupported provider for task ${task.id}: ${String(task.provider)}`)
     }
+    if (task.model && (/^[\s-]/.test(task.model) || /[\0\r\n]/.test(task.model))) {
+      throw new Error(`Invalid model alias for task ${task.id}`)
+    }
     return {
       ...task,
       files: [...(task.files ?? [])],
@@ -857,6 +864,7 @@ export const DelegationOrchestrator: Plugin = async ({ client }) => {
               description: parsed.description,
               tag,
               provider: routeTask({ description: parsed.description, tag }, routing),
+              model: null,
               prompt: '',
               files: parsed.files,
               worktree_name: null,
@@ -939,7 +947,7 @@ export const DelegationOrchestrator: Plugin = async ({ client }) => {
             try {
               const session = await sessions.create(`Generate ${fileName}`, identity.sessionId)
               childSessionId = session.id
-              const cliName = provider === 'claude' ? 'Claude Code' : 'Gemini CLI'
+              const cliName = provider === 'claude' ? 'Claude Code' : 'Antigravity CLI'
               const prompt = [
                 `Analyze the project at ${identity.projectRoot} and generate a ${fileName} file.`,
                 `This file provides context to ${cliName} when working on this project.`,
@@ -1000,6 +1008,7 @@ export const DelegationOrchestrator: Plugin = async ({ client }) => {
             description: z.string(),
             tag: z.string().optional(),
             provider: z.string(),
+            model: z.string().optional().describe('Optional provider-native model alias for this task only'),
             files: z.array(z.string()).optional(),
             branch_name: z.string().optional(),
             review_feedback: z.string().optional(),
@@ -1280,6 +1289,7 @@ export const DelegationOrchestrator: Plugin = async ({ client }) => {
             description: task.description,
             tag: task.tag,
             provider: task.provider,
+            model: task.model ?? undefined,
             files: [...task.files],
             review_feedback: args.feedback,
           }

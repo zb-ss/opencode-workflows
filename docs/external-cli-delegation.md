@@ -1,6 +1,6 @@
 # External CLI Delegation
 
-External CLI delegation runs an installed `claude` or `gemini` executable in headless mode. It does not use OpenCode's native Task tool and does not create a worktree unless the explicit worktree command or delegated workflow tools are used.
+External CLI delegation runs an installed `claude` or Antigravity `agy` executable in headless mode. The public `gemini` provider token routes Gemini-model work to Antigravity; it does not invoke the enterprise-only Gemini CLI. This path does not use OpenCode's native Task tool and does not create a worktree unless the explicit worktree command or delegated workflow tools are used.
 
 ## Commands
 
@@ -26,13 +26,15 @@ Use direct tools when another agent needs structured arguments and results.
 
 `/delegate status` checks that selected binaries exist and can report a version. Add `--auth` to perform provider-specific authentication probes. The `delegate_preflight` tool checks authentication by default unless its caller disables that probe.
 
+Install Antigravity CLI from its [official documentation](https://antigravity.google/docs/cli-overview), run `agy` once to authenticate, and use `agy models` to inspect aliases accepted by the installed version.
+
 An unknown authentication state is a warning, not proof of readiness. Complete any interactive provider login outside the headless run.
 
 ## Provider Selection
 
 `auto` uses `delegation.default_provider` when configured, then the configured fallback order. If no order is configured, the direct runner uses its supported providers in its built-in order. An explicit provider can disable fallback through the direct tool.
 
-Per-provider model values are CLI aliases, not OpenCode provider/model IDs:
+Provider configuration contains runtime controls, not model pins:
 
 ```json
 {
@@ -44,15 +46,15 @@ Per-provider model values are CLI aliases, not OpenCode provider/model IDs:
 }
 ```
 
-Omitting a model lets the provider CLI choose its default. A request-level `--model` overrides the configured alias for that run.
+Normal delegation omits `--model` and lets the provider CLI choose its current default. Manual request-level selection remains available through `/delegate ask ... --model`, `delegate_run.model`, `exec-worktree --model`, or a delegated batch task's optional `model` field. Values are provider-native aliases, not OpenCode provider/model IDs.
 
 ## Invocation And Permissions
 
-Processes are spawned as argument arrays with `shell: false` in the current authorized directory. Claude prompts use a `--` separator. Gemini receives the prompt through its prompt option. Timeouts and OpenCode abort signals terminate the child process.
+Processes are spawned as argument arrays with `shell: false` in the current authorized directory. Claude prompts use a `--` separator. Antigravity receives the prompt through `agy --print`. Timeouts and OpenCode abort signals terminate the child process.
 
-Every external run requests `delegation` permission. A configured Claude skip-permission mode or Gemini auto-approval mode requires a separate `delegation_unsafe` decision. Unsupported permission-mode strings are ignored with a warning.
+Every external run requests `delegation` permission. A configured `dangerously-skip-permissions` mode for Claude or Antigravity requires a separate `delegation_unsafe` decision. Unsupported permission-mode strings are ignored with a warning.
 
-Do not treat worktree isolation as a replacement for provider permission controls. Direct `/delegate ask` runs in the current directory and can modify it if the external CLI and its approved mode permit edits.
+Do not treat worktree isolation as a replacement for provider permission controls. Direct `/delegate ask` preserves Antigravity's default execution mode. The explicit `exec-worktree` path uses `accept-edits` only inside its approved managed worktree.
 
 ## Run Records
 
@@ -68,7 +70,7 @@ Run IDs from another current session are not readable. Importing a legacy run re
 
 ## Follow-Up
 
-Claude follow-up uses provider-native resume when the prior successful run contains a safe resume token and native resume is preferred. Gemini has no session-based resume in this integration.
+Claude follow-up uses provider-native resume when the prior successful run contains a safe resume token and native resume is preferred. Antigravity follow-up remains stateless in this integration.
 
 When native resume is unavailable, the plugin creates a stateless prompt from a bounded prior prompt preview, a bounded prior response excerpt, and the new request. The result explicitly reports stateless fallback.
 

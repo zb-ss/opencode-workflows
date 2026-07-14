@@ -80,9 +80,9 @@ Candidate order is significant. Duplicate model and variant pairs are removed wh
 
 ## External CLI Models
 
-Claude and Gemini CLI model values under `delegation` are provider-native CLI aliases, not OpenCode provider/model IDs. They are passed to the selected executable with `--model`. The direct delegation path can omit an alias and use the CLI's own default. The delegated Gemini worktree path requires a configured Gemini alias before it can build that invocation.
+External delegation never pins a model in `workflows.json`. Claude Code and Antigravity CLI use their current defaults unless a caller explicitly supplies a provider-native alias for one run through `--model`, `delegate_run.model`, or a delegated task's optional `model` field. These aliases are not OpenCode provider/model IDs.
 
-Keep these values in `workflows.json`, not source code or documentation examples that will drift with provider releases.
+Use each installed CLI as the source of truth before selecting an alias. For Antigravity, run `agy models`. Keeping aliases request-scoped prevents repository defaults and persistent configuration from breaking when provider catalogs change.
 
 ## Checks
 
@@ -91,7 +91,7 @@ npm run validate:config
 node install.mjs --doctor
 ```
 
-`npm run validate:config` validates repository templates, modes, workflow definitions, and schemas. `--doctor` validates the installed workflow config and installation manifest. Provider authentication and CLI aliases are checked separately with `/delegate status --auth` when external delegation is used.
+`npm run validate:config` validates repository templates, modes, workflow definitions, and schemas. `--doctor` validates the installed workflow config and installation manifest. Provider authentication is checked separately with `/delegate status --auth`; manually selected aliases are validated by the provider CLI when a run starts.
 
 ## Related Documentation
 

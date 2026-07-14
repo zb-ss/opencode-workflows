@@ -1,7 +1,7 @@
 /**
  * Task Router for Delegation Orchestration
  *
- * Routes tasks to providers (Claude/Gemini) based on tags and patterns.
+ * Routes tasks to providers (Claude/Antigravity) based on tags and patterns.
  * Builds CLI arguments and prompts for each provider.
  */
 
@@ -38,8 +38,8 @@ export function inferTag(description: string, uiPatterns: string[]): DelegationT
 
 /**
  * Routes a task to a provider based on explicit tag or inferred tag from description.
- * Explicit: code → claude, ui → gemini.
- * Inferred: ui → gemini, otherwise → config.default_provider.
+ * Explicit: code -> Claude, UI -> Gemini models through Antigravity.
+ * Inferred: UI -> Antigravity, otherwise -> config.default_provider.
  */
 export function routeTask(
   task: { description: string; tag?: DelegationTaskTag },
@@ -100,6 +100,7 @@ export function buildPrompt(
 export function buildClaudeArgs(
   prompt: string,
   config: DelegationOrchestratorConfig,
+  model?: string | null,
 ): string[] {
   const args: string[] = ['--print']
 
@@ -107,9 +108,7 @@ export function buildClaudeArgs(
     args.push(`--${config.claude.permission_mode}`)
   }
 
-  if (config.claude.model) {
-    args.push('--model', config.claude.model)
-  }
+  if (model) args.push('--model', model)
 
   args.push('--output-format', 'json')
   args.push('--', prompt)
@@ -118,27 +117,21 @@ export function buildClaudeArgs(
 }
 
 /**
- * Builds CLI argument array for the gemini command.
- * Always emits `--model` using the value from config. Throws if
- * `delegation.gemini.model` is not set in workflows.json — the model must
- * be defined in config so it can be updated without touching code.
+ * Builds CLI arguments for Antigravity's headless print mode.
+ * Model selection is only forwarded when explicitly supplied for this task.
  */
-export function buildGeminiArgs(
+export function buildAntigravityArgs(
   prompt: string,
   config: DelegationOrchestratorConfig,
+  model?: string | null,
 ): string[] {
-  const model = config.gemini.model
-  if (!model) {
-    throw new Error(
-      'delegation.gemini.model is not set in workflows.json. ' +
-      'Add a model alias exposed by your installed Gemini CLI under the "delegation.gemini" key.',
-    )
+  const args: string[] = []
+  if (config.gemini.permission_mode === 'dangerously-skip-permissions') {
+    args.push('--dangerously-skip-permissions')
   }
-
-  const args: string[] = ['--model', model]
-  args.push('--yolo')
-  args.push('--output-format', 'json')
-  args.push('--prompt', prompt)
+  if (model) args.push('--model', model)
+  args.push('--mode', 'accept-edits')
+  args.push('--print', prompt)
 
   return args
 }
@@ -151,16 +144,17 @@ export function buildCliArgs(
   provider: DelegationProvider,
   prompt: string,
   config: DelegationOrchestratorConfig,
+  model?: string | null,
 ): { command: string; args: string[] } {
   if (provider === 'claude') {
     return {
       command: 'claude',
-      args: buildClaudeArgs(prompt, config),
+      args: buildClaudeArgs(prompt, config, model),
     }
   }
 
   return {
-    command: 'gemini',
-    args: buildGeminiArgs(prompt, config),
+    command: 'agy',
+    args: buildAntigravityArgs(prompt, config, model),
   }
 }

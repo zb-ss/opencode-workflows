@@ -37,7 +37,7 @@
     "references": "disabled"
   },
 
-  "_comment_delegation": "External CLI delegation is optional. Provider order and model values are intentionally empty until configured by the user.",
+  "_comment_delegation": "External CLI delegation is optional. The gemini routing token invokes Antigravity CLI (agy). Models are never pinned here; pass an explicit model to a delegation command only when needed.",
   "delegation": {
     "claude": {},
     "gemini": {},

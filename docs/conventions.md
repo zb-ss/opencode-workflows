@@ -54,10 +54,35 @@
 - Use `.env` for environment-specific values
 - NEVER commit credentials to repository
 
+## Public Repository Hygiene
+
+Treat every tracked file, commit message, issue, pull request, review, test fixture, and release note as public and permanent.
+
+- Do not commit private assistant context such as root `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, editor rules, or assistant-specific directories.
+- Keep private assistant context outside the repository and expose it locally through ignored symlinks when a tool requires a root file.
+- Put contributor-facing guidance in tracked documentation, separate from private working memory.
+- Never publish credentials, secret-bearing backups, customer or private project names, infrastructure identifiers, internal hostnames, real incident details, private coordination IDs, or internal dashboard links.
+- Use neutral names and addresses in tests, fixtures, comments, commits, and documentation.
+- Before publishing, inspect the staged diff and full commit range, scan for sensitive markers, and verify private context and credential files are ignored and untracked.
+- If private context was previously tracked, remove it going forward and extend `.gitignore`. Do not rewrite public history solely for context-file cleanup.
+
+## Configurable Values
+
+Do not hardcode values that drift with providers, environments, operations, or business policy. This includes model IDs, provider lists, fallback chains, endpoints, quotas, timeouts, retries, schedules, feature flags, prices, and user-facing policy text.
+
+Prefer runtime settings, then environment variables, then release configuration. Use source constants only for true protocol, security, or language invariants. Tests may pin values when the exact fixture is essential to the assertion.
+
+## Verification
+
+- Run type checks, configuration validation, focused tests, and the relevant full suite.
+- Execute new scripts, installers, migrations, cron jobs, and cleanup utilities at least once; syntax checks alone are insufficient.
+- Verify frontend and HTTP-surface changes in a browser when browser tooling and a runnable environment are available.
+- Report what was verified and state any environment, credential, or infrastructure limitation explicitly.
+
 ## MCP Server Usage
 - Use Context7 MCP to match library versions
 - Use latest library versions and verify dependency compatibility
-- Use GitHub MCP for repository information
+- Prefer the `gh` CLI for GitHub issues, pull requests, checks, releases, and workflow runs
 
 ## Skill Loading
 Load relevant skills when working on framework-specific code:

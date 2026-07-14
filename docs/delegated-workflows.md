@@ -1,6 +1,6 @@
 # Delegated Workflows
 
-A delegated workflow combines the manual supervisor, native OpenCode review agents, external Claude or Gemini CLI processes, and managed Git worktrees. It is distinct from direct `/delegate` prompts and from SDK-backed swarm sessions.
+A delegated workflow combines the manual supervisor, native OpenCode review agents, external Claude Code or Antigravity CLI processes, and managed Git worktrees. It is distinct from direct `/delegate` prompts and from SDK-backed swarm sessions.
 
 ## Entry Point
 
@@ -28,7 +28,7 @@ The supervisor must persist native Task IDs for the planner and reviewers. Re-re
 
 ## Routing
 
-The orchestrator supports `claude` and `gemini`. Routing is configured in `workflows.json`:
+The orchestrator supports `claude` and `gemini` routing tokens. The `gemini` token executes Antigravity CLI (`agy`), not Gemini CLI. Routing is configured in `workflows.json`:
 
 ```json
 {
@@ -45,9 +45,9 @@ The orchestrator supports `claude` and `gemini`. Routing is configured in `workf
 }
 ```
 
-No external CLI model is pinned by the template. A task explicitly tagged `code` routes to Claude; `ui` routes to Gemini. Otherwise, configured UI word patterns route to Gemini and unmatched tasks use `default_provider`. With an empty pattern list, descriptions do not route to Gemini automatically.
+No external CLI model is pinned in `workflows.json`. A task explicitly tagged `code` routes to Claude; `ui` routes to Antigravity. Otherwise, configured UI word patterns route to Antigravity and unmatched tasks use `default_provider`. With an empty pattern list, descriptions do not route to Antigravity automatically.
 
-External CLI model values are provider-native aliases. Claude can use its CLI default. The delegated Gemini invocation requires `delegation.gemini.model` because that worktree path constructs an explicit `--model` argument.
+Both CLIs use their current default model unless an execution task supplies an optional provider-native `model` alias. This keeps version-sensitive aliases out of repository defaults and persistent workflow configuration.
 
 ## Permissions
 
@@ -58,7 +58,7 @@ Before a batch starts, the orchestrator requests:
 - `delegation` for each external provider
 - `delegation_unsafe` when a configured unsafe provider mode would be used
 
-Unsafe flags are removed unless the matching unsafe permission was explicitly granted. Provider CLIs run with `shell: false` and with their working directory set to the managed worktree.
+Unsafe flags are removed unless the matching unsafe permission was explicitly granted. Antigravity worktree tasks use its non-interactive `accept-edits` mode after the batch's edit and delegation permissions are approved; `dangerously-skip-permissions` still requires the separate unsafe approval. Provider CLIs run with `shell: false` and with their working directory set to the managed worktree.
 
 The init-file tool separately requests Task and edit permission. It never overwrites an existing provider context file. Review generated context before allowing it in a public repository; repository-specific private assistant notes should remain outside public version control.
 
@@ -108,7 +108,7 @@ This differs from swarm batch persistence and automatic DAG reconciliation.
 
 Supported delegation settings include:
 
-- Per-provider CLI model alias, timeout, and permission mode
+- Per-provider CLI timeout and permission mode
 - Process concurrency
 - Combined stdout/stderr cap through `max_output_bytes`
 - UI routing patterns and default provider
@@ -116,7 +116,7 @@ Supported delegation settings include:
 - Review iteration limit
 - Init-file preference
 
-Keep values in `workflows.json`. Run `npm run validate:config` after editing the repository template or `node install.mjs --doctor` for an installed configuration.
+Keep these values in `workflows.json`. Provider model aliases are request-scoped: pass one through `/delegate ask ... --model`, `delegate_run.model`, `exec-worktree --model`, or a delegated task's optional `model` field. Run `npm run validate:config` after editing the repository template or `node install.mjs --doctor` for an installed configuration.
 
 ## Direct Delegation
 

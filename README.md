@@ -1,6 +1,6 @@
 # OpenCode Workflows
 
-OpenCode Workflows installs agents, commands, skills, plugins, workflow definitions, schemas, and supporting libraries into an [OpenCode](https://opencode.ai) configuration directory. It supports manual gate-driven workflows, opt-in declarative workflow automation, native OpenCode subagents, SDK-backed swarm batches, and direct Claude or Gemini CLI delegation.
+OpenCode Workflows installs agents, commands, skills, plugins, workflow definitions, schemas, and supporting libraries into an [OpenCode](https://opencode.ai) configuration directory. It supports manual gate-driven workflows, opt-in declarative workflow automation, native OpenCode subagents, SDK-backed swarm batches, and direct Claude Code or Antigravity CLI delegation.
 
 These are separate execution paths. Installing the project does not enable unattended workflow automation or external CLI execution by default.
 
@@ -9,7 +9,7 @@ These are separate execution paths. Installing the project does not enable unatt
 - OpenCode 1.17.20 or newer
 - Node.js 18 or newer
 - Git for bootstrap installation and delegated worktrees
-- Optional: authenticated `claude` or `gemini` executables for external CLI delegation
+- Optional: authenticated `claude` or Antigravity `agy` executables for external CLI delegation; the `gemini` routing token invokes `agy`
 - Optional: the translation module for Joomla localization workflows
 
 ## Install
@@ -49,6 +49,22 @@ node install.mjs --doctor
 The bootstrap also accepts `INSTALL_DIR`, `INSTALL_MODE=copy|symlink`, and `INSTALL_MODULES=all` or a comma-separated module list.
 
 Restart OpenCode after installation, migration, uninstallation, plugin changes, agent changes, workflow configuration changes, or capability environment changes. OpenCode loads configuration-time files when it starts.
+
+After restarting, `/workflow feature <task>` starts the normal gate-driven workflow and `/workflow-status` reports its state. External CLI delegation is optional; run `/delegate status --auth` before relying on it.
+
+## Upgrade An Existing Installation
+
+From the existing repository checkout, preview and apply configuration migration before reinstalling managed files:
+
+```bash
+git pull --ff-only
+node install.mjs --migrate --dry-run
+node install.mjs --migrate
+node install.mjs
+node install.mjs --doctor
+```
+
+Migration preserves the original configuration beside `workflows.json` as a `.backup` file, adding a numeric suffix when needed. Review the dry-run output and commit or otherwise preserve intentional local repository changes before pulling. Restart OpenCode after the doctor check passes.
 
 ## Installer Commands
 
@@ -96,7 +112,7 @@ npm run test:integration
 | Automatic workflow | `/workflow-auto`, `/workflow-auto-resume` | Declarative DAG engine | Session-owned definition and state | Opt-in deterministic scheduling of installed `development` or `e2e` DAGs |
 | Native subagent | OpenCode Task tool | Calling agent | OpenCode task/session ID | One agent task, resumed with the same `task_id` |
 | Swarm batch | `swarm_*` tools | SDK session runtime | Session-scoped batch state | Parallel independent OpenCode subagent sessions |
-| Direct external delegation | `/delegate` or `delegate_*` tools | Provider CLI process | Session-scoped run records and output logs | One-off Claude or Gemini CLI prompts and follow-ups |
+| Direct external delegation | `/delegate` or `delegate_*` tools | Provider CLI process | Session-scoped run records and output logs | One-off Claude Code or Antigravity prompts and follow-ups |
 | Delegated workflow | `/workflow delegate ...` | Manual supervisor plus delegation tools | Manual workflow state; worktrees preserve task changes | Reviewed external CLI changes in isolated git worktrees |
 | Translation workflow | `/translate-auto`, `/translate-view` | Translation plugin and specialist agents | Session-owned workflow state | View-by-view Joomla language conversion |
 

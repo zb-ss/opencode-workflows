@@ -10,7 +10,7 @@ OpenCode Workflows provides related but distinct orchestration mechanisms. This 
 | Automatic DAG | `/workflow-auto` | Plugin creates SDK child sessions from an installed JSON DAG | Yes, while enabled, authorized, within budget, and loaded |
 | Native Task | A Task tool call | One OpenCode subagent | Only within that task; reuse `task_id` to continue it |
 | Swarm | `swarm_spawn_batch` | Parallel SDK child sessions | The queue drains within configured limits |
-| External CLI | `/delegate` or `delegate_run` | A `claude` or `gemini` child process | No; each run or follow-up is explicit |
+| External CLI | `/delegate` or `delegate_run` | A `claude` or Antigravity `agy` child process | No; each run or follow-up is explicit |
 
 Manual and automatic workflows do not share a state format. `/workflow-resume` never resumes an automatic DAG, and `/workflow-auto-resume` never falls back to a manual workflow.
 
@@ -287,17 +287,18 @@ Swarm tasks normally share a working directory. Parallelize only work that can s
 
 ## External CLI Delegation
 
-Direct delegation executes official `claude` or `gemini` binaries as argv-only child processes. It is separate from native OpenCode subagents.
+Direct delegation executes official `claude` or Antigravity `agy` binaries as argv-only child processes. The compatible `gemini` routing token invokes `agy`; Gemini CLI is not used. This path is separate from native OpenCode subagents.
 
 ```text
 /delegate status --auth
 /delegate ask auto Summarize the current diff
+/delegate ask gemini --model <agy-model-alias> Review the UI flow
 /delegate followup <run-id> Check the security implications
 /delegate runs
 /delegate show <run-id>
 ```
 
-The plugin requests `delegation` permission before execution. Unsafe provider modes are used only when configured and separately approved through `delegation_unsafe`. Runs are session-scoped, store bounded response data in JSON, and cap private stdout/stderr files according to `delegation.max_output_bytes`. Claude follow-up uses an internal native resume token when available; otherwise follow-up is stateless and includes a bounded excerpt of prior context.
+The plugin requests `delegation` permission before execution. Unsafe provider modes are used only when configured and separately approved through `delegation_unsafe`. Models are not pinned in workflow configuration; an optional request-scoped alias can be passed manually. Runs are session-scoped, store bounded response data in JSON, and cap private stdout/stderr files according to `delegation.max_output_bytes`. Claude follow-up uses an internal native resume token when available; otherwise follow-up is stateless and includes a bounded excerpt of prior context.
 
 See [External CLI Delegation](./docs/external-cli-delegation.md).
 
