@@ -2,18 +2,29 @@
 description: "Analyzes codebase to extract conventions, patterns, and best practices"
 model_tier: mid
 mode: subagent
+hidden: true
 temperature: 0.1
 steps: 20
 permission:
   external_directory:
-    "~/.config/opencode/**": allow
+    "*": deny
   read: allow
   grep: allow
   glob: allow
+  edit: deny
   bash:
-    "git commit*": deny
-    "git push*": deny
-    "*": allow
+    "*": deny
+    "git *": deny
+    "git status*": allow
+    "git diff*": allow
+    "git log*": allow
+    "git show*": allow
+    "git blame*": allow
+    "git branch": allow
+    "git branch --show-current*": allow
+    "rm -rf*": deny
+    "sudo*": deny
+  task: deny
 ---
 
 # Codebase Analyzer Agent
@@ -272,11 +283,9 @@ Naming: camelCase everywhere, kebab-case files
 Testing: Jest, supertest for integration
 ```
 
-## Context File Location
+## Context Delivery
 
-Save to: `<HOME>/.config/opencode/workflows/context/{project-slug}.md` (resolve `<HOME>` via `echo $HOME` - never use `~` in write tool paths)
-
-The project slug is derived from the git remote or directory name.
+Return the analysis in the final response. Do not write shared context outside the project; the workflow engine carries required dependency summaries and the supervisor persists only explicit workflow state.
 
 ## Freshness
 

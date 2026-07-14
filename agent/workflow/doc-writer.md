@@ -2,16 +2,18 @@
 description: "Documentation updates for code changes"
 model_tier: low
 mode: subagent
+hidden: true
 temperature: 0.2
 steps: 10
 permission:
   external_directory:
-    "~/.config/opencode/**": allow
+    "*": ask
   edit: allow
-  write: allow
   read: allow
   grep: allow
   glob: allow
+  bash: deny
+  task: deny
 ---
 
 # Documentation Writer Agent

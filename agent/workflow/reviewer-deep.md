@@ -2,20 +2,29 @@
 description: "Thorough code review with comprehensive analysis"
 model_tier: high
 mode: subagent
+hidden: true
 temperature: 0.1
 steps: 15
 permission:
   external_directory:
-    "~/.config/opencode/**": allow
+    "*": deny
   read: allow
   grep: allow
   glob: allow
+  edit: deny
   bash:
-    "git commit*": deny
-    "git push*": deny
-    "*": allow
-  task:
-    "*": allow
+    "*": deny
+    "git *": deny
+    "git status*": allow
+    "git diff*": allow
+    "git log*": allow
+    "git show*": allow
+    "git blame*": allow
+    "git branch": allow
+    "git branch --show-current*": allow
+    "rm -rf*": deny
+    "sudo*": deny
+  task: deny
 ---
 
 # Deep Reviewer Agent
@@ -53,8 +62,7 @@ Changed files: {changed_files_list}
 Review iteration: {iteration_number}
 
 ## Codebase Context
-Read the context file at: <HOME>/.config/opencode/workflows/context/<project>.md
-Focus on: Naming conventions, architectural patterns, error handling, code style
+Infer naming conventions, architectural patterns, error handling, and code style from tracked repository guidance, surrounding code, and supplied workflow evidence. Do not read private global configuration.
 
 ## Language & Framework Best Practices
 Check the implementation against:

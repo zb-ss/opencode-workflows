@@ -1,5 +1,6 @@
-import { tool } from "@opencode-ai/plugin"
+import { tool, type ToolContext } from "@opencode-ai/plugin"
 import { readFileSync, writeFileSync, existsSync } from "fs"
+import { abortCheckpoint, authorizeToolPath, throwIfAborted } from "../lib/tool-context.ts"
 
 interface ChunkData {
   id: number
@@ -32,8 +33,9 @@ export default tool({
     error: tool.schema.string().optional().describe("Error message when marking as failed"),
     data: tool.schema.string().optional().describe("JSON string of extracted data to store with the chunk")
   },
-  async execute(args) {
-    const { stateFile, action, chunkId, error } = args
+  async execute(args, context: ToolContext) {
+    const { action, chunkId, error } = args
+    const stateFile = await authorizeToolPath(context, args.stateFile, "read")
 
     // Validate state file exists
     if (!existsSync(stateFile)) {
@@ -84,33 +86,38 @@ export default tool({
 
     // Handle reset action (can reset single chunk or all)
     if (action === "reset") {
+      const chunk = chunkId !== undefined ? state.chunks.find(c => c.id === chunkId) : undefined
+      if (chunkId !== undefined && !chunk) {
+        return JSON.stringify({
+          success: false,
+          error: `Chunk ${chunkId} not found`
+        }, null, 2)
+      }
+
+      const writableStateFile = await authorizeToolPath(context, stateFile, "edit")
       if (chunkId !== undefined) {
         // Reset single chunk
-        const chunk = state.chunks.find(c => c.id === chunkId)
-        if (!chunk) {
-          return JSON.stringify({
-            success: false,
-            error: `Chunk ${chunkId} not found`
-          }, null, 2)
-        }
-        chunk.status = "pending"
-        delete chunk.completedAt
-        delete chunk.failedAt
-        delete chunk.error
-        delete chunk.extractedData
+        chunk!.status = "pending"
+        delete chunk!.completedAt
+        delete chunk!.failedAt
+        delete chunk!.error
+        delete chunk!.extractedData
       } else {
         // Reset all chunks
-        state.chunks.forEach(chunk => {
+        for (let i = 0; i < state.chunks.length; i++) {
+          await abortCheckpoint(context, i)
+          const chunk = state.chunks[i]
           chunk.status = "pending"
           delete chunk.completedAt
           delete chunk.failedAt
           delete chunk.error
           delete chunk.extractedData
-        })
+        }
       }
 
       state.updatedAt = new Date().toISOString()
-      writeFileSync(stateFile, JSON.stringify(state, null, 2))
+      throwIfAborted(context)
+      writeFileSync(writableStateFile, JSON.stringify(state, null, 2))
 
       return JSON.stringify({
         success: true,
@@ -131,6 +138,7 @@ export default tool({
 
     // Handle complete action
     if (action === "complete") {
+      const writableStateFile = await authorizeToolPath(context, stateFile, "edit")
       chunk.status = "completed"
       chunk.completedAt = new Date().toISOString()
       delete chunk.failedAt
@@ -146,7 +154,8 @@ export default tool({
       }
 
       state.updatedAt = new Date().toISOString()
-      writeFileSync(stateFile, JSON.stringify(state, null, 2))
+      throwIfAborted(context)
+      writeFileSync(writableStateFile, JSON.stringify(state, null, 2))
 
       // Calculate progress
       const completedCount = state.chunks.filter(c => c.status === "completed").length
@@ -169,13 +178,15 @@ export default tool({
 
     // Handle fail action
     if (action === "fail") {
+      const writableStateFile = await authorizeToolPath(context, stateFile, "edit")
       chunk.status = "failed"
       chunk.failedAt = new Date().toISOString()
       chunk.error = error ?? "Unknown error"
       delete chunk.completedAt
 
       state.updatedAt = new Date().toISOString()
-      writeFileSync(stateFile, JSON.stringify(state, null, 2))
+      throwIfAborted(context)
+      writeFileSync(writableStateFile, JSON.stringify(state, null, 2))
 
       // Find next pending chunk (skip failed ones)
       const nextPending = state.chunks.find(c => c.status === "pending")

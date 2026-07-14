@@ -1,6 +1,18 @@
 node_modules/
 bun.lock
-package-lock.json
+
+# Private assistant context lives in ~/.dotfiles and is symlinked locally.
+/AGENTS.md
+/CLAUDE.md
+/CONVENTIONS.md
+/GEMINI.md
+/.agents/
+/.claude/
+/.mcp.json
+/.cursorrules
+/.windsurfrules
+/.clinerules
+/.github/copilot-instructions.md
 
 # Secrets and credentials
 *.secret

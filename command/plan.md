@@ -1,7 +1,8 @@
 ---
-description: Create plan: /plan <feature-or-task>
+description: "Create plan: /plan <feature-or-task>"
 agent: org-planner
 model_tier: low
+subtask: true
 ---
 
 Create a comprehensive development plan for: $ARGUMENTS

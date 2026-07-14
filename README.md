@@ -1,397 +1,184 @@
 # OpenCode Workflows
 
-A multi-agent automation framework for [OpenCode](https://opencode.ai).
+OpenCode Workflows installs agents, commands, skills, plugins, workflow definitions, schemas, and supporting libraries into an [OpenCode](https://opencode.ai) configuration directory. It supports manual gate-driven workflows, opt-in declarative workflow automation, native OpenCode subagents, SDK-backed swarm batches, and direct Claude or Gemini CLI delegation.
 
-> **Plan in OpenCode. Execute across Claude Code and Gemini CLI in parallel git worktrees.** Route code tasks to Claude Opus for deep implementation, UI tasks to Gemini for pixel-perfect layouts — all running simultaneously in isolated worktrees, reviewed automatically, and merged when approved. Your subscriptions, your CLIs, fully TOS-compliant. See [Delegated Workflows](./docs/delegated-workflows.md).
+These are separate execution paths. Installing the project does not enable unattended workflow automation or external CLI execution by default.
 
-## Features
+## Requirements
 
-- **31 Agents**: 10 primary + 21 workflow specialists
-- **6 Execution Modes**: eco, turbo, standard, thorough, swarm, delegate
-- **6 Plugins**: workflow-enforcer, file-validator, model-router, swarm-manager, delegation-orchestrator, external-cli-delegation
-- **Delegated Execution**: Route tasks to Claude Code CLI and Gemini CLI in parallel git worktrees
-- **Zero-Tolerance Review**: [ISSUE-N] tracking with auto-escalation
-- **Model-Agnostic**: Works with any LLM provider (tested on Zhipu, MiniMax, Google, OpenAI)
-- **E2E Testing Pipeline**: 6-phase Playwright workflow with accessibility-first selectors
-- **Parallel Execution**: SDK-based swarm mode for 3-5x speed improvement
-- **13 Skills**: PHP, Laravel, Vue, Joomla, Symfony, API design, and more
-- **14 Commands, 7 Templates**: Complete automation toolkit
+- OpenCode 1.17.20 or newer
+- Node.js 18 or newer
+- Git for bootstrap installation and delegated worktrees
+- Optional: authenticated `claude` or `gemini` executables for external CLI delegation
+- Optional: the translation module for Joomla localization workflows
 
-## Quick Start
+## Install
 
-**Linux/macOS**:
+Bootstrap the current release:
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/zb-ss/opencode-workflows/master/bootstrap.mjs | node --input-type=module
 ```
 
-**Windows (PowerShell)**:
-```powershell
-curl.exe -fsSL https://raw.githubusercontent.com/zb-ss/opencode-workflows/master/bootstrap.mjs | node --input-type=module
-```
-
-Or clone manually:
-```bash
-git clone https://github.com/zb-ss/opencode-workflows.git ~/projects/opencode-workflows
-cd ~/projects/opencode-workflows
-node install.mjs
-```
-
-## Execution Modes
-
-| Mode | Speed | Quality | Parallel | Reviewers | Use Case |
-|------|-------|---------|----------|-----------|----------|
-| **eco** | Fast | Basic | No | reviewer-lite | Prototypes, experiments |
-| **turbo** | Fastest | Standard | No | 3x architect | Quick features, non-critical |
-| **standard** | Medium | Good | No | reviewer | Production features |
-| **thorough** | Slow | Excellent | No | reviewer-deep | Critical, security-sensitive |
-| **swarm** | Fastest | Excellent | Yes (4x) | 3x architect | Large, modular projects |
-| **delegate** | Variable | Excellent | Yes (worktrees) | reviewer-deep | Multi-provider orchestration |
-
-## Agents
-
-### Primary Agents (10)
-
-| Agent | Purpose | Model Tier |
-|-------|---------|------------|
-| **org-planner** | Creates org-mode development plans | high |
-| **step-planner** | Interactive question-based planning | high |
-| **discussion** | Technical Q&A, read-only exploration | mid |
-| **editor** | Meticulous code changes with approval | mid |
-| **focused-build** | Fast implementation, auto-cleanup | mid |
-| **debug** | Systematic bug hunting | mid |
-| **supervisor** | Orchestrates multi-step workflows | high |
-| **delegator** | External CLI delegation orchestration | mid |
-| **figma-builder** | Pixel-perfect UI from Figma | mid |
-| **web-tester** | E2E testing with Playwright | mid |
-
-### Workflow Agents (21)
-
-| Agent | Role | Tier | Used By |
-|-------|------|------|---------|
-| architect | System design, planning | high | thorough, swarm |
-| architect-lite | Quick architecture decisions | mid | turbo, standard |
-| executor | Implementation with review cycles | mid | standard, thorough |
-| executor-lite | Fast implementation | low | eco, turbo |
-| reviewer | Full code review | mid | standard |
-| reviewer-lite | Quick quality check | low | eco, turbo |
-| reviewer-deep | Deep analysis | high | thorough |
-| security | Security audit | mid | standard |
-| security-lite | Basic security check | low | eco |
-| security-deep | Advanced security analysis | high | thorough |
-| perf-lite | Performance check | low | eco |
-| perf-reviewer | Performance optimization | high | thorough |
-| test-writer | Unit/integration test generation | mid | all modes |
-| e2e-explorer | Application structure mapping (BFS) | mid | e2e workflow |
-| e2e-generator | Playwright test generation | mid | e2e workflow |
-| e2e-reviewer | Test validation (flakiness, anti-patterns) | mid | e2e workflow |
-| quality-gate | Final quality checks | mid | all modes |
-| completion-guard | Post-workflow validation | mid | all modes |
-| explorer | Codebase exploration | low | all modes |
-| codebase-analyzer | Dependency and structure analysis | mid | thorough |
-| doc-writer | Documentation generation | low | all modes |
-
-## Configuration
-
-Configure model tiers in `~/.config/opencode/workflows.json`:
-
-```json
-{
-  "model_tiers": {
-    "low":  ["google/gemini-3-flash", "minimax/m2.5"],
-    "mid":  ["minimax/m2.5", "zhipu/glm-5", "google/gemini-3-pro"],
-    "high": ["zhipu/glm-5", "google/gemini-3-pro", "openai/gpt-5.2"]
-  },
-  "fallback_order": ["minimax/m2.5", "zhipu/glm-5", "google/gemini-3-pro"],
-  "default_mode": "standard"
-}
-```
-
-Each tier is an array — first model is preferred, rest are fallbacks. Use any model ID your provider supports. Swarm and review settings are configured per-mode in `mode/*.json`. See [WORKFLOWS.md](./WORKFLOWS.md) for mode configuration.
-
-### Model configuration modes
-
-- Default installer mode (`node install.mjs`) resolves `model_tier` into concrete `model:` values from `workflows.json`.
-- Runtime model mode (`node install.mjs --runtime-models`) strips `model_tier` and lets OpenCode use `opencode.jsonc` (`model`, `small_model`, `agent.<name>.model`).
-- Use default mode for repository-level tiered orchestration consistency; use runtime mode for simpler per-user model switching in OpenCode.
-
-## Documentation
-
-- [Delegated Workflows](./docs/delegated-workflows.md) - Multi-provider orchestration, parallel worktrees, task routing, auto-init
-- [External CLI Delegation](./docs/external-cli-delegation.md) - Simple `/delegate` command for one-off CLI prompts
-- [Model Compatibility](./docs/model-compatibility.md) - Multi-model setup, tier configuration, fallback chains
-- [Review System](./docs/review-system.md) - Zero-tolerance protocol, [ISSUE-N] format, escalation
-- [Swarm Mode](./docs/swarm-mode.md) - Parallel execution, SDK spawning, 3-architect validation
-- [E2E Testing](./docs/e2e-testing.md) - 6-phase Playwright pipeline, selector priority, flakiness detection
-- [AGENTS.md](./AGENTS.md) - Comprehensive agent reference
-- [WORKFLOWS.md](./WORKFLOWS.md) - Workflow lifecycle, mode selection, templates
-
-## Commands
-
-| Command | Description |
-|---------|-------------|
-| `/plan` | Create development plan (org-planner) |
-| `/delegate` | Delegate prompts to official Claude/Gemini CLIs |
-| `/workflow` | Start automated workflow (feature, figma, bug-fix, refactor, e2e, delegate) |
-| `/workflow-resume` | Resume interrupted workflow |
-| `/workflow-status` | Show workflow status |
-| `/git-commit` | Commit staged changes (git plugin style) |
-| `/git-pr` | Create PR with `gh` |
-| `/git-pr-checkout` | Checkout PR locally |
-| `/git-pr-review` | Submit PR review |
-| `/git-pr-merge` | Merge PR with strategy flags |
-| `/git-release` | Create GitHub release + changelog |
-| `/git-issue` | Create/view/list/close issues |
-| `/git-browse` | Open repo/PR/issue/file in browser |
-| `/git-workflow-run` | Trigger and inspect GitHub Actions runs |
-
-**Translate module** (optional): `/translate-auto`, `/translate-view`
-
-GitHub command group (`/git-*`) requires `gh` CLI installed and authenticated.
-
-## Delegated Workflows
-
-Orchestrate full features across Claude Code and Gemini CLI in parallel git worktrees:
-
-```bash
-/workflow delegate Add user authentication with OAuth and responsive settings page
-```
-
-OpenCode plans the feature, breaks it into tasks, routes code tasks to Claude and UI tasks to Gemini, executes in parallel worktrees, reviews each result, and merges approved work. See [full documentation](./docs/delegated-workflows.md).
-
-For one-off prompts without the full workflow pipeline:
-
-```bash
-/delegate ask claude --model sonnet "Review this diff for security risks"
-/delegate ask gemini --model gemini-2.5-pro "Design a responsive dashboard"
-```
-
-See [CLI delegation docs](./docs/external-cli-delegation.md) for setup and commands.
-
-## Skills
-
-| Skill | Scope |
-|-------|-------|
-| php-conventions | Strict types, OOP, PSR standards |
-| laravel-conventions | Eloquent, services, validation |
-| symfony-conventions | Doctrine, Twig, services |
-| joomla-conventions | Joomla 4/5 MVC, plugins |
-| joomla3-legacy | Joomla 3.x legacy patterns |
-| vue-conventions | Vue 3 Composition API, Pinia |
-| vue2-legacy | Vue 2 Options API, Vuex |
-| typescript-conventions | Strict mode, type patterns |
-| python-conventions | Type hints, pytest, async |
-| bash-conventions | Shellcheck, portability |
-| solid-principles | SOLID with code examples |
-| api-design | RESTful patterns, versioning |
-| performance-guide | Optimization strategies |
-
-## Templates
-
-| Template | Phases | Modes |
-|----------|--------|-------|
-| feature-development | Plan → Implement → Review → Test → Security | All |
-| figma-to-code | Design → Build → Review → E2E → A11y | Standard, Thorough |
-| bug-fix | Investigate → Fix → Review → Test | All |
-| refactor | Analyze → Plan → Implement → Review | Standard, Thorough |
-| delegation | Plan → Decompose → Execute (worktrees) → Review → Merge | Delegate |
-| e2e-testing | Setup → Explore → Generate → Validate → QA | All |
-| joomla-translation | Scan → Process → Review (translate module) | Standard |
-
-## Installation
-
-### Prerequisites
-
-- [OpenCode](https://opencode.ai) installed
-- [Node.js](https://nodejs.org/) v18+
-
-### Manual Install
+Or install from a clone:
 
 ```bash
 git clone https://github.com/zb-ss/opencode-workflows.git
 cd opencode-workflows
+node install.mjs --dry-run
 node install.mjs
+node install.mjs --doctor
 ```
 
-Both methods install the **core** module via copies into `~/.config/opencode/`.
+The installer uses copy mode by default. It creates plural OpenCode directories such as `agents/`, `commands/`, `skills/`, `plugins/`, and `tools/`; a doctor warning identifies legacy singular directories.
 
-### Install Options
+OpenCode configuration is resolved in this order:
+
+1. `OPENCODE_CONFIG_DIR`
+2. `$XDG_CONFIG_HOME/opencode`
+3. `$HOME/.config/opencode`
+
+Set `OPENCODE_CONFIG_DIR` in the environment used by both the installer and OpenCode when using a non-default location:
 
 ```bash
-node install.mjs                  # Core (copy mode, default)
-node install.mjs --symlink        # Core (symlinks, for development)
-node install.mjs --runtime-models # Do not materialize model_tier (use opencode.jsonc models)
-node install.mjs --all            # Core + translate module
-node install.mjs --dry-run        # Preview
-node install.mjs --uninstall      # Remove
+export OPENCODE_CONFIG_DIR="/path/to/opencode-config"
+node install.mjs
+node install.mjs --doctor
 ```
 
-To update after `git pull`: `node install.mjs`
+The bootstrap also accepts `INSTALL_DIR`, `INSTALL_MODE=copy|symlink`, and `INSTALL_MODULES=all` or a comma-separated module list.
 
-Installer backup policy:
+Restart OpenCode after installation, migration, uninstallation, plugin changes, agent changes, workflow configuration changes, or capability environment changes. OpenCode loads configuration-time files when it starts.
 
-- Keeps a single backup per managed path (`*.backup`)
-- Removes older legacy timestamped backups (`*.backup.<timestamp>`) on reinstall
-
-### Bootstrap Environment Variables
-
-The bootstrap installer supports the following environment variables:
-
-- `INSTALL_DIR=~/my/path` — Custom clone location (default: `~/.local/share/opencode-workflows`)
-- `INSTALL_MODE=copy` — Copy files instead of symlinks
-- `INSTALL_MODULES=all` — Install all modules including translate
-
-Example:
-```bash
-INSTALL_DIR=~/projects/opencode-workflows curl -fsSL https://raw.githubusercontent.com/zb-ss/opencode-workflows/master/bootstrap.mjs | node --input-type=module
-```
-
-### Post-Install
-
-1. Review/edit `~/.config/opencode/opencode.jsonc` for MCP servers and permissions
-2. Configure models in `~/.config/opencode/workflows.json` (or in `opencode.jsonc` if installed with `--runtime-models`)
-3. Start OpenCode and verify agents are available
-
-### Updating
-
-- **Symlink mode** (default): `git pull` — changes propagate automatically
-- **Copy mode**: `git pull && node install.mjs --copy`
-
-### Uninstalling
+## Installer Commands
 
 ```bash
-node install.mjs --uninstall
+node install.mjs                         # Install core in copy mode
+node install.mjs --symlink               # Symlink unchanged files for development
+node install.mjs --all                   # Install core and translation module
+node install.mjs --module translate      # Add translation to the core install
+node install.mjs --materialize-models    # Bake configured model candidates into frontmatter
+node install.mjs --doctor                # Check version, schema, manifest, ownership, and capabilities
+node install.mjs --migrate               # Normalize legacy workflows.json data
+node install.mjs --uninstall             # Remove only verified installer-owned files
+node install.mjs --migrate --dry-run     # Preview a migration
+node install.mjs --uninstall --dry-run   # Preview an uninstall
 ```
 
-Removes all installed symlinks/copies and the manifest. Your `opencode.jsonc` is never removed.
+`--dry-run` also previews a normal install. Existing user configuration is preserved. The installer backs up conflicting unmanaged targets, tracks installed files in a manifest, removes only verified stale managed files, and preserves modified or unverified files during uninstall. Unverified singular files claimed by an older installer manifest are moved to backups before plural replacements are activated, preventing duplicate command or plugin loading without discarding local changes. `opencode.json`, `opencode.jsonc`, and `workflows.json` are not removed.
 
-### Modules
+Symlink mode is intended for repository development. Files whose model metadata must be transformed, and translation tools that require copies, are still copied.
 
-| Module | Contents | Default |
-|--------|----------|---------|
-| **core** | 31 agents, 14 commands, 13 skills, 5 plugins | Yes |
-| **translate** | 3 agents, 2 commands, 8 tools (Joomla i18n) | No |
+## Verify The Repository
 
-## Examples
-
-### Feature Development (Standard Mode)
-```bash
-/workflow feature Add JWT authentication with refresh tokens
-```
-
-**Flow**:
-1. Architect: Design auth system
-2. Executor: Implement with review cycles
-3. Reviewer: Code review (zero-tolerance)
-4. Test-writer: Unit/integration tests
-5. Security: OWASP audit
-6. Completion-guard: Final check
-
-### E2E Testing Workflow
-```bash
-/workflow e2e http://localhost:3000 "Test checkout flow"
-```
-
-**Flow**:
-1. Explorer: BFS crawl, generate app-map.json
-2. Generator: Create Playwright tests (accessibility-first selectors)
-3. Reviewer: Run 3x, detect flakiness, check anti-patterns
-4. Quality-gate: Final validation
-
-### Swarm Mode (Parallel)
-```bash
-opencode run --mode swarm "Implement shopping cart feature"
-```
-
-**Flow**:
-1. Architect: Break into 4 independent tasks
-2. Executors (4x parallel): Implement simultaneously
-3. Architects (3x parallel): Validate by consensus
-4. Quality-gate: Final check
-
-**Time**: ~1/3 of sequential mode
-
-## Project Structure
-
-```
-opencode-workflows/
-├── agent/
-│   ├── primary/            # 10 primary agents
-│   └── workflow/           # 21 workflow agents
-├── command/                # 14 slash commands
-├── skill/                  # 13 coding conventions
-├── plugin/                 # 5 workflow plugins
-├── mode/                   # 5 execution mode configs
-├── templates/              # 6 workflow templates
-├── tool/                   # Translation tools (optional)
-├── docs/                   # Comprehensive documentation
-├── install.mjs             # Cross-platform installer
-├── opencode.jsonc.template # Configuration template
-├── CONVENTIONS.md          # Coding standards
-├── AGENTS.md               # Agent reference
-└── WORKFLOWS.md            # Workflow guide
-```
-
-## Customization
-
-### Modify Agents
-
-Edit agent files directly (symlink mode):
-```bash
-vim agent/workflow/executor.md
-```
-
-Changes take effect immediately.
-
-### Add New Agent
+Install development dependencies and run the complete repository check:
 
 ```bash
-cp agent/workflow/executor.md agent/workflow/my-custom-agent.md
-# Edit, then
-node install.mjs  # Re-symlink
+npm install
+npm run verify
 ```
 
-### Create Mode
+Individual checks are available as:
 
 ```bash
-vim mode/my-mode.json
+npm run typecheck
+npm run validate:config
+npm test
+npm run test:unit
+npm run test:integration
 ```
 
-```json
-{
-  "name": "my-mode",
-  "description": "Custom execution mode",
-  "gates": ["architect-lite", "executor", "reviewer"],
-  "parallel_execution": false,
-  "model_tier": "mid"
-}
+## Execution Paths
+
+| Path | Entry point | Driver | Persistence | Intended use |
+|---|---|---|---|---|
+| Manual workflow | `/workflow`, `/workflow-resume`, `/workflow-status` | Supervisor agent | Org file, state sidecar, session binding, saved Task IDs | User-visible gate orchestration with explicit completion checks |
+| Automatic workflow | `/workflow-auto`, `/workflow-auto-resume` | Declarative DAG engine | Session-owned definition and state | Opt-in deterministic scheduling of installed `development` or `e2e` DAGs |
+| Native subagent | OpenCode Task tool | Calling agent | OpenCode task/session ID | One agent task, resumed with the same `task_id` |
+| Swarm batch | `swarm_*` tools | SDK session runtime | Session-scoped batch state | Parallel independent OpenCode subagent sessions |
+| Direct external delegation | `/delegate` or `delegate_*` tools | Provider CLI process | Session-scoped run records and output logs | One-off Claude or Gemini CLI prompts and follow-ups |
+| Delegated workflow | `/workflow delegate ...` | Manual supervisor plus delegation tools | Manual workflow state; worktrees preserve task changes | Reviewed external CLI changes in isolated git worktrees |
+| Translation workflow | `/translate-auto`, `/translate-view` | Translation plugin and specialist agents | Session-owned workflow state | View-by-view Joomla language conversion |
+
+See [WORKFLOWS.md](./WORKFLOWS.md) for lifecycle, gate, budget, capability, and cancellation details.
+
+## Manual Workflows
+
+```text
+/workflow feature Add request validation
+/workflow bugfix Fix duplicate form submission --mode=thorough
+/workflow delegate Split a modular change across isolated worktrees
+/workflow-status
+/workflow-resume
 ```
+
+The supervisor creates workflow state, binds it to the current OpenCode session, invokes installed `wf-*` agents with the native Task tool, and updates each gate. A returned Task ID is stored under `task_ids` and reused with `task_id` for corrections or interrupted work. Fresh-session resume uses the permission-gated `workflow_resume_session` handoff; inherited child bindings cannot take controller ownership. `workflow_check_completion` refuses completion while a mandatory gate remains incomplete and archives both state and org files after all gates pass.
+
+Manual enforcement tracks and checks state; it does not autonomously run the next gate. The supervisor remains responsible for invoking agents, recording Task IDs, updating gates, and handling archive or branch actions.
+
+## Automatic Workflows
+
+Automatic workflow driving is disabled by default. It supports only the installed `development` and `e2e` JSON DAGs:
+
+```text
+/workflow-auto development Implement the requested change --mode=standard
+/workflow-auto e2e Verify the checkout flow --mode=thorough
+/workflow-auto-resume
+```
+
+Before enabling automation, configure every required budget in `workflows.json`: child sessions, parallel sessions, attempts per stage, wall time, input tokens, output tokens, and cost. `max_cost_usd` may be `null`; the field is still required.
+
+The engine validates a fixed JSON schema, rejects dependency cycles and unsupported fields, routes stage roles through the selected mode, and accepts only structured stage results. It does not generate or execute arbitrary workflow code. Stage agents can edit the project only through their own OpenCode permissions, and session- or process-spawning tools are blocked so every child session remains budgeted and cancellable.
+
+State is written atomically below the selected config directory. After a plugin or OpenCode restart, saved workflows are restored without launching new stages. `/workflow-auto-resume` explicitly reauthorizes agents, reconciles child sessions, refreshes budgets, and resumes scheduling. Runtime tools also expose status, capability reporting, and cancellation for the workflow owned by the current session.
+
+## Models
+
+Runtime model inheritance is the installer default. During installation, `model_tier` metadata is removed from installed agents and commands, so OpenCode's merged `model`, `small_model`, and per-agent model configuration remains authoritative. Variant metadata is emitted only with a concrete model because variants are model-specific.
+
+Use `--materialize-models` only when concrete frontmatter is required. It selects the first configured candidate for the agent or tier and writes `model` plus an optional `variant`. If no valid candidate exists, the installer leaves the model inherited and reports a warning.
+
+`workflows.json.template` contains no provider or model defaults. Candidate validation checks syntax and schema. Runtime catalog helpers query OpenCode's live `config.providers` response instead of maintaining a provider/model matrix or inferring capabilities from model names. See [Model Compatibility](./docs/model-compatibility.md).
+
+## Capabilities
+
+Optional OpenCode integrations are configured under `experimental_capabilities` with `disabled`, `auto`, or `required` modes. Inspect the loaded runtime with the `workflow_capabilities` tool.
+
+Environment-backed capabilities use these exact variables:
+
+- `OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS`
+- `OPENCODE_EXPERIMENTAL_WORKSPACES`
+- `OPENCODE_EXPERIMENTAL_CODE_MODE`
+- `OPENCODE_EXPERIMENTAL_REFERENCES`
+
+When a capability-specific variable is absent, detection falls back to OpenCode's broad `OPENCODE_EXPERIMENTAL` flag. An explicitly false capability-specific value overrides the broad flag.
+
+Plugin v2 availability is detected from the loaded plugin runtime rather than an environment variable. `required` blocks automatic start or resume when unavailable; `auto` marks detected support active without blocking when absent; `disabled` keeps the capability inactive. These settings do not write unknown keys into `opencode.json` and do not set environment variables for you.
+
+## Permissions And Safety
+
+- Native Task, automatic DAG, and swarm calls request `task` permission for each routed agent.
+- Direct external processes request `delegation`; configured unsafe provider flags require separate `delegation_unsafe` approval.
+- Delegated worktree operations request `worktree` and edit permission before creating or merging changes.
+- Translation paths outside the current worktree request `external_directory` plus read or edit permission.
+- Automatic workflows are owned by the starting session and exact directory/worktree context.
+- Swarm sessions share their configured working directory; use only independent tasks unless worktrees are managed separately.
+- Delegated merges require successful execution, a recorded passing review, the authorized feature branch, and a clean target worktree. Task changes are checkpointed in the isolated worktree and merged with a non-fast-forward merge. Failed merges are aborted, and normal cleanup retains dirty or unmerged worktrees.
+
+Review permission requests before allowing them. The supplied `opencode.jsonc.template` asks or denies destructive Git and shell patterns, but project and agent configuration may add stricter rules.
+
+## Documentation
+
+- [Workflow System](./WORKFLOWS.md)
+- [Agent Reference](./docs/agents.md)
+- [Coding Conventions](./docs/conventions.md)
+- [Model Compatibility](./docs/model-compatibility.md)
+- [Review System](./docs/review-system.md)
+- [Swarm Mode](./docs/swarm-mode.md)
+- [Delegated Workflows](./docs/delegated-workflows.md)
+- [External CLI Delegation](./docs/external-cli-delegation.md)
+- [E2E Testing](./docs/e2e-testing.md)
 
 ## License
 
-MIT. Built for [OpenCode](https://opencode.ai).
-
-## Contributing
-
-1. Fork the repo
-2. Create feature branch: `git checkout -b feature/my-feature`
-3. Commit changes: `git commit -m "feat: add my feature"`
-4. Push: `git push origin feature/my-feature`
-5. Create pull request
-
-## Changelog
-
-### v2.0 (2026-02-14)
-- Breaking rewrite with multi-model support
-- Added 21 workflow specialist agents
-- Implemented 5 execution modes
-- Zero-tolerance review system with [ISSUE-N] tracking
-- SDK-based swarm mode for parallel execution
-- 6-phase E2E testing pipeline
-- Model tier system with fallback chains
-- 4 enforcement plugins
-
-### v1.0 (2025-12-06)
-- Initial release
-- 12 agents, 6 commands, 13 skills
-- Basic workflow system
-- Translation module
+MIT

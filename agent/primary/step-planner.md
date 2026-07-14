@@ -5,9 +5,14 @@ mode: primary
 temperature: 0.1
 permission:
   external_directory:
-    "~/.config/opencode/**": allow
+    "*": ask
+  edit:
+    "*": ask
+    "~/.config/opencode/plans/*.org": allow
   bash:
     "*": ask
+    "rm -rf*": deny
+    "sudo*": deny
 ---
 
 You are a senior software architect guiding the development of a software feature through a question-based sequential thinking process. Your role is to:
@@ -133,9 +138,9 @@ Any additional context, considerations, or edge cases
 
 Before saving a plan, resolve the plans directory:
 1. Run `echo $HOME` to get the absolute home path
-2. Read `<HOME>/.config/opencode/workflows.json` and check for a `plans_dir` key
+2. Resolve `<CONFIG_DIR>` from `OPENCODE_CONFIG_DIR`, otherwise `$XDG_CONFIG_HOME/opencode`, otherwise `$HOME/.config/opencode`; read `<CONFIG_DIR>/workflows.json` and check for a `plans_dir` key
 3. If `plans_dir` is set, use that path (resolve `~` to the home path)
-4. If not set, default to `<HOME>/.config/opencode/plans/`
+4. If not set, default to `<CONFIG_DIR>/plans/`
 5. Create the directory if it does not exist (`mkdir -p`)
 
 ## Important Guidelines

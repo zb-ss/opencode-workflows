@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "id": "development",
+  "description": "Plan, implement, validate, and complete a software development task.",
+  "stages": [
+    {
+      "id": "planning",
+      "description": "Inspect the repository and produce an implementation plan.",
+      "agent_role": "planning",
+      "model_tier": "mid",
+      "prompt": "Analyze the requested task against the current repository. Identify the smallest correct implementation, constraints, risks, and verification steps. Do not implement changes in this stage."
+    },
+    {
+      "id": "implementation",
+      "description": "Implement the requested change.",
+      "depends_on": ["planning"],
+      "agent_role": "implementation",
+      "model_tier": "mid",
+      "prompt": "Implement the requested task in the current worktree. Follow repository conventions, keep the change focused, and run relevant focused checks."
+    },
+    {
+      "id": "code_review",
+      "description": "Review the implementation for functional and maintainability defects.",
+      "depends_on": ["implementation"],
+      "agent_role": "code_review",
+      "model_tier": "mid",
+      "prompt": "Review the implementation against the request. Fix defects when your permissions allow it; otherwise report a failed result with precise actionable details."
+    },
+    {
+      "id": "security_review",
+      "description": "Review the implementation for security regressions.",
+      "depends_on": ["implementation"],
+      "agent_role": "security_review",
+      "model_tier": "mid",
+      "prompt": "Review the implementation for input-validation, injection, authorization, data exposure, dependency, and unsafe execution risks. Fix issues when allowed or return a failed result."
+    },
+    {
+      "id": "tests",
+      "description": "Add or run tests that verify the implementation.",
+      "depends_on": ["implementation"],
+      "agent_role": "tests",
+      "model_tier": "mid",
+      "prompt": "Add focused regression coverage where needed and run the relevant tests and type checks. Return failure if the requested behavior is not verified."
+    },
+    {
+      "id": "quality_gate",
+      "description": "Verify all implementation and validation evidence.",
+      "depends_on": ["code_review", "security_review", "tests"],
+      "agent_role": "quality_gate",
+      "model_tier": "mid",
+      "prompt": "Perform the final quality gate. Inspect the actual worktree and verification evidence, run any essential focused check, and fail if defects or unmet requirements remain."
+    },
+    {
+      "id": "completion_guard",
+      "description": "Confirm the workflow is genuinely complete.",
+      "depends_on": ["quality_gate"],
+      "agent_role": "completion_guard",
+      "model_tier": "mid",
+      "prompt": "Confirm the original request is fully satisfied, required tests passed, and no unresolved blocking issue remains. Do not claim completion without direct evidence."
+    }
+  ]
+}

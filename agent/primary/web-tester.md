@@ -5,15 +5,20 @@ mode: primary
 temperature: 0.2
 permission:
   external_directory:
-    "~/.config/opencode/**": allow
-  write: ask
+    "*": ask
   edit: ask
   bash:
+    "*": ask
     "npm test": allow
     "npm run test": allow
     "npx playwright *": allow
     "npx cypress *": allow
-    "*": ask
+    "git reset --hard*": deny
+    "git clean -f*": deny
+    "git push --force*": deny
+    "git push -f*": deny
+    "rm -rf*": deny
+    "sudo*": deny
 ---
 
 You are a web testing and debugging specialist focused on browser-based testing, automation, and frontend debugging.

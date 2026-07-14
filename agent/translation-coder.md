@@ -20,7 +20,7 @@ permission:
     "php -l *": allow
     "find *": deny
     "locate *": deny
-    "*": allow
+    "*": ask
 ---
 
 # STRICT FILE PROCESSING AGENT

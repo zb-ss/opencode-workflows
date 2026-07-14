@@ -2,20 +2,29 @@
 description: "Test generation following project conventions"
 model_tier: mid
 mode: subagent
+hidden: true
 temperature: 0.1
 steps: 20
 permission:
   external_directory:
-    "~/.config/opencode/**": allow
+    "*": ask
   edit: allow
-  write: allow
   read: allow
   grep: allow
   glob: allow
   bash:
-    "git commit*": deny
-    "git push*": deny
-    "*": allow
+    "*": ask
+    "git *": deny
+    "git status*": allow
+    "git diff*": allow
+    "git log*": allow
+    "git show*": allow
+    "git blame*": allow
+    "git branch": allow
+    "git branch --show-current*": allow
+    "rm -rf*": deny
+    "sudo*": deny
+  task: deny
 ---
 
 # Test Writer Agent

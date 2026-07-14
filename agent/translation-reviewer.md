@@ -18,7 +18,7 @@ permission:
     "rm -rf *": deny
     "sudo *": deny
     "php -l *": allow
-    "*": allow
+    "*": ask
 ---
 
 # TRANSLATION REVIEWER (THOROUGH MODE)

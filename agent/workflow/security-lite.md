@@ -2,14 +2,18 @@
 description: "Quick security scan for obvious vulnerabilities"
 model_tier: low
 mode: subagent
+hidden: true
 temperature: 0.1
 steps: 8
 permission:
   external_directory:
-    "~/.config/opencode/**": allow
+    "*": deny
   read: allow
   grep: allow
   glob: allow
+  edit: deny
+  bash: deny
+  task: deny
 ---
 
 # Quick Security Agent

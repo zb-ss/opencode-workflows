@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://opencode-workflows.example/schema/stage-result.schema.json",
+  "title": "Automatic workflow stage result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status", "summary"],
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["passed", "failed"]
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 8000
+    },
+    "details": {
+      "type": "array",
+      "maxItems": 100,
+      "items": {
+        "type": "string",
+        "maxLength": 4000
+      }
+    },
+    "retryable": {
+      "type": "boolean"
+    }
+  }
+}

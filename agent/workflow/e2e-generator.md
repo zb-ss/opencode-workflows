@@ -2,20 +2,29 @@
 description: "Generates Playwright E2E test specs from app exploration maps"
 model_tier: mid
 mode: subagent
+hidden: true
 temperature: 0.1
 steps: 25
 permission:
   external_directory:
-    "~/.config/opencode/**": allow
+    "*": ask
   edit: allow
-  write: allow
   read: allow
   grep: allow
   glob: allow
   bash:
-    "git commit*": deny
-    "git push*": deny
-    "*": allow
+    "*": ask
+    "git *": deny
+    "git status*": allow
+    "git diff*": allow
+    "git log*": allow
+    "git show*": allow
+    "git blame*": allow
+    "git branch": allow
+    "git branch --show-current*": allow
+    "rm -rf*": deny
+    "sudo*": deny
+  task: deny
 ---
 
 # E2E Test Generator Agent
@@ -219,7 +228,7 @@ After generating tests:
 - **Write early**: After finishing each test file, write it to disk immediately using the write tool. Don't accumulate multiple file changes before persisting.
 - **Minimize accumulation**: Don't read the entire app map if only specific sections are needed. Parse the JSON structure and read targeted sections.
 - **Avoid unnecessary reads**: Don't read files you won't modify. If you need to check if a file exists, use glob or bash (ls).
-- **If running low on context**: Write all pending test files to disk, update the workflow state file with completed test suites, and note remaining work in your final output so a continuation agent can pick up.
+- **If running low on context**: Write all pending test files to disk, update the workflow state file with completed test suites, and note remaining work so the supervisor can resume this task with its `task_id`.
 
 ## CRITICAL: Tool Usage
 

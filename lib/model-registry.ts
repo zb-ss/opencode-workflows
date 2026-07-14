@@ -1,88 +1,184 @@
-/**
- * Model capability database and tier resolution.
- * Maps model IDs to capabilities and resolves abstract tiers
- * to concrete models based on user configuration.
- *
- * This registry is used for tier inference in the model-router plugin.
- * Models not listed here still work — the router falls back to keyword
- * matching (e.g., "flash" → mid, "pro" → high). Add entries here to
- * override the default keyword-based inference or set specific context
- * window limits.
- *
- * Entries use provider families rather than exact versions so they
- * remain valid as providers release new model versions.
- */
+export interface ModelCandidate {
+  model: string
+  variant?: string
+}
 
-import type { ModelCapability, ModelTier, WorkflowUserConfig } from './types.ts';
+export type ConfiguredModelCandidate = string | ModelCandidate
 
-export const MODEL_REGISTRY: Record<string, ModelCapability> = {
-  // Zhipu AI — GLM family
-  'glm-5':          { id: 'glm-5', provider: 'zhipu', tier: 'high', contextWindow: 200_000, apiFormat: 'openai', costTier: 'standard' },
-  'glm-4':          { id: 'glm-4', provider: 'zhipu', tier: 'mid', contextWindow: 128_000, apiFormat: 'openai', costTier: 'budget' },
+export interface CatalogModel {
+  variants: ReadonlySet<string>
+  status?: string
+  context?: number
+}
 
-  // MiniMax — M family
-  'minimax-m2.5':   { id: 'minimax-m2.5', provider: 'minimax', tier: 'high', contextWindow: 200_000, apiFormat: 'openai', costTier: 'budget' },
+export type ModelCatalog = ReadonlyMap<string, CatalogModel>
 
-  // Google — Gemini family
-  'gemini-3-pro':   { id: 'gemini-3-pro', provider: 'google', tier: 'high', contextWindow: 1_000_000, apiFormat: 'google', costTier: 'standard' },
-  'gemini-3-flash': { id: 'gemini-3-flash', provider: 'google', tier: 'mid', contextWindow: 1_000_000, apiFormat: 'google', costTier: 'budget' },
+export interface CandidateDiagnostic {
+  candidate: ModelCandidate
+  available: boolean
+  reason: 'available' | 'model_unavailable' | 'variant_unavailable'
+  available_variants?: string[]
+}
 
-  // OpenAI — GPT family
-  'gpt-5.3':        { id: 'gpt-5.3', provider: 'openai', tier: 'high', contextWindow: 1_000_000, apiFormat: 'openai', costTier: 'premium' },
-  'gpt-5.2':        { id: 'gpt-5.2', provider: 'openai', tier: 'high', contextWindow: 1_000_000, apiFormat: 'openai', costTier: 'premium' },
-  'gpt-4.1':        { id: 'gpt-4.1', provider: 'openai', tier: 'high', contextWindow: 1_000_000, apiFormat: 'openai', costTier: 'premium' },
-  'gpt-4.1-mini':   { id: 'gpt-4.1-mini', provider: 'openai', tier: 'mid', contextWindow: 1_000_000, apiFormat: 'openai', costTier: 'budget' },
-  'gpt-4.1-nano':   { id: 'gpt-4.1-nano', provider: 'openai', tier: 'low', contextWindow: 1_000_000, apiFormat: 'openai', costTier: 'budget' },
-};
+export interface ModelSelectionResult {
+  selected: ModelCandidate | null
+  diagnostics: CandidateDiagnostic[]
+}
 
-/**
- * Resolve an abstract tier to a concrete model ID using user configuration.
- * Falls back to first model in the tier's list from user config.
- */
-export function getModelForTier(tier: ModelTier, userConfig?: WorkflowUserConfig): string | null {
-  if (!userConfig?.model_tiers) return null;
-  const models = userConfig.model_tiers[tier];
-  return models && models.length > 0 ? models[0] : null;
+const MODEL_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*\/\S+$/
+const VARIANT_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
+
+export function normalizeModelCandidate(candidate: ConfiguredModelCandidate): ModelCandidate {
+  return typeof candidate === 'string' ? { model: candidate } : { ...candidate }
+}
+
+export function validateModelCandidate(candidate: ConfiguredModelCandidate): ModelCandidate {
+  const normalized = normalizeModelCandidate(candidate)
+  if (!MODEL_ID_PATTERN.test(normalized.model)) {
+    throw new Error(`invalid model identifier: ${normalized.model}`)
+  }
+  if (normalized.variant !== undefined && !VARIANT_PATTERN.test(normalized.variant)) {
+    throw new Error(`invalid model variant: ${normalized.variant}`)
+  }
+  return normalized
+}
+
+export function uniqueModelCandidates(candidates: readonly ConfiguredModelCandidate[]): ModelCandidate[] {
+  const unique = new Map<string, ModelCandidate>()
+  for (const configured of candidates) {
+    const candidate = validateModelCandidate(configured)
+    const key = `${candidate.model}\0${candidate.variant ?? ''}`
+    if (!unique.has(key)) unique.set(key, candidate)
+  }
+  return [...unique.values()]
 }
 
 /**
- * Get ordered fallback chain for a model from user configuration.
+ * Select the first configured model and variant present in the live catalog.
+ * Every rejected candidate is retained as a diagnostic so callers can explain
+ * the exact fallback decision without inferring capability from model names.
  */
-export function getFallbackChain(modelId: string, userConfig?: WorkflowUserConfig): string[] {
-  if (!userConfig?.fallback_order) return [modelId];
-  // Start with the requested model, then add fallbacks that aren't duplicates
-  const chain = [modelId];
-  for (const fallback of userConfig.fallback_order) {
-    if (!chain.includes(fallback)) {
-      chain.push(fallback);
+export function selectAvailableModelCandidate(
+  candidates: readonly ConfiguredModelCandidate[],
+  catalog: ModelCatalog,
+): ModelSelectionResult {
+  const diagnostics: CandidateDiagnostic[] = []
+
+  for (const candidate of uniqueModelCandidates(candidates)) {
+    const model = catalog.get(candidate.model)
+    if (!model) {
+      diagnostics.push({ candidate, available: false, reason: 'model_unavailable' })
+      continue
+    }
+
+    if (candidate.variant && !model.variants.has(candidate.variant)) {
+      diagnostics.push({
+        candidate,
+        available: false,
+        reason: 'variant_unavailable',
+        available_variants: [...model.variants].sort(),
+      })
+      continue
+    }
+
+    diagnostics.push({ candidate, available: true, reason: 'available' })
+    return { selected: candidate, diagnostics }
+  }
+
+  return { selected: null, diagnostics }
+}
+
+/** Build an availability catalog from OpenCode's config.providers response. */
+export function modelCatalogFromProviders(response: unknown): Map<string, CatalogModel> {
+  const payload = unwrapProviderPayload(response)
+  const catalog = new Map<string, CatalogModel>()
+
+  for (const provider of payload.providers) {
+    if (!provider || typeof provider !== 'object') continue
+    const providerRecord = provider as Record<string, unknown>
+    const providerId = typeof providerRecord.id === 'string' ? providerRecord.id : null
+    if (!providerId) continue
+
+    const models = providerRecord.models
+    const entries = Array.isArray(models)
+      ? models.map((model) => [undefined, model] as const)
+      : models && typeof models === 'object'
+        ? Object.entries(models as Record<string, unknown>)
+        : []
+
+    for (const [key, value] of entries) {
+      if (!value || typeof value !== 'object') continue
+      const model = value as Record<string, unknown>
+      const modelId = typeof model.id === 'string' ? model.id : key
+      if (!modelId) continue
+
+      const variants = new Set<string>()
+      if (model.variants && typeof model.variants === 'object') {
+        for (const [name, options] of Object.entries(model.variants as Record<string, unknown>)) {
+          const isDisabled = Boolean(
+            options && typeof options === 'object' && (options as Record<string, unknown>).disabled === true,
+          )
+          if (!isDisabled) variants.add(name)
+        }
+      }
+
+      const limit = model.limit && typeof model.limit === 'object'
+        ? model.limit as Record<string, unknown>
+        : null
+      catalog.set(`${providerId}/${modelId}`, {
+        variants,
+        ...(typeof model.status === 'string' ? { status: model.status } : {}),
+        ...(typeof limit?.context === 'number' ? { context: limit.context } : {}),
+      })
     }
   }
-  return chain;
+
+  return catalog
 }
 
-/**
- * Check if content should be chunked for a given model based on context window.
- * Returns true if estimated tokens exceed 80% of the model's context window.
- */
-export function shouldChunkForModel(modelId: string, estimatedTokens: number): boolean {
-  const capability = MODEL_REGISTRY[modelId];
-  if (!capability) return false;
-  return estimatedTokens > capability.contextWindow * 0.8;
+/** Query OpenCode's merged live provider/model configuration when a client is available. */
+export async function loadLiveModelCatalog(
+  client: any,
+  directory?: string,
+): Promise<Map<string, CatalogModel>> {
+  if (!client?.config?.providers) {
+    throw new Error('OpenCode runtime client does not expose config.providers')
+  }
+  const response = await client.config.providers({
+    ...(directory ? { query: { directory } } : {}),
+    throwOnError: true,
+  })
+  return modelCatalogFromProviders(response)
 }
 
-/**
- * Look up a model's capabilities from the registry.
- */
-export function getModelCapability(modelId: string): ModelCapability | null {
-  return MODEL_REGISTRY[modelId] ?? null;
+export async function selectAvailableModelCandidateFromClient(
+  candidates: readonly ConfiguredModelCandidate[],
+  client: any,
+  directory?: string,
+): Promise<ModelSelectionResult> {
+  return selectAvailableModelCandidate(candidates, await loadLiveModelCatalog(client, directory))
 }
 
-/**
- * Extract the provider prefix from a model ID (e.g. "google/gemini-3-pro" -> "google").
- * Returns "unknown" if the model ID contains no slash.
- */
-export function extractProvider(modelId: string): string {
-  const slashIdx = modelId.indexOf('/');
-  if (slashIdx === -1) return 'unknown';
-  return modelId.substring(0, slashIdx).toLowerCase();
+export function shouldChunkForModel(
+  modelId: string,
+  estimatedTokens: number,
+  catalog: ModelCatalog,
+  utilization = 0.8,
+): boolean {
+  const context = catalog.get(modelId)?.context
+  return context !== undefined && estimatedTokens > context * utilization
+}
+
+export function extractProvider(modelId: string): string | null {
+  const separator = modelId.indexOf('/')
+  return separator > 0 ? modelId.slice(0, separator).toLowerCase() : null
+}
+
+function unwrapProviderPayload(response: unknown): { providers: unknown[] } {
+  if (!response || typeof response !== 'object') return { providers: [] }
+  const record = response as Record<string, unknown>
+  const payload = record.data && typeof record.data === 'object'
+    ? record.data as Record<string, unknown>
+    : record
+  return { providers: Array.isArray(payload.providers) ? payload.providers : [] }
 }

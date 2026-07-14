@@ -1,1176 +1,1093 @@
 #!/usr/bin/env node
 
-/**
- * OpenCode Workflows Installer
- *
- * Cross-platform installer that places agents, commands, skills, plugins,
- * tools, and config files into ~/.config/opencode/ via symlinks or copies.
- *
- * Usage:
- *   node install.mjs                       # Install core (symlink mode)
- *   node install.mjs --copy                # Install core (copy mode)
- *   node install.mjs --runtime-models      # Keep model selection in opencode.jsonc
- *   node install.mjs --all                 # Install core + translate
- *   node install.mjs --module translate    # Add translate module
- *   node install.mjs --uninstall           # Remove all installed files
- *   node install.mjs --dry-run             # Preview actions
- *   node install.mjs --help                # Show usage
- */
+import crypto from 'node:crypto'
+import { execFileSync, spawnSync } from 'node:child_process'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-import fs from "node:fs";
-import path from "node:path";
-import os from "node:os";
-import { execSync } from "node:child_process";
-
-// ---------------------------------------------------------------------------
-// Module definitions
-// ---------------------------------------------------------------------------
-
-const MODULES = {
-  core: {
-    agents_primary: [
-      "primary/supervisor.md",
-      "primary/delegator.md",
-      "primary/editor.md",
-      "primary/focused-build.md",
-      "primary/debug.md",
-      "primary/org-planner.md",
-      "primary/step-planner.md",
-      "primary/discussion.md",
-      "primary/web-tester.md",
-      "primary/figma-builder.md",
-    ],
-    agents_workflow: [
-      "workflow/architect.md",
-      "workflow/architect-lite.md",
-      "workflow/executor.md",
-      "workflow/executor-lite.md",
-      "workflow/reviewer.md",
-      "workflow/reviewer-lite.md",
-      "workflow/reviewer-deep.md",
-      "workflow/security.md",
-      "workflow/security-lite.md",
-      "workflow/security-deep.md",
-      "workflow/test-writer.md",
-      "workflow/quality-gate.md",
-      "workflow/completion-guard.md",
-      "workflow/codebase-analyzer.md",
-      "workflow/perf-reviewer.md",
-      "workflow/perf-lite.md",
-      "workflow/doc-writer.md",
-      "workflow/explorer.md",
-      "workflow/e2e-explorer.md",
-      "workflow/e2e-generator.md",
-      "workflow/e2e-reviewer.md",
-    ],
-    commands: [
-      "plan.md",
-      "delegate.md",
-      "git-commit.md",
-      "git-pr.md",
-      "git-pr-checkout.md",
-      "git-pr-review.md",
-      "git-pr-merge.md",
-      "git-release.md",
-      "git-issue.md",
-      "git-browse.md",
-      "git-workflow-run.md",
-      "workflow.md",
-      "workflow-resume.md",
-      "workflow-status.md",
-    ],
-    skills: [
-      "php-conventions",
-      "laravel-conventions",
-      "symfony-conventions",
-      "vue-conventions",
-      "vue2-legacy",
-      "joomla-conventions",
-      "joomla3-legacy",
-      "solid-principles",
-      "api-design",
-      "performance-guide",
-      "typescript-conventions",
-      "bash-conventions",
-      "python-conventions",
-    ],
-    tools: [
-      "delegate_command.ts",
-    ],
-    plugins: [
-      "workflow-notifications.ts",
-      "workflow-enforcer.ts",
-      "file-validator.ts",
-      "model-router.ts",
-      "swarm-manager.ts",
-      "delegation-orchestrator.ts",
-      "package.json",
-    ],
-    modes: [
-      "eco.json",
-      "turbo.json",
-      "standard.json",
-      "thorough.json",
-      "swarm.json",
-      "delegate.json",
-    ],
-    lib: [
-      "types.ts",
-      "logger.ts",
-      "state.ts",
-      "model-registry.ts",
-      "mode-rules.ts",
-      "worktree-manager.ts",
-      "task-router.ts",
-      "init-file-generator.ts",
-    ],
-    templates: [
-      "feature-development.org",
-      "bug-fix.org",
-      "refactor.org",
-      "figma-to-code.org",
-      "e2e-testing.org",
-      "delegation.org",
-    ],
-    rootFiles: ["CONVENTIONS.md"],
-  },
-  translate: {
-    agents: [
-      "translation-planner.md",
-      "translation-coder.md",
-      "translation-reviewer.md",
-    ],
-    commands: ["translate-auto.md", "translate-view.md"],
-    tools: [
-      "i18n-hardcode-finder.ts",
-      "i18n-convert.ts",
-      "i18n-extract.ts",
-      "i18n-verify.ts",
-      "ini-builder.ts",
-      "file-chunker.ts",
-      "chunk-reader.ts",
-      "chunk-state.ts",
-    ],
-    plugins: ["translation-workflow.ts"],
-  },
-};
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-const REPO_ROOT = path.dirname(new URL(import.meta.url).pathname);
-
-function getConfigDir() {
-  const xdg = process.env.XDG_CONFIG_HOME;
-  return xdg
-    ? path.join(xdg, "opencode")
-    : path.join(os.homedir(), ".config", "opencode");
+const REPO_ROOT = path.dirname(fileURLToPath(import.meta.url))
+const PACKAGE_DATA = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8'))
+const MANIFEST_NAME = '.opencode-workflows-manifest.json'
+const MANIFEST_VERSION = 2
+const MIN_OPENCODE_VERSION = '1.17.20'
+const ENV_FILE_NAME = 'opencode-workflows.env'
+const MODEL_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*\/\S+$/
+const VARIANT_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
+const CAPABILITY_ENVIRONMENT = {
+  background_subagents: 'OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS',
+  native_workspaces: 'OPENCODE_EXPERIMENTAL_WORKSPACES',
+  mcp_code_mode: 'OPENCODE_EXPERIMENTAL_CODE_MODE',
+  references: 'OPENCODE_EXPERIMENTAL_REFERENCES',
 }
 
-const MANIFEST_NAME = ".opencode-workflows-manifest.json";
-const ENV_FILE_NAME = "opencode-workflows.env";
+const PRIMARY_AGENTS = [
+  'supervisor.md',
+  'delegator.md',
+  'editor.md',
+  'focused-build.md',
+  'debug.md',
+  'org-planner.md',
+  'step-planner.md',
+  'discussion.md',
+  'web-tester.md',
+  'figma-builder.md',
+]
 
-/** Remove old timestamped backups from previous installer versions */
-function cleanupLegacyBackups(target) {
+const WORKFLOW_AGENTS = [
+  'architect.md',
+  'architect-lite.md',
+  'executor.md',
+  'executor-lite.md',
+  'reviewer.md',
+  'reviewer-lite.md',
+  'reviewer-deep.md',
+  'security.md',
+  'security-lite.md',
+  'security-deep.md',
+  'test-writer.md',
+  'quality-gate.md',
+  'completion-guard.md',
+  'codebase-analyzer.md',
+  'perf-reviewer.md',
+  'perf-lite.md',
+  'doc-writer.md',
+  'explorer.md',
+  'e2e-explorer.md',
+  'e2e-generator.md',
+  'e2e-reviewer.md',
+]
+
+const TRANSLATION_AGENTS = [
+  'translation-planner.md',
+  'translation-coder.md',
+  'translation-reviewer.md',
+]
+
+const TRANSLATION_TOOLS = new Set([
+  'i18n-hardcode-finder.ts',
+  'i18n-convert.ts',
+  'i18n-extract.ts',
+  'i18n-verify.ts',
+  'ini-builder.ts',
+  'file-chunker.ts',
+  'chunk-reader.ts',
+  'chunk-state.ts',
+])
+
+export function getConfigDir(env = process.env) {
+  if (env.OPENCODE_CONFIG_DIR) return path.resolve(expandHome(env.OPENCODE_CONFIG_DIR))
+  if (env.XDG_CONFIG_HOME) return path.resolve(expandHome(env.XDG_CONFIG_HOME), 'opencode')
+  return path.join(os.homedir(), '.config', 'opencode')
+}
+
+function expandHome(value) {
+  if (value === '~') return os.homedir()
+  if (value.startsWith('~/') || value.startsWith(`~${path.sep}`)) {
+    return path.join(os.homedir(), value.slice(2))
+  }
+  return value
+}
+
+function pathExists(target) {
   try {
-    const dir = path.dirname(target);
-    const base = path.basename(target);
-    const legacyPrefix = `${base}.backup.`;
-
-    for (const entry of fs.readdirSync(dir)) {
-      if (entry.startsWith(legacyPrefix)) {
-        removePath(path.join(dir, entry));
-      }
-    }
+    fs.lstatSync(target)
+    return true
   } catch {
-    // best-effort cleanup
+    return false
   }
 }
 
-/**
- * Normalize old timestamped backups across config dir.
- * Keeps at most one backup per base path as `<target>.backup`.
- */
-function normalizeLegacyBackups(configDir, dryRun) {
-  const actions = [];
-
-  if (!fs.existsSync(configDir)) return actions;
-
-  /** @type {Map<string, Array<{path: string, mtimeMs: number}>>} */
-  const groups = new Map();
-
-  function walk(dir) {
-    let entries = [];
-    try {
-      entries = fs.readdirSync(dir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-
-    for (const entry of entries) {
-      const fullPath = path.join(dir, entry.name);
-
-      if (entry.isDirectory()) {
-        walk(fullPath);
-        continue;
-      }
-
-      const marker = ".backup.";
-      const idx = entry.name.indexOf(marker);
-      if (idx === -1) continue;
-
-      const baseName = entry.name.slice(0, idx);
-      if (!baseName) continue;
-
-      let mtimeMs = 0;
-      try {
-        mtimeMs = fs.lstatSync(fullPath).mtimeMs;
-      } catch {
-        // ignore stat failures
-      }
-
-      const basePath = path.join(dir, baseName);
-      if (!groups.has(basePath)) groups.set(basePath, []);
-      groups.get(basePath).push({ path: fullPath, mtimeMs });
-    }
-  }
-
-  walk(configDir);
-
-  for (const [basePath, entries] of groups.entries()) {
-    const canonical = `${basePath}.backup`;
-    entries.sort((a, b) => b.mtimeMs - a.mtimeMs);
-
-    const canonicalExists = fs.existsSync(canonical);
-    let startDeleteAt = 0;
-
-    if (!canonicalExists && entries.length > 0) {
-      const latest = entries[0];
-      if (dryRun) {
-        actions.push({ action: "backup-normalize", from: latest.path, to: canonical, dryRun: true });
-      } else {
-        fs.renameSync(latest.path, canonical);
-        actions.push({ action: "backup-normalize", from: latest.path, to: canonical });
-      }
-      startDeleteAt = 1;
-    }
-
-    for (let i = startDeleteAt; i < entries.length; i++) {
-      const legacy = entries[i].path;
-      if (dryRun) {
-        actions.push({ action: "backup-clean", target: legacy, dryRun: true });
-      } else if (removePath(legacy)) {
-        actions.push({ action: "backup-clean", target: legacy });
-      }
-    }
-  }
-
-  return actions;
-}
-
-/**
- * Load full workflow configuration from workflows.json.
- * Checks: 1) config dir workflows.json, 2) repo template as fallback.
- * Returns the full config object including model_tiers, agent_models, swarm_config, etc.
- */
-function loadWorkflowConfig() {
-  const configDir = getConfigDir();
-  const candidates = [
-    path.join(configDir, "workflows.json"),
-    path.join(REPO_ROOT, "workflows.json.template"),
-  ];
-
-  for (const candidate of candidates) {
-    try {
-      const raw = fs.readFileSync(candidate, "utf-8");
-      const config = JSON.parse(raw);
-      if (config.model_tiers) {
-        // Build resolved tier map (first model in each tier array)
-        const model_tiers = {};
-        for (const [tier, models] of Object.entries(config.model_tiers)) {
-          if (Array.isArray(models) && models.length > 0) {
-            model_tiers[tier] = models;
-          }
-        }
-
-        if (Object.keys(model_tiers).length > 0) {
-          console.log(`Workflow config loaded from: ${candidate}`);
-          for (const [tier, models] of Object.entries(model_tiers)) {
-            console.log(`  ${tier}: ${models[0]}`);
-          }
-
-          const agentModels = config.agent_models || {};
-          const activeAgentModels = {};
-          for (const [key, val] of Object.entries(agentModels)) {
-            // Skip comment/example keys
-            if (!key.startsWith('_')) {
-              activeAgentModels[key] = val;
-            }
-          }
-
-          return {
-            model_tiers,
-            agent_models: activeAgentModels,
-            fallback_order: config.fallback_order || [],
-            default_mode: config.default_mode || 'standard',
-            swarm_config: config.swarm_config || {},
-          };
-        }
-      }
-    } catch {
-      // try next candidate
-    }
-  }
-
-  console.warn("Warning: No workflows.json found. Agents will not have model: set.");
-  return null;
-}
-
-/**
- * Resolve the concrete model to use for a given agent and tier.
- * Priority: per-agent override in agent_models > first model in tier array.
- * Returns null if neither is available.
- */
-function resolveModelForAgent(agentName, tier, config) {
-  // 1. Check per-agent override (skip keys starting with '_')
-  const agentModels = config.agent_models || {};
-  if (agentName && agentModels[agentName]) {
-    const model = agentModels[agentName];
-    // Validate model string: must be provider/model-name format, no newlines or YAML-breaking chars
-    const MODEL_SAFE_RE = /^[a-zA-Z0-9._-]+\/[a-zA-Z0-9._:@-]+$/;
-    if (typeof model === 'string' && MODEL_SAFE_RE.test(model)) {
-      return model;
-    } else if (typeof model === 'string') {
-      console.warn(`  Warning: Invalid or unsafe model format for agent '${agentName}': '${model}' (must match provider/model-name)`);
-    }
-  }
-  // 2. Fall back to tier
-  const tiers = config.model_tiers || {};
-  if (tier && tiers[tier] && tiers[tier].length > 0) {
-    return tiers[tier][0];
-  }
-  return null;
-}
-
-/**
- * Install a file that needs model_tier resolution, replacing model_tier:
- * with model: from config. Always copies (never symlinks) because content
- * is transformed. Used for both agent and command files.
- *
- * @param {string} source - Source file path
- * @param {string} target - Target file path
- * @param {object|null} config - Full workflow config from loadWorkflowConfig()
- * @param {boolean} dryRun - Preview mode
- * @param {string|null} agentName - Agent name for per-agent model override lookup
- * @param {"resolve"|"strip"} modelStrategy - resolve tier to model, or strip tier for runtime config
- */
-function installWithModelResolution(source, target, config, dryRun, agentName = null, modelStrategy = "resolve") {
-  const actions = [];
-
-  if (!fs.existsSync(source)) {
-    actions.push({ action: "skip", source, target, reason: "source missing" });
-    return actions;
-  }
-
-  const mode = modelStrategy === "strip" ? "strip" : "resolve";
-
-  const raw = fs.readFileSync(source, "utf-8");
-  const hasModelTier = /^(model_tier:\s*)(low|mid|high)\s*$/m.test(raw);
-
-  let content = raw;
-  let note = mode === "strip"
-    ? (hasModelTier ? "model tier stripped" : "runtime model passthrough")
-    : (hasModelTier ? "model tier resolved" : "runtime model passthrough");
-
-  if (mode === "resolve") {
-    if (config) {
-      // Replace model_tier: <tier> with model: <resolved_model>
-      content = content.replace(
-        /^(model_tier:\s*)(low|mid|high)\s*$/m,
-        (_, _prefix, tier) => {
-          const resolvedModel = resolveModelForAgent(agentName, tier, config);
-          if (resolvedModel) {
-            // Log per-agent overrides
-            const agentModels = config.agent_models || {};
-            if (agentName && agentModels[agentName] === resolvedModel) {
-              console.log(`  -> ${agentName}: ${resolvedModel} (per-agent override)`);
-            }
-            return `model: ${resolvedModel}`;
-          }
-          return `model_tier: ${tier}`;
-        }
-      );
-    } else if (hasModelTier) {
-      note = "model tier unresolved (no workflows config)";
-    }
-  } else {
-    // Remove model_tier line so OpenCode runtime model/agent config controls model selection.
-    content = content.replace(/^[ \t]*model_tier:\s*(low|mid|high)\s*\r?\n/m, "");
-  }
-
-  if (dryRun) {
-    actions.push({ action: "copy", source, target, dryRun: true, note });
-    return actions;
-  }
-
-  const backup = backupIfNeeded(target);
-  if (backup) {
-    actions.push({ action: "backup", original: target, backup });
-  }
-
-  fs.mkdirSync(path.dirname(target), { recursive: true });
-  removePath(target);
-
-  fs.writeFileSync(target, content);
-  actions.push({ action: "copy", source, target, note });
-  return actions;
-}
-
-
-
-/** Recursively copy a directory */
-function copyDirSync(src, dest) {
-  fs.mkdirSync(dest, { recursive: true });
-  for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
-    const srcPath = path.join(src, entry.name);
-    const destPath = path.join(dest, entry.name);
-    if (entry.isDirectory()) {
-      copyDirSync(srcPath, destPath);
-    } else {
-      fs.copyFileSync(srcPath, destPath);
-    }
-  }
-}
-
-/** Check if a path is a symlink pointing into our repo */
-function isOurSymlink(target) {
-  try {
-    if (!fs.lstatSync(target).isSymbolicLink()) return false;
-    const resolved = fs.realpathSync(target);
-    return resolved.startsWith(REPO_ROOT);
-  } catch {
-    return false;
-  }
-}
-
-/** Back up a file/dir that isn't ours before overwriting */
-function backupIfNeeded(target) {
-  try {
-    fs.lstatSync(target);
-  } catch {
-    return null; // doesn't exist, nothing to back up
-  }
-
-  cleanupLegacyBackups(target);
-
-  if (isOurSymlink(target)) return null; // our own symlink, safe to replace
-
-  // Keep exactly one backup per target path.
-  const backup = `${target}.backup`;
-  removePath(backup);
-  fs.renameSync(target, backup);
-  return backup;
-}
-
-/** Remove a single installed path (file or dir, symlink or real) */
 function removePath(target) {
   try {
-    const stat = fs.lstatSync(target);
-    if (stat.isSymbolicLink() || stat.isFile()) {
-      fs.unlinkSync(target);
-    } else if (stat.isDirectory()) {
-      fs.rmSync(target, { recursive: true, force: true });
-    }
-    return true;
+    const stat = fs.lstatSync(target)
+    if (stat.isDirectory() && !stat.isSymbolicLink()) fs.rmSync(target, { recursive: true, force: true })
+    else fs.unlinkSync(target)
+    return true
   } catch {
-    return false;
+    return false
   }
 }
 
-// ---------------------------------------------------------------------------
-// Install logic
-// ---------------------------------------------------------------------------
+function sha256File(filePath) {
+  return crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex')
+}
 
-function installFile(source, target, mode, dryRun) {
-  const actions = [];
+function normalizeRelative(filePath) {
+  return filePath.split(path.sep).join('/')
+}
 
-  if (!fs.existsSync(source)) {
-    actions.push({ action: "skip", source, target, reason: "source missing" });
-    return actions;
+function isInside(root, target) {
+  const relative = path.relative(path.resolve(root), path.resolve(target))
+  return relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative))
+}
+
+function ensurePrivateDirectory(directory) {
+  fs.mkdirSync(directory, { recursive: true, mode: 0o700 })
+  try { fs.chmodSync(directory, 0o700) } catch {}
+  return directory
+}
+
+function assertSafeManagedParent(configDir, target) {
+  const lexicalRoot = path.resolve(configDir)
+  const lexicalTarget = path.resolve(target)
+  if (!isInside(lexicalRoot, lexicalTarget)) throw new Error(`Managed path escapes config directory: ${target}`)
+  ensurePrivateDirectory(lexicalRoot)
+  const canonicalRoot = fs.realpathSync(lexicalRoot)
+  const parentRelative = path.relative(lexicalRoot, path.dirname(lexicalTarget))
+  let current = lexicalRoot
+  for (const segment of parentRelative.split(path.sep).filter(Boolean)) {
+    current = path.join(current, segment)
+    if (!pathExists(current)) break
+    const stat = fs.lstatSync(current)
+    if (stat.isSymbolicLink()) throw new Error(`Managed parent must not be a symbolic link: ${current}`)
+    if (!stat.isDirectory()) throw new Error(`Managed parent is not a directory: ${current}`)
+    if (!isInside(canonicalRoot, fs.realpathSync(current))) {
+      throw new Error(`Managed parent resolves outside config directory: ${current}`)
+    }
   }
+}
 
-  const backup = dryRun ? null : backupIfNeeded(target);
-  if (backup) {
-    actions.push({ action: "backup", original: target, backup });
+function legacyBackupPath(configDir, target) {
+  const relative = normalizeRelative(path.relative(configDir, target)).replaceAll('/', '__')
+  return nextBackupPath(path.join(configDir, '.opencode-workflows-backups', relative))
+}
+
+function writeFileNoFollow(target, content, mode = 0o600) {
+  const flags = fs.constants.O_WRONLY
+    | fs.constants.O_CREAT
+    | fs.constants.O_TRUNC
+    | (fs.constants.O_NOFOLLOW ?? 0)
+  const fd = fs.openSync(target, flags, mode)
+  try {
+    fs.writeFileSync(fd, content)
+    try { fs.fchmodSync(fd, mode) } catch {}
+  } finally {
+    fs.closeSync(fd)
   }
+}
 
-  const isDir = fs.statSync(source).isDirectory();
+function walkFiles(root) {
+  if (!fs.existsSync(root)) return []
+  const files = []
+  for (const entry of fs.readdirSync(root, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+    if (entry.name === 'node_modules' || entry.name === '.git') continue
+    const fullPath = path.join(root, entry.name)
+    if (entry.isDirectory()) files.push(...walkFiles(fullPath))
+    else if (entry.isFile()) files.push(fullPath)
+  }
+  return files
+}
 
-  if (dryRun) {
-    actions.push({
-      action: mode === "symlink" ? "symlink" : "copy",
+function addTree(files, sourceRoot, targetRoot, options = {}) {
+  for (const source of walkFiles(sourceRoot)) {
+    files.push({
       source,
-      target,
-      dryRun: true,
-    });
-    return actions;
+      target: path.join(targetRoot, path.relative(sourceRoot, source)),
+      ...options,
+    })
   }
-
-  // Ensure parent dir exists
-  fs.mkdirSync(path.dirname(target), { recursive: true });
-
-  // Remove existing before creating
-  removePath(target);
-
-  if (mode === "symlink") {
-    const symlinkType = isDir && process.platform === "win32" ? "junction" : undefined;
-    fs.symlinkSync(source, target, symlinkType);
-    actions.push({ action: "symlink", source, target });
-  } else {
-    if (isDir) {
-      copyDirSync(source, target);
-    } else {
-      fs.copyFileSync(source, target);
-    }
-    actions.push({ action: "copy", source, target });
-  }
-
-  return actions;
 }
 
-function buildFileList(modules) {
-  const files = [];
-  const configDir = getConfigDir();
+export function buildFileList(modules, configDir = getConfigDir()) {
+  const files = []
+  const hasCore = modules.includes('core')
+  const hasTranslate = modules.includes('translate')
 
-  for (const mod of modules) {
-    const def = MODULES[mod];
-    if (!def) {
-      console.error(`Unknown module: ${mod}`);
-      process.exit(1);
+  if (hasCore) {
+    for (const name of PRIMARY_AGENTS) {
+      files.push({
+        source: path.join(REPO_ROOT, 'agent', 'primary', name),
+        target: path.join(configDir, 'agents', name),
+        modelMetadata: true,
+      })
+    }
+    for (const name of WORKFLOW_AGENTS) {
+      files.push({
+        source: path.join(REPO_ROOT, 'agent', 'workflow', name),
+        target: path.join(configDir, 'agents', `wf-${name}`),
+        modelMetadata: true,
+      })
     }
 
-    // Handle agents_primary: agent/primary/{name} -> agent/{basename}
-    // Marked as isAgent for model_tier resolution during install
-    if (def.agents_primary) {
-      for (const f of def.agents_primary) {
-        const basename = path.basename(f);
-        files.push({
-          source: path.join(REPO_ROOT, "agent", f),
-          target: path.join(configDir, "agents", basename),
-          isAgent: true,
-        });
-      }
+    for (const source of walkFiles(path.join(REPO_ROOT, 'command'))) {
+      const name = path.basename(source)
+      if (!name.endsWith('.md') || name.startsWith('translate-')) continue
+      files.push({ source, target: path.join(configDir, 'commands', name), modelMetadata: true })
     }
 
-    // Handle agents_workflow: agent/workflow/{name} -> agent/wf-{basename}
-    if (def.agents_workflow) {
-      for (const f of def.agents_workflow) {
-        const basename = path.basename(f);
-        const targetName = `wf-${basename}`;
-        files.push({
-          source: path.join(REPO_ROOT, "agent", f),
-          target: path.join(configDir, "agents", targetName),
-          isAgent: true,
-        });
-      }
+    for (const source of walkFiles(path.join(REPO_ROOT, 'plugin'))) {
+      const name = path.basename(source)
+      if (name === 'translation-workflow.ts' || name === 'package-lock.json' || source.includes(`${path.sep}node_modules${path.sep}`)) continue
+      if (!name.endsWith('.ts') && name !== 'package.json') continue
+      files.push({ source, target: path.join(configDir, 'plugins', name) })
     }
 
-    // Legacy agents support (translate module)
-    if (def.agents) {
-      for (const f of def.agents) {
-        files.push({
-          source: path.join(REPO_ROOT, "agent", f),
-          target: path.join(configDir, "agents", f),
-          isAgent: true,
-        });
-      }
-    }
+    addTree(files, path.join(REPO_ROOT, 'skill'), path.join(configDir, 'skills'))
+    addTree(files, path.join(REPO_ROOT, 'mode'), path.join(configDir, 'mode'))
+    addTree(files, path.join(REPO_ROOT, 'lib'), path.join(configDir, 'lib'))
+    addTree(files, path.join(REPO_ROOT, 'templates'), path.join(configDir, 'templates'))
+    addTree(files, path.join(REPO_ROOT, 'workflow'), path.join(configDir, 'workflow'))
+    addTree(files, path.join(REPO_ROOT, 'schema'), path.join(configDir, 'schema'))
 
-    // Commands need model_tier resolution (like agents)
-    if (def.commands) {
-      for (const f of def.commands) {
-        files.push({
-          source: path.join(REPO_ROOT, "command", f),
-          target: path.join(configDir, "command", f),
-          needsModelResolution: true,
-        });
-      }
-    }
-
-    if (def.skills) {
-      for (const d of def.skills) {
-        files.push({
-          source: path.join(REPO_ROOT, "skill", d),
-          target: path.join(configDir, "skill", d),
-        });
-      }
-    }
-
-    // OpenCode loads plugins from "plugins/" (plural)
-    if (def.plugins) {
-      for (const f of def.plugins) {
-        files.push({
-          source: path.join(REPO_ROOT, "plugin", f),
-          target: path.join(configDir, "plugins", f),
-        });
-      }
-    }
-
-    if (def.modes) {
-      for (const f of def.modes) {
-        files.push({
-          source: path.join(REPO_ROOT, "mode", f),
-          target: path.join(configDir, "mode", f),
-        });
-      }
-    }
-
-    if (def.lib) {
-      for (const f of def.lib) {
-        files.push({
-          source: path.join(REPO_ROOT, "lib", f),
-          target: path.join(configDir, "lib", f),
-        });
-      }
-    }
-
-    if (def.templates) {
-      for (const f of def.templates) {
-        files.push({
-          source: path.join(REPO_ROOT, "templates", f),
-          target: path.join(configDir, "templates", f),
-        });
-      }
-    }
-
-    // Tools import @opencode-ai/plugin at runtime and must resolve from the config
-    // directory's node_modules. Always copy (never symlink) to avoid resolution issues.
-    if (def.tools) {
-      for (const f of def.tools) {
-        files.push({
-          source: path.join(REPO_ROOT, "tool", f),
-          target: path.join(configDir, "tool", f),
-          forceCopy: true,
-        });
-      }
-    }
-
-    if (def.rootFiles) {
-      for (const f of def.rootFiles) {
-        files.push({
-          source: path.join(REPO_ROOT, f),
-          target: path.join(configDir, f),
-        });
-      }
+    const conventionsSource = path.join(REPO_ROOT, 'docs', 'conventions.md')
+    if (fs.existsSync(conventionsSource)) {
+      files.push({ source: conventionsSource, target: path.join(configDir, 'CONVENTIONS.md') })
     }
   }
 
-  return files;
+  if (hasTranslate) {
+    for (const name of TRANSLATION_AGENTS) {
+      files.push({
+        source: path.join(REPO_ROOT, 'agent', name),
+        target: path.join(configDir, 'agents', name),
+        modelMetadata: true,
+      })
+    }
+    for (const name of ['translate-auto.md', 'translate-view.md']) {
+      files.push({
+        source: path.join(REPO_ROOT, 'command', name),
+        target: path.join(configDir, 'commands', name),
+        modelMetadata: true,
+      })
+    }
+    for (const name of TRANSLATION_TOOLS) {
+      files.push({
+        source: path.join(REPO_ROOT, 'tool', name),
+        target: path.join(configDir, 'tools', name),
+        forceCopy: true,
+      })
+    }
+    files.push({
+      source: path.join(REPO_ROOT, 'plugin', 'translation-workflow.ts'),
+      target: path.join(configDir, 'plugins', 'translation-workflow.ts'),
+    })
+  }
+
+  const byTarget = new Map()
+  for (const file of files) byTarget.set(path.resolve(file.target), file)
+  return [...byTarget.values()]
 }
 
-function install(modules, mode, dryRun, options = {}) {
-  const modelStrategy = options.modelStrategy === "strip" ? "strip" : "resolve";
-  const configDir = getConfigDir();
-  const files = buildFileList(modules);
-  const allActions = [];
-  const installedTargets = [];
-  const previousManifestPath = path.join(configDir, MANIFEST_NAME);
-  let previousManagedTargets = [];
+function stripDocumentationKeys(value) {
+  if (Array.isArray(value)) return value.map(stripDocumentationKeys)
+  if (!value || typeof value !== 'object') return value
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([key]) => !key.startsWith('_'))
+      .map(([key, child]) => [key, stripDocumentationKeys(child)]),
+  )
+}
 
-  if (fs.existsSync(previousManifestPath)) {
+function loadWorkflowConfig(configDir = getConfigDir()) {
+  const candidates = [
+    path.join(configDir, 'workflows.json'),
+    path.join(REPO_ROOT, 'workflows.json.template'),
+  ]
+  for (const candidate of candidates) {
     try {
-      const previousManifest = JSON.parse(fs.readFileSync(previousManifestPath, "utf-8"));
-      if (Array.isArray(previousManifest.files)) {
-        previousManagedTargets = previousManifest.files;
-      }
+      return stripDocumentationKeys(JSON.parse(fs.readFileSync(candidate, 'utf8')))
     } catch {
-      // best-effort; ignore invalid manifest
+      // Try the next source. Validation reports malformed user config separately.
+    }
+  }
+  return {}
+}
+
+export function normalizeCandidate(candidate) {
+  if (typeof candidate === 'string') return { model: candidate }
+  if (!candidate || typeof candidate !== 'object') return null
+  return { model: candidate.model, ...(candidate.variant ? { variant: candidate.variant } : {}) }
+}
+
+function isValidCandidate(candidate) {
+  return Boolean(
+    candidate
+      && typeof candidate.model === 'string'
+      && MODEL_ID_PATTERN.test(candidate.model)
+      && (candidate.variant === undefined
+        || (typeof candidate.variant === 'string' && VARIANT_PATTERN.test(candidate.variant))),
+  )
+}
+
+export function configuredCandidates(config, agentName, tier) {
+  const overrides = config?.agent_models && typeof config.agent_models === 'object'
+    ? config.agent_models
+    : {}
+  const override = agentName && !agentName.startsWith('_') ? overrides[agentName] : undefined
+  const tierCandidates = Array.isArray(config?.model_tiers?.[tier]) ? config.model_tiers[tier] : []
+  const primary = override === undefined ? tierCandidates : Array.isArray(override) ? override : [override]
+  const fallback = Array.isArray(config?.fallback_order) ? config.fallback_order : []
+  const agentVariant = typeof config?.agent_variants?.[agentName] === 'string'
+    ? config.agent_variants[agentName]
+    : undefined
+  const unique = new Map()
+
+  for (const value of [...primary, ...fallback]) {
+    const normalized = normalizeCandidate(value)
+    if (!normalized) continue
+    const candidate = agentVariant && !normalized.variant
+      ? { ...normalized, variant: agentVariant }
+      : normalized
+    if (!isValidCandidate(candidate)) continue
+    const key = `${candidate.model}\0${candidate.variant ?? ''}`
+    if (!unique.has(key)) unique.set(key, candidate)
+  }
+  return [...unique.values()]
+}
+
+export function transformModelMetadata(raw, agentName, config, strategy = 'runtime') {
+  const tierMatch = raw.match(/^[ \t]*model_tier:\s*(low|mid|high)\s*$/m)
+  if (!tierMatch) return { content: raw, note: null, warning: null }
+  const tier = tierMatch[1]
+  const candidates = configuredCandidates(config, agentName, tier)
+  const configuredVariant = typeof config?.agent_variants?.[agentName] === 'string'
+    && VARIANT_PATTERN.test(config.agent_variants[agentName])
+    ? config.agent_variants[agentName]
+    : undefined
+
+  if (strategy !== 'materialize') {
+    return {
+      content: raw.replace(/^[ \t]*model_tier:\s*(low|mid|high)\s*\r?\n?/m, ''),
+      note: configuredVariant
+        ? 'runtime model inheritance; configured variant retained for explicit model selection'
+        : 'runtime model inheritance',
+      warning: null,
     }
   }
 
-  console.log(`\nInstalling modules: ${modules.join(", ")}`);
-  console.log(`Mode: ${mode}`);
-  console.log(
-    `Model strategy: ${modelStrategy === "resolve" ? "resolve model_tier from workflows.json" : "runtime models from opencode.jsonc (no materialization)"}`
-  );
-  console.log(`Config dir: ${configDir}`);
-  if (dryRun) console.log("(dry run — no changes will be made)\n");
-  else console.log();
-
-  // Normalize legacy timestamped backups before install.
-  const backupCleanupActions = normalizeLegacyBackups(configDir, dryRun);
-  allActions.push(...backupCleanupActions);
-
-  // Load workflow config only when model tier resolution is enabled.
-  const workflowConfig = modelStrategy === "resolve" ? loadWorkflowConfig() : null;
-
-  // Install each file
-  for (const { source, target, isAgent, needsModelResolution, forceCopy } of files) {
-    // Files with model_tier use copy + resolution (never symlinked)
-    let actions;
-    if (isAgent || needsModelResolution) {
-      // Derive agent name from target basename without extension
-      const agentName = path.basename(target, '.md') || null;
-      actions = installWithModelResolution(source, target, workflowConfig, dryRun, agentName, modelStrategy);
-    } else {
-      // Tools with runtime imports must be copied so they resolve from config dir
-      actions = installFile(source, target, forceCopy ? "copy" : mode, dryRun);
+  const selected = candidates[0]
+  if (!selected) {
+    return {
+      content: raw.replace(/^[ \t]*model_tier:\s*(low|mid|high)\s*\r?\n?/m, ''),
+      note: 'runtime model inheritance',
+      warning: `No valid candidate configured for ${agentName} (${tier}); model was not materialized.`,
     }
-    allActions.push(...actions);
-    for (const a of actions) {
-      if (a.action === "symlink" || a.action === "copy") {
-        installedTargets.push(a.target);
+  }
+  const lines = [`model: ${JSON.stringify(selected.model)}`]
+  if (selected.variant) lines.push(`variant: ${JSON.stringify(selected.variant)}`)
+  return {
+    content: raw.replace(/^[ \t]*model_tier:\s*(low|mid|high)\s*$/m, lines.join('\n')),
+    note: 'model materialized from ordered candidates',
+    warning: null,
+  }
+}
+
+function parseVersion(output) {
+  const match = String(output).match(/(\d+)\.(\d+)\.(\d+)/)
+  return match ? match.slice(1, 4).map(Number) : null
+}
+
+function compareVersions(left, right) {
+  for (let index = 0; index < 3; index += 1) {
+    if (left[index] !== right[index]) return left[index] - right[index]
+  }
+  return 0
+}
+
+export function checkOpenCodeVersion() {
+  const result = spawnSync('opencode', ['--version'], { encoding: 'utf8', shell: false })
+  if (result.error || result.status !== 0) {
+    return { ok: false, version: null, error: 'OpenCode was not found in PATH or did not report a version.' }
+  }
+  const version = parseVersion(`${result.stdout}\n${result.stderr}`)
+  if (!version) return { ok: false, version: null, error: 'Could not parse the OpenCode version.' }
+
+  const minimum = parseVersion(MIN_OPENCODE_VERSION)
+  const comparison = compareVersions(version, minimum)
+  const versionText = version.join('.')
+  if (comparison < 0) {
+    return {
+      ok: false,
+      version: versionText,
+      error: `OpenCode ${MIN_OPENCODE_VERSION} or newer is required (found ${versionText}).`,
+    }
+  }
+  return {
+    ok: true,
+    version: versionText,
+    warning: comparison > 0
+      ? `OpenCode ${versionText} is newer than the tested version ${MIN_OPENCODE_VERSION}. Run --doctor after upgrades.`
+      : null,
+  }
+}
+
+function readManifest(configDir) {
+  const manifestPath = path.join(configDir, MANIFEST_NAME)
+  if (!fs.existsSync(manifestPath)) return null
+  try {
+    return JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
+  } catch {
+    return null
+  }
+}
+
+function recordTarget(record, manifest, configDir) {
+  if (typeof record === 'string') {
+    const target = path.resolve(record)
+    return isInside(configDir, target) ? target : null
+  }
+  if (!record || typeof record.path !== 'string') return null
+  const root = typeof manifest?.target?.config_dir === 'string'
+    ? path.resolve(manifest.target.config_dir)
+    : configDir
+  const target = path.resolve(root, record.path)
+  return isInside(configDir, target) ? target : null
+}
+
+function manifestRecords(manifest, configDir) {
+  if (!manifest || !Array.isArray(manifest.files)) return []
+  return manifest.files.map((record) => ({ record, target: recordTarget(record, manifest, configDir) }))
+    .filter((entry) => entry.target)
+}
+
+function isRepoSymlink(target, expectedSource = null) {
+  try {
+    if (!fs.lstatSync(target).isSymbolicLink()) return false
+    const resolved = fs.realpathSync(target)
+    if (expectedSource) return resolved === fs.realpathSync(expectedSource)
+    return isInside(REPO_ROOT, resolved)
+  } catch {
+    return false
+  }
+}
+
+function isOwnedRecord(target, record) {
+  if (!pathExists(target)) return false
+  if (typeof record === 'string') return isRepoSymlink(target) || matchesLegacySource(target)
+  if (!record || typeof record.sha256 !== 'string') return false
+
+  if (record.mode === 'symlink') {
+    if (typeof record.source !== 'string') return false
+    const source = path.resolve(REPO_ROOT, record.source)
+    return isInside(REPO_ROOT, source) && isRepoSymlink(target, source)
+  }
+  try {
+    return fs.lstatSync(target).isFile() && sha256File(target) === record.sha256
+  } catch {
+    return false
+  }
+}
+
+function matchesLegacySource(target) {
+  let relative = normalizeRelative(path.relative(getConfigDir(), target))
+  const mappings = [
+    ['command/', 'command/'],
+    ['commands/', 'command/'],
+    ['skill/', 'skill/'],
+    ['skills/', 'skill/'],
+    ['plugin/', 'plugin/'],
+    ['plugins/', 'plugin/'],
+    ['tool/', 'tool/'],
+    ['tools/', 'tool/'],
+    ['mode/', 'mode/'],
+    ['lib/', 'lib/'],
+    ['templates/', 'templates/'],
+  ]
+  for (const [prefix, sourcePrefix] of mappings) {
+    if (!relative.startsWith(prefix)) continue
+    const source = path.join(REPO_ROOT, sourcePrefix, relative.slice(prefix.length))
+    try {
+      return fs.statSync(source).isFile() && sha256File(source) === sha256File(target)
+    } catch {
+      return false
+    }
+  }
+  return false
+}
+
+function nextBackupPath(target) {
+  let candidate = `${target}.backup`
+  let index = 1
+  while (pathExists(candidate)) candidate = `${target}.backup.${index++}`
+  return candidate
+}
+
+function prepareTarget(target, previousRecord, dryRun, actions) {
+  if (!pathExists(target)) return
+  if ((previousRecord && isOwnedRecord(target, previousRecord)) || isRepoSymlink(target)) {
+    if (!dryRun) removePath(target)
+    return
+  }
+  const backup = nextBackupPath(target)
+  actions.push({ action: 'backup', target, backup, dryRun })
+  if (!dryRun) fs.renameSync(target, backup)
+}
+
+function createRecord(configDir, source, target, mode) {
+  return {
+    path: normalizeRelative(path.relative(configDir, target)),
+    source: source ? normalizeRelative(path.relative(REPO_ROOT, source)) : null,
+    mode,
+    sha256: sha256File(target),
+  }
+}
+
+function installManagedFile(file, options) {
+  const { configDir, mode, dryRun, previousByTarget, workflowConfig, modelStrategy, actions } = options
+  if (!fs.existsSync(file.source)) {
+    actions.push({ action: 'skip', target: file.target, reason: 'source missing' })
+    return null
+  }
+
+  let content = null
+  let note = null
+  if (file.modelMetadata) {
+    const raw = fs.readFileSync(file.source, 'utf8')
+    const agentName = path.basename(file.target, path.extname(file.target))
+    const transformed = transformModelMetadata(raw, agentName, workflowConfig, modelStrategy)
+    if (transformed.content !== raw) content = transformed.content
+    note = transformed.note
+    if (transformed.warning) actions.push({ action: 'warning', message: transformed.warning })
+  }
+
+  const effectiveMode = content !== null || file.forceCopy || mode === 'copy' ? 'copy' : 'symlink'
+  actions.push({ action: effectiveMode, source: file.source, target: file.target, note, dryRun })
+  if (dryRun) return null
+
+  assertSafeManagedParent(configDir, file.target)
+  prepareTarget(file.target, previousByTarget.get(path.resolve(file.target)), false, actions)
+  ensurePrivateDirectory(path.dirname(file.target))
+  if (content !== null) writeFileNoFollow(file.target, content)
+  else if (effectiveMode === 'copy') writeFileNoFollow(file.target, fs.readFileSync(file.source))
+  else fs.symlinkSync(file.source, file.target)
+  return createRecord(configDir, file.source, file.target, effectiveMode)
+}
+
+function installInitialConfig(source, target, dryRun, actions) {
+  if (pathExists(target)) {
+    actions.push({ action: 'skip', target, reason: 'user config preserved' })
+    return
+  }
+  actions.push({ action: 'copy', source, target, note: 'first install only; never removed', dryRun })
+  if (!dryRun) {
+    assertSafeManagedParent(getConfigDir(), target)
+    ensurePrivateDirectory(path.dirname(target))
+    writeFileNoFollow(target, fs.readFileSync(source))
+  }
+}
+
+function installGeneratedFile(target, content, options) {
+  const { configDir, dryRun, previousByTarget, actions } = options
+  actions.push({ action: 'write', target, dryRun })
+  if (dryRun) return null
+  assertSafeManagedParent(configDir, target)
+  prepareTarget(target, previousByTarget.get(path.resolve(target)), false, actions)
+  ensurePrivateDirectory(path.dirname(target))
+  writeFileNoFollow(target, content)
+  return createRecord(configDir, null, target, 'generated')
+}
+
+function removeStaleFiles(previousManifest, currentTargets, configDir, dryRun, actions) {
+  for (const { record, target } of manifestRecords(previousManifest, configDir)) {
+    if (currentTargets.has(path.resolve(target))) continue
+    if (['opencode.json', 'opencode.jsonc', 'workflows.json'].includes(path.basename(target))) continue
+    if (!pathExists(target)) continue
+    if (!isOwnedRecord(target, record)) {
+      const relative = normalizeRelative(path.relative(configDir, target))
+      if (/^(command|skill|plugin|tool)\//.test(relative)) {
+        const backup = legacyBackupPath(configDir, target)
+        actions.push({ action: 'backup', target, backup, note: 'unverified legacy managed file', dryRun })
+        if (!dryRun) {
+          assertSafeManagedParent(configDir, target)
+          assertSafeManagedParent(configDir, backup)
+          ensurePrivateDirectory(path.dirname(backup))
+          fs.renameSync(target, backup)
+        }
+        continue
       }
+      actions.push({ action: 'warning', message: `Preserved stale file because ownership could not be verified: ${target}` })
+      continue
     }
-  }
-
-  // opencode.jsonc — copy only if neither .jsonc nor .json exists
-  const opconfigJsonc = path.join(configDir, "opencode.jsonc");
-  const opconfigJson = path.join(configDir, "opencode.json");
-  const opconfigTarget = fs.existsSync(opconfigJsonc) ? opconfigJsonc : opconfigJson;
-  const opconfigExists = fs.existsSync(opconfigJsonc) || fs.existsSync(opconfigJson);
-  const opconfigSource = path.join(REPO_ROOT, "opencode.jsonc.template");
-  if (!opconfigExists && fs.existsSync(opconfigSource)) {
-    const newTarget = path.join(configDir, "opencode.jsonc");
-    if (dryRun) {
-      allActions.push({
-        action: "copy",
-        source: opconfigSource,
-        target: newTarget,
-        dryRun: true,
-        note: "opencode.jsonc (from template, first install only)",
-      });
-    } else {
-      fs.mkdirSync(path.dirname(newTarget), { recursive: true });
-      fs.copyFileSync(opconfigSource, newTarget);
-      allActions.push({
-        action: "copy",
-        source: opconfigSource,
-        target: newTarget,
-        note: "opencode.jsonc (from template, first install only)",
-      });
-      installedTargets.push(newTarget);
-    }
-  } else if (opconfigExists) {
-    allActions.push({
-      action: "skip",
-      target: opconfigTarget,
-      reason: "already exists (not overwritten)",
-    });
-    installedTargets.push(opconfigTarget);
-  }
-
-  // workflows.json — copy only if it doesn't exist yet
-  const wfConfigTarget = path.join(configDir, "workflows.json");
-  const wfConfigSource = path.join(REPO_ROOT, "workflows.json.template");
-  if (!fs.existsSync(wfConfigTarget) && fs.existsSync(wfConfigSource)) {
-    if (dryRun) {
-      allActions.push({
-        action: "copy",
-        source: wfConfigSource,
-        target: wfConfigTarget,
-        dryRun: true,
-        note: "workflows.json (from template, first install only)",
-      });
-    } else {
-      fs.mkdirSync(path.dirname(wfConfigTarget), { recursive: true });
-      fs.copyFileSync(wfConfigSource, wfConfigTarget);
-      allActions.push({
-        action: "copy",
-        source: wfConfigSource,
-        target: wfConfigTarget,
-        note: "workflows.json (from template, first install only)",
-      });
-      installedTargets.push(wfConfigTarget);
-    }
-  } else if (fs.existsSync(wfConfigTarget)) {
-    allActions.push({
-      action: "skip",
-      target: wfConfigTarget,
-      reason: "already exists (not overwritten)",
-    });
-    installedTargets.push(wfConfigTarget);
-  }
-
-  // Ensure runtime directories exist in repo
-  const runtimeDirs = [
-    path.join(configDir, "plans"),
-    path.join(configDir, "workflows", "active"),
-    path.join(configDir, "workflows", "completed"),
-  ];
-  for (const dir of runtimeDirs) {
+    actions.push({ action: 'remove', target, note: 'stale managed file', dryRun })
     if (!dryRun) {
-      fs.mkdirSync(dir, { recursive: true });
-      // Create .gitkeep if empty
-      const gitkeep = path.join(dir, ".gitkeep");
-      if (!fs.existsSync(gitkeep)) {
-        fs.writeFileSync(gitkeep, "");
-      }
-    }
-    allActions.push({ action: "mkdir", path: dir });
-  }
-
-  // Write environment file
-  const envTarget = path.join(configDir, ENV_FILE_NAME);
-  const envContent = `OPENCODE_WORKFLOWS_REPO=${REPO_ROOT}\n`;
-  if (!dryRun) {
-    fs.mkdirSync(path.dirname(envTarget), { recursive: true });
-    fs.writeFileSync(envTarget, envContent);
-    installedTargets.push(envTarget);
-  }
-  allActions.push({ action: "write", target: envTarget, content: envContent });
-
-  // Remove stale managed files from previous installs (eg removed commands)
-  const currentManaged = new Set(installedTargets);
-  for (const oldTarget of previousManagedTargets) {
-    if (currentManaged.has(oldTarget)) continue;
-
-    const base = path.basename(oldTarget);
-    if (
-      base === "opencode.jsonc" ||
-      base === "opencode.json" ||
-      base === "workflows.json" ||
-      base === ENV_FILE_NAME ||
-      base === MANIFEST_NAME
-    ) {
-      continue;
-    }
-
-    if (dryRun) {
-      allActions.push({ action: "remove", target: oldTarget, note: "stale managed file", dryRun: true });
-      continue;
-    }
-
-    if (removePath(oldTarget)) {
-      allActions.push({ action: "remove", target: oldTarget, note: "stale managed file" });
+      assertSafeManagedParent(configDir, target)
+      removePath(target)
     }
   }
+}
 
-  // Write manifest
-  if (!dryRun) {
-    const manifest = {
-      repo: REPO_ROOT,
+function runDependencies(mode, configDir, dryRun, actions) {
+  const directories = [path.join(configDir, 'plugins')]
+  if (mode === 'symlink') directories.push(REPO_ROOT, path.join(REPO_ROOT, 'plugin'))
+
+  for (const directory of directories) {
+    if (!fs.existsSync(path.join(directory, 'package.json'))) continue
+    actions.push({ action: 'npm-install', target: directory, dryRun })
+    if (dryRun) continue
+    try {
+      execFileSync('npm', [
+        'install',
+        '--ignore-scripts',
+        '--no-audit',
+        '--no-fund',
+        '--no-save',
+        '--package-lock=false',
+      ], {
+        cwd: directory,
+        stdio: 'pipe',
+        timeout: Number(process.env.OPENCODE_WORKFLOWS_NPM_TIMEOUT_MS || 120000),
+      })
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error)
+      throw new Error(`Dependency installation failed in ${directory}: ${detail}`)
+    }
+  }
+}
+
+function writeManifest(configDir, modules, mode, modelStrategy, records) {
+  const manifest = {
+    $schema: './schema/install-manifest.schema.json',
+    schema_version: MANIFEST_VERSION,
+    package: { name: PACKAGE_DATA.name, version: PACKAGE_DATA.version },
+    target: { config_dir: configDir, platform: process.platform },
+    install: {
       mode,
       modules,
-      files: installedTargets,
-      installedAt: new Date().toISOString(),
-    };
-    const manifestPath = path.join(configDir, MANIFEST_NAME);
-    fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
-    allActions.push({ action: "write", target: manifestPath });
+      model_strategy: modelStrategy,
+      installed_at: new Date().toISOString(),
+    },
+    files: records.sort((left, right) => left.path.localeCompare(right.path)),
+  }
+  const manifestPath = path.join(configDir, MANIFEST_NAME)
+  assertSafeManagedParent(configDir, manifestPath)
+  writeFileNoFollow(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`)
+  return manifestPath
+}
+
+export function install(modules, mode, dryRun, options = {}) {
+  const version = checkOpenCodeVersion()
+  if (!version.ok) throw new Error(version.error)
+  if (version.warning) console.warn(`Warning: ${version.warning}`)
+
+  const configDir = getConfigDir()
+  if (!dryRun) ensurePrivateDirectory(configDir)
+  const modelStrategy = options.materializeModels ? 'materialize' : 'runtime'
+  const files = buildFileList(modules, configDir)
+  const workflowConfig = loadWorkflowConfig(configDir)
+  const previousManifest = readManifest(configDir)
+  const previousByTarget = new Map(
+    manifestRecords(previousManifest, configDir).map(({ record, target }) => [path.resolve(target), record]),
+  )
+  const actions = []
+  const records = []
+  const plannedTargets = new Set(files.map((file) => path.resolve(file.target)))
+
+  console.log(`Installing modules: ${modules.join(', ')}`)
+  console.log(`Config dir: ${configDir}`)
+  console.log(`Install mode: ${mode}`)
+  console.log(`Model strategy: ${modelStrategy === 'runtime' ? 'runtime inheritance' : 'legacy materialization'}`)
+  if (dryRun) console.log('Dry run: no changes will be made.')
+
+  for (const file of files) {
+    const record = installManagedFile(file, {
+      configDir,
+      mode,
+      dryRun,
+      previousByTarget,
+      workflowConfig,
+      modelStrategy,
+      actions,
+    })
+    if (record) records.push(record)
   }
 
-  // Install plugin dependencies (zod, etc.) so plugins can resolve imports.
-  // In symlink mode, module resolution follows the symlink target path (the repo),
-  // so we also install deps in the repo's plugin/ directory.
-  // In copy mode, the config dir's node_modules suffice since files are local.
-  const pluginsDir = path.join(configDir, "plugins");
-  const pluginPkgJson = path.join(pluginsDir, "package.json");
-  if (!dryRun && fs.existsSync(pluginPkgJson)) {
-    // Always install in the config plugins dir
+  const opencodeJson = path.join(configDir, 'opencode.json')
+  const opencodeJsonc = path.join(configDir, 'opencode.jsonc')
+  if (!fs.existsSync(opencodeJson) && !fs.existsSync(opencodeJsonc)) {
+    installInitialConfig(path.join(REPO_ROOT, 'opencode.jsonc.template'), opencodeJsonc, dryRun, actions)
+  } else {
+    actions.push({ action: 'skip', target: fs.existsSync(opencodeJsonc) ? opencodeJsonc : opencodeJson, reason: 'user config preserved' })
+  }
+  installInitialConfig(
+    path.join(REPO_ROOT, 'workflows.json.template'),
+    path.join(configDir, 'workflows.json'),
+    dryRun,
+    actions,
+  )
+
+  for (const directory of [
+    path.join(configDir, 'plans'),
+    path.join(configDir, 'workflows', 'active'),
+    path.join(configDir, 'workflows', 'completed'),
+  ]) {
+    const target = path.join(directory, '.gitkeep')
+    if (!dryRun) {
+      assertSafeManagedParent(configDir, target)
+      ensurePrivateDirectory(directory)
+    }
+    plannedTargets.add(path.resolve(target))
+    if (!pathExists(target)) {
+      const record = installGeneratedFile(target, '', { configDir, dryRun, previousByTarget, actions })
+      if (record) records.push(record)
+    } else if (previousByTarget.has(path.resolve(target))) {
+      records.push(previousByTarget.get(path.resolve(target)))
+    }
+  }
+
+  const envTarget = path.join(configDir, ENV_FILE_NAME)
+  plannedTargets.add(path.resolve(envTarget))
+  const envRecord = installGeneratedFile(
+    envTarget,
+    `OPENCODE_WORKFLOWS_REPO=${REPO_ROOT}\n`,
+    { configDir, dryRun, previousByTarget, actions },
+  )
+  if (envRecord) records.push(envRecord)
+
+  for (const record of records) plannedTargets.add(path.resolve(configDir, record.path))
+  removeStaleFiles(previousManifest, plannedTargets, configDir, dryRun, actions)
+
+  let dependencyError = null
+  try {
+    runDependencies(mode, configDir, dryRun, actions)
+  } catch (error) {
+    dependencyError = error
+  }
+
+  if (!dryRun) {
+    const manifestPath = writeManifest(configDir, modules, mode, modelStrategy, records)
+    actions.push({ action: 'write', target: manifestPath })
+  }
+
+  printInstallSummary(actions, dryRun)
+  if (dependencyError) throw dependencyError
+  if (!dryRun) console.log('Restart OpenCode to load the installed agents, commands, skills, and plugins.')
+}
+
+function printInstallSummary(actions, dryRun) {
+  const installed = actions.filter((action) => ['copy', 'symlink', 'write'].includes(action.action)).length
+  const removed = actions.filter((action) => action.action === 'remove').length
+  const skipped = actions.filter((action) => action.action === 'skip').length
+  console.log(`\n${dryRun ? 'Dry run' : 'Install'} summary: ${installed} installed, ${removed} stale removed, ${skipped} preserved.`)
+  for (const warning of actions.filter((action) => action.action === 'warning')) {
+    console.warn(`Warning: ${warning.message}`)
+  }
+}
+
+function validateWithScript(args) {
+  const result = spawnSync(process.execPath, [path.join(REPO_ROOT, 'script', 'validate-config.mjs'), ...args], {
+    encoding: 'utf8',
+    shell: false,
+  })
+  return {
+    ok: result.status === 0,
+    output: `${result.stdout || ''}${result.stderr || ''}`.trim(),
+  }
+}
+
+function environmentFlagEnabled(value) {
+  return value !== undefined && ['1', 'true', 'yes', 'on'].includes(value.toLowerCase())
+}
+
+function diagnoseCapabilities(config, configDir, versionAvailable, failures, warnings) {
+  const modes = config.experimental_capabilities || {}
+  const availability = Object.fromEntries(
+    Object.entries(CAPABILITY_ENVIRONMENT).map(([name, variable]) => {
+      const explicit = process.env[variable]
+      return [name, {
+        available: environmentFlagEnabled(explicit ?? process.env.OPENCODE_EXPERIMENTAL),
+        source: explicit === undefined ? 'OPENCODE_EXPERIMENTAL' : variable,
+      }]
+    }),
+  )
+  availability.plugin_v2 = {
+    available: versionAvailable && fs.existsSync(path.join(configDir, 'plugins', 'auto-workflow.ts')),
+    source: 'installed OpenCode plugin runtime',
+  }
+
+  for (const [name, status] of Object.entries(availability)) {
+    const mode = modes[name] || 'disabled'
+    if (mode === 'disabled') {
+      console.log(`SKIP capability ${name} is disabled`)
+    } else if (status.available) {
+      console.log(`PASS capability ${name} is available (${mode})`)
+    } else if (mode === 'required') {
+      failures.push(`Required capability ${name} is unavailable; enable ${status.source}.`)
+    } else {
+      warnings.push(`Capability ${name} is unavailable in auto mode; enable ${status.source} to use it.`)
+    }
+  }
+}
+
+export function doctor() {
+  const configDir = getConfigDir()
+  const failures = []
+  const warnings = []
+  console.log(`OpenCode Workflows doctor\nConfig dir: ${configDir}`)
+
+  const version = checkOpenCodeVersion()
+  if (!version.ok) failures.push(version.error)
+  else console.log(`PASS OpenCode version ${version.version}`)
+  if (version.warning) warnings.push(version.warning)
+
+  const workflowPath = path.join(configDir, 'workflows.json')
+  let workflowConfig = null
+  if (!fs.existsSync(workflowPath)) {
+    failures.push('workflows.json is missing.')
+  } else {
+    const validation = validateWithScript(['--config', workflowPath])
+    if (validation.ok) {
+      console.log('PASS workflows.json schema')
+      workflowConfig = loadWorkflowConfig(configDir)
+    }
+    else failures.push(validation.output || 'workflows.json validation failed.')
+  }
+
+  const manifestPath = path.join(configDir, MANIFEST_NAME)
+  const manifest = readManifest(configDir)
+  if (!manifest) {
+    failures.push('Installation manifest is missing or invalid.')
+  } else if (manifest.schema_version !== MANIFEST_VERSION) {
+    failures.push(`Manifest schema ${manifest.schema_version ?? 'unknown'} is unsupported; reinstall to migrate it.`)
+  } else {
+    const validation = validateWithScript(['--manifest', manifestPath])
+    if (!validation.ok) failures.push(validation.output || 'Manifest validation failed.')
+    if (path.resolve(manifest.target?.config_dir || '') !== configDir) {
+      failures.push('Manifest target does not match OPENCODE_CONFIG_DIR.')
+    }
+    const unowned = manifestRecords(manifest, configDir)
+      .filter(({ record, target }) => pathExists(target) && !isOwnedRecord(target, record))
+    if (unowned.length > 0) warnings.push(`${unowned.length} managed file(s) were modified and will be preserved.`)
+    else console.log('PASS managed file ownership')
+  }
+
+  for (const legacy of ['command', 'skill', 'plugin', 'tool']) {
+    if (fs.existsSync(path.join(configDir, legacy))) {
+      warnings.push(`Legacy singular directory remains: ${legacy}/`)
+    }
+  }
+
+  if (workflowConfig) diagnoseCapabilities(workflowConfig, configDir, version.ok, failures, warnings)
+
+  for (const warning of warnings) console.warn(`WARN ${warning}`)
+  for (const failure of failures) console.error(`FAIL ${failure}`)
+  if (failures.length > 0) throw new Error(`Doctor found ${failures.length} failure(s).`)
+  console.log(`Doctor passed with ${warnings.length} warning(s).`)
+}
+
+function migrateCandidate(value) {
+  if (typeof value === 'string') return { value: { model: value }, changed: true }
+  return { value, changed: false }
+}
+
+function migrateCandidateList(value) {
+  if (!Array.isArray(value)) return { value, changed: false }
+  let changed = false
+  const migrated = value.map((candidate) => {
+    const result = migrateCandidate(candidate)
+    changed ||= result.changed
+    return result.value
+  })
+  return { value: migrated, changed }
+}
+
+export function migrateWorkflowConfig(dryRun = false) {
+  const configDir = getConfigDir()
+  const filePath = path.join(configDir, 'workflows.json')
+  if (!fs.existsSync(filePath)) throw new Error(`No workflows.json found in ${configDir}.`)
+  const config = JSON.parse(fs.readFileSync(filePath, 'utf8'))
+  let changed = false
+
+  if (!config.$schema) {
+    config.$schema = './schema/workflows.schema.json'
+    changed = true
+  }
+  if (!config.schema_version) {
+    config.schema_version = 1
+    changed = true
+  }
+  if (!config.model_tiers) {
+    config.model_tiers = { low: [], mid: [], high: [] }
+    changed = true
+  }
+  for (const tier of ['low', 'mid', 'high']) {
+    if (!config.model_tiers[tier]) {
+      config.model_tiers[tier] = []
+      changed = true
+    }
+    const result = migrateCandidateList(config.model_tiers[tier])
+    config.model_tiers[tier] = result.value
+    changed ||= result.changed
+  }
+  if (!config.agent_models) {
+    config.agent_models = {}
+    changed = true
+  }
+  for (const [agent, value] of Object.entries(config.agent_models)) {
+    if (agent.startsWith('_')) continue
+    const result = Array.isArray(value) ? migrateCandidateList(value) : migrateCandidate(value)
+    config.agent_models[agent] = result.value
+    changed ||= result.changed
+  }
+  const fallbacks = migrateCandidateList(config.fallback_order || [])
+  config.fallback_order = fallbacks.value
+  changed ||= fallbacks.changed
+  if (!config.agent_variants) {
+    config.agent_variants = {}
+    changed = true
+  }
+  if (!config.automation) {
+    config.automation = { enabled: false }
+    changed = true
+  }
+  if (!config.experimental_capabilities) {
+    config.experimental_capabilities = {}
+    changed = true
+  }
+  for (const capability of ['background_subagents', 'native_workspaces', 'plugin_v2', 'mcp_code_mode', 'references']) {
+    const current = config.experimental_capabilities[capability]
+    if (typeof current === 'boolean') {
+      config.experimental_capabilities[capability] = current ? 'auto' : 'disabled'
+      changed = true
+    } else if (current === undefined) {
+      config.experimental_capabilities[capability] = 'disabled'
+      changed = true
+    }
+  }
+
+  if (!changed) {
+    console.log('workflows.json is already current; no migration needed.')
+    return
+  }
+  if (dryRun) {
+    console.log('Migration would normalize workflow candidates and capability flags.')
+    return
+  }
+
+  const backupPath = nextBackupPath(filePath)
+  assertSafeManagedParent(configDir, filePath)
+  assertSafeManagedParent(configDir, backupPath)
+  fs.copyFileSync(filePath, backupPath)
+  const temporaryPath = `${filePath}.tmp-${process.pid}`
+  const originalMode = fs.statSync(filePath).mode & 0o777
+  writeFileNoFollow(temporaryPath, `${JSON.stringify(config, null, 2)}\n`, originalMode)
+  fs.renameSync(temporaryPath, filePath)
+  try { fs.chmodSync(filePath, originalMode) } catch {}
+  console.log(`Migrated ${filePath}`)
+  console.log(`Original preserved at ${backupPath}`)
+  console.log('Restart OpenCode to load the migrated workflow configuration.')
+}
+
+export function uninstall(dryRun = false) {
+  const configDir = getConfigDir()
+  const manifestPath = path.join(configDir, MANIFEST_NAME)
+  const manifest = readManifest(configDir)
+  if (!manifest) throw new Error('No valid installation manifest found. Nothing was removed.')
+
+  let removed = 0
+  let preserved = 0
+  for (const { record, target } of manifestRecords(manifest, configDir)) {
+    if (['opencode.json', 'opencode.jsonc', 'workflows.json'].includes(path.basename(target))) {
+      preserved += 1
+      continue
+    }
+    if (!pathExists(target)) continue
+    if (!isOwnedRecord(target, record)) {
+      console.warn(`Warning: Preserved modified or unverified file: ${target}`)
+      preserved += 1
+      continue
+    }
+    console.log(`${dryRun ? '[dry-run] ' : ''}remove ${target}`)
+    if (!dryRun) {
+      assertSafeManagedParent(configDir, target)
+      removePath(target)
+    }
+    removed += 1
+  }
+
+  if (!dryRun) {
+    assertSafeManagedParent(configDir, manifestPath)
+    removePath(manifestPath)
+  }
+  for (const relative of [
+    'agents', 'commands', 'skills', 'plugins', 'tools', 'mode', 'lib', 'templates', 'workflow', 'schema',
+    path.join('workflows', 'active'), path.join('workflows', 'completed'), 'plans',
+  ]) {
+    const directory = path.join(configDir, relative)
     try {
-      execSync("npm install --no-audit --no-fund --silent", {
-        cwd: pluginsDir,
-        stdio: "pipe",
-        timeout: 30000,
-      });
-      allActions.push({ action: "npm-install", path: pluginsDir });
-    } catch (e) {
-      console.warn(`Warning: npm install in ${pluginsDir} failed: ${e.message}`);
-    }
-    // In symlink mode, Bun resolves imports from the symlink target (the repo).
-    // Install deps at both the repo root and plugin/ dir for reliable resolution.
-    if (mode === "symlink") {
-      for (const depDir of [REPO_ROOT, path.join(REPO_ROOT, "plugin")]) {
-        const pkg = path.join(depDir, "package.json");
-        if (!fs.existsSync(pkg)) continue;
-        try {
-          execSync("npm install --no-audit --no-fund --silent", {
-            cwd: depDir,
-            stdio: "pipe",
-            timeout: 30000,
-          });
-          allActions.push({ action: "npm-install", path: depDir });
-        } catch (e) {
-          console.warn(`Warning: npm install in ${depDir} failed: ${e.message}`);
-        }
+      if (!dryRun) {
+        assertSafeManagedParent(configDir, path.join(directory, '.managed-child'))
+        if (fs.readdirSync(directory).length === 0) fs.rmdirSync(directory)
       }
+    } catch {
+      // Missing and non-empty directories are intentionally retained.
     }
   }
-
-  // Print summary
-  printSummary(allActions, modules, mode, dryRun, modelStrategy);
-}
-
-function uninstall(dryRun) {
-  const configDir = getConfigDir();
-  const manifestPath = path.join(configDir, MANIFEST_NAME);
-
-  if (!fs.existsSync(manifestPath)) {
-    console.error("No installation manifest found. Nothing to uninstall.");
-    process.exit(1);
-  }
-
-  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf-8"));
-  const removed = [];
-  const skipped = [];
-
-  console.log(`\nUninstalling opencode-workflows...`);
-  console.log(`Manifest: ${manifestPath}`);
-  console.log(`Installed files: ${manifest.files.length}`);
-  if (dryRun) console.log("(dry run — no changes will be made)\n");
-  else console.log();
-
-  for (const target of manifest.files) {
-    // Never remove opencode config
-    if (path.basename(target) === "opencode.jsonc" || path.basename(target) === "opencode.json") {
-      skipped.push({ target, reason: "opencode config is never removed" });
-      continue;
-    }
-
-    if (dryRun) {
-      removed.push({ action: "remove", target, dryRun: true });
-      continue;
-    }
-
-    if (removePath(target)) {
-      removed.push({ action: "remove", target });
-    } else {
-      skipped.push({ target, reason: "not found" });
-    }
-  }
-
-  // Remove env file
-  const envPath = path.join(configDir, ENV_FILE_NAME);
-  if (!dryRun && fs.existsSync(envPath)) {
-    fs.unlinkSync(envPath);
-    removed.push({ action: "remove", target: envPath });
-  }
-
-  // Remove manifest itself
-  if (!dryRun) {
-    fs.unlinkSync(manifestPath);
-    removed.push({ action: "remove", target: manifestPath });
-  }
-
-  // Clean up empty directories
-  if (!dryRun) {
-    for (const sub of ["agents", "command", "skill", "plugins", "plugin", "tool", "mode", "lib", "templates"]) {
-      const dir = path.join(configDir, sub);
-      try {
-        const entries = fs.readdirSync(dir);
-        if (entries.length === 0) {
-          fs.rmdirSync(dir);
-          removed.push({ action: "rmdir", target: dir });
-        }
-      } catch {
-        // directory doesn't exist, that's fine
-      }
-    }
-  }
-
-  console.log(`Removed: ${removed.length} items`);
-  for (const r of removed) {
-    const label = dryRun ? "[dry-run] " : "";
-    console.log(`  ${label}${r.action}: ${r.target}`);
-  }
-  if (skipped.length > 0) {
-    console.log(`\nSkipped: ${skipped.length} items`);
-    for (const s of skipped) {
-      console.log(`  ${s.target} (${s.reason})`);
-    }
-  }
-  console.log("\nUninstall complete.");
-}
-
-// ---------------------------------------------------------------------------
-// Output
-// ---------------------------------------------------------------------------
-
-function printSummary(actions, modules, mode, dryRun, modelStrategy = "resolve") {
-  const symlinks = actions.filter((a) => a.action === "symlink");
-  const copies = actions.filter((a) => a.action === "copy");
-  const backups = actions.filter((a) => a.action === "backup");
-  const backupNormalized = actions.filter((a) => a.action === "backup-normalize");
-  const backupCleaned = actions.filter((a) => a.action === "backup-clean");
-  const removed = actions.filter((a) => a.action === "remove");
-  const skips = actions.filter((a) => a.action === "skip");
-  const dirs = actions.filter((a) => a.action === "mkdir");
-
-  const installed = symlinks.length + copies.length;
-
-  console.log("─".repeat(50));
-  console.log(dryRun ? "DRY RUN SUMMARY" : "INSTALL SUMMARY");
-  console.log("─".repeat(50));
-
-  if (backups.length > 0) {
-    console.log(`\nBacked up: ${backups.length} existing files`);
-    for (const b of backups) {
-      console.log(`  ${b.original} → ${b.backup}`);
-    }
-  }
-
-  const totalBackupCleanup = backupNormalized.length + backupCleaned.length;
-  if (totalBackupCleanup > 0) {
-    console.log(`\nLegacy backup cleanup: ${totalBackupCleanup} items`);
-    for (const a of backupNormalized) {
-      const prefix = dryRun ? "[dry-run] " : "";
-      console.log(`  ${prefix}normalize: ${a.from} → ${a.to}`);
-    }
-    for (const a of backupCleaned) {
-      const prefix = dryRun ? "[dry-run] " : "";
-      console.log(`  ${prefix}remove: ${a.target}`);
-    }
-  }
-
-  if (removed.length > 0) {
-    console.log(`\nRemoved stale managed files: ${removed.length}`);
-    for (const r of removed) {
-      const prefix = dryRun ? "[dry-run] " : "";
-      console.log(`  ${prefix}${r.target}`);
-    }
-  }
-
-  console.log(`\nInstalled: ${installed} items (${mode} mode)`);
-  for (const a of [...symlinks, ...copies]) {
-    const label = a.note ? ` (${a.note})` : "";
-    const prefix = dryRun ? "[dry-run] " : "";
-    console.log(
-      `  ${prefix}${a.action}: ${path.basename(a.source || a.target)}${label}`
-    );
-  }
-
-  if (skips.length > 0) {
-    console.log(`\nSkipped: ${skips.length} items`);
-    for (const s of skips) {
-      console.log(`  ${path.basename(s.target || s.source)} (${s.reason})`);
-    }
-  }
-
-  if (dirs.length > 0) {
-    console.log(`\nRuntime directories ensured: ${dirs.length}`);
-    for (const d of dirs) {
-      console.log(`  ${d.path}`);
-    }
-  }
-
-  console.log("\n─".repeat(50));
-  if (!dryRun) {
-    console.log("Next steps:");
-    console.log(`  1. Review/edit ${path.join(getConfigDir(), "opencode.jsonc")}`);
-    if (modelStrategy === "resolve") {
-      console.log(`  2. Configure model tiers in ${path.join(getConfigDir(), "workflows.json")}`);
-    } else {
-      console.log("  2. Configure runtime models in opencode.jsonc (model/small_model/agent.*.model)");
-    }
-    console.log("  3. Set up API keys in ~/.secrets/ as needed");
-    console.log("  4. Start OpenCode and verify agents are available");
-    if (mode === "symlink") {
-      console.log(
-        "\nTo update: just `git pull` — symlinks track most changes automatically."
-      );
-      console.log(
-        "Note: tools are always copied. Re-run installer after tool changes."
-      );
-    } else {
-      console.log(
-        "\nTo update: `git pull && node install.mjs`"
-      );
-    }
-    console.log("To uninstall: `node install.mjs --uninstall`");
-  }
-  console.log();
+  console.log(`Uninstall complete: ${removed} removed, ${preserved} preserved.`)
+  if (!dryRun) console.log('Restart OpenCode to unload the removed agents, commands, skills, and plugins.')
 }
 
 function printHelp() {
-  console.log(`
-OpenCode Workflows Installer
+  console.log(`OpenCode Workflows Installer
 
 Usage:
   node install.mjs [options]
 
 Options:
-  --symlink           Use symlink mode instead of copies (for development only)
-  --runtime-models    Do not materialize model_tier; use OpenCode runtime model config
-  --no-model-resolve  Alias for --runtime-models
-  --all               Install all modules (core + translate)
-  --module <name>     Install a specific module (core, translate)
-  --uninstall         Remove all installed files
-  --dry-run           Preview actions without making changes
-  --help              Show this help message
+  --copy                 Copy files (default)
+  --symlink              Symlink unchanged files for development
+  --materialize-models   Legacy mode: bake configured model candidates into frontmatter
+  --all                  Install core and translation modules
+  --module <name>        Install core or translation module
+  --doctor               Validate version, config, manifest, and managed files
+  --migrate              Migrate string model candidates and legacy capability flags
+  --uninstall            Safely remove owned installed files; preserve user configs
+  --dry-run              Preview install, migration, or uninstall actions
+  --help                 Show this help
 
-Modules:
-  core       Primary agents, workflow agents, commands, skills, plugins,
-             execution modes, libraries, templates, and conventions (default)
-  translate  Joomla translation agents, commands, tools, and plugin
-
-Features (core module):
-  - Primary agents for interactive coding (supervisor, editor, etc.)
-  - Workflow agents for autonomous execution (architect, executor, reviewer, etc.)
-  - Multi-model execution modes (eco, standard, turbo, thorough, swarm)
-  - Workflow templates (feature-development, bug-fix, refactor, e2e-testing)
-  - TypeScript libraries for plugin development
-  - Skills for framework-specific conventions
-
-Examples:
-  node install.mjs                       # Install core (copy mode, default)
-  node install.mjs --symlink             # Install with symlinks (dev only)
-  node install.mjs --runtime-models      # Keep model selection in opencode.jsonc
-  node install.mjs --all                 # Install everything
-  node install.mjs --module translate    # Add translate module
-  node install.mjs --uninstall           # Remove installed files
-  node install.mjs --dry-run --all       # Preview full install
-`);
+Runtime model inheritance is the default. Candidate availability and variants are
+validated against OpenCode's live config.providers catalog by runtime integrations.
+Restart OpenCode after install, migration, or uninstall.`)
 }
 
-// ---------------------------------------------------------------------------
-// CLI
-// ---------------------------------------------------------------------------
-
-function main() {
-  const args = process.argv.slice(2);
-
-  if (args.includes("--help") || args.includes("-h")) {
-    printHelp();
-    process.exit(0);
-  }
-
-  const dryRun = args.includes("--dry-run");
-  const symlinkMode = args.includes("--symlink");
-  const mode = symlinkMode ? "symlink" : "copy";
-  const runtimeModels = args.includes("--runtime-models") || args.includes("--no-model-resolve");
-  const modelStrategy = runtimeModels ? "strip" : "resolve";
-  const doUninstall = args.includes("--uninstall");
-  const installAll = args.includes("--all");
-
-  if (doUninstall) {
-    uninstall(dryRun);
-    process.exit(0);
-  }
-
-  // Determine which modules to install
-  let modules = ["core"];
-
-  if (installAll) {
-    modules = Object.keys(MODULES);
-  } else {
-    const modIdx = args.indexOf("--module");
-    if (modIdx !== -1 && args[modIdx + 1]) {
-      const requested = args[modIdx + 1];
-      if (!MODULES[requested]) {
-        console.error(`Unknown module: ${requested}`);
-        console.error(`Available: ${Object.keys(MODULES).join(", ")}`);
-        process.exit(1);
-      }
-      // If requesting a non-core module, include core too
-      if (requested !== "core" && !modules.includes(requested)) {
-        modules.push(requested);
-      }
+function parseCli(args) {
+  const knownFlags = new Set([
+    '--copy', '--symlink', '--materialize-models', '--all', '--doctor', '--migrate',
+    '--uninstall', '--dry-run', '--help', '-h', '--runtime-models', '--no-model-resolve',
+  ])
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index]
+    if (arg === '--module') {
+      if (!args[index + 1]) throw new Error('--module requires a name.')
+      index += 1
+      continue
     }
+    if (!knownFlags.has(arg)) throw new Error(`Unknown option: ${arg}`)
   }
-
-  install(modules, mode, dryRun, { modelStrategy });
 }
 
-main();
+export function main(args = process.argv.slice(2)) {
+  parseCli(args)
+  if (args.includes('--help') || args.includes('-h')) return printHelp()
+  const dryRun = args.includes('--dry-run')
+  const actions = ['--doctor', '--migrate', '--uninstall'].filter((flag) => args.includes(flag))
+  if (actions.length > 1) throw new Error(`${actions.join(', ')} cannot be combined.`)
+  if (args.includes('--doctor')) return doctor()
+  if (args.includes('--migrate')) return migrateWorkflowConfig(dryRun)
+  if (args.includes('--uninstall')) return uninstall(dryRun)
+
+  const modules = ['core']
+  if (args.includes('--all')) modules.push('translate')
+  const moduleIndex = args.indexOf('--module')
+  if (moduleIndex !== -1) {
+    const requested = args[moduleIndex + 1]
+    if (!['core', 'translate'].includes(requested)) throw new Error(`Unknown module: ${requested}`)
+    if (!modules.includes(requested)) modules.push(requested)
+  }
+  return install(
+    modules,
+    args.includes('--symlink') ? 'symlink' : 'copy',
+    dryRun,
+    { materializeModels: args.includes('--materialize-models') },
+  )
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  try {
+    main()
+  } catch (error) {
+    console.error(`Error: ${error instanceof Error ? error.message : String(error)}`)
+    process.exitCode = 1
+  }
+}

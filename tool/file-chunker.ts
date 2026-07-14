@@ -1,20 +1,28 @@
-import { tool } from "@opencode-ai/plugin"
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from "fs"
+import { tool, type ToolContext } from "@opencode-ai/plugin"
+import { chmodSync, readFileSync, writeFileSync, mkdirSync, existsSync } from "fs"
 import { basename, dirname, join } from "path"
 import { createHash } from "crypto"
-import { tmpdir } from "os"
+import { abortCheckpoint, authorizeToolPath, getSessionTempDir, throwIfAborted } from "../lib/tool-context.ts"
 
 export default tool({
   description: "Split large files into processable chunks with state tracking. Essential for processing files over 500 lines that would overwhelm LLM context windows.",
   args: {
-    filePath: tool.schema.string().describe("Absolute path to the file to chunk"),
+    filePath: tool.schema.string().describe("Path to the file to chunk"),
     chunkSize: tool.schema.number().default(150).describe("Number of lines per chunk (default: 150)"),
     overlap: tool.schema.number().default(20).describe("Number of overlapping lines between chunks for context (default: 20)"),
-    outputDir: tool.schema.string().optional().describe("Directory to store state file (default: os.tmpdir()/opencode-chunks)")
+    outputDir: tool.schema.string().optional().describe("Directory to store state file (default: a private session-scoped temp directory)")
   },
-  async execute(args) {
-    const { filePath, chunkSize = 150, overlap = 20 } = args
-    const outputDir = args.outputDir || join(tmpdir(), "opencode-chunks")
+  async execute(args, context: ToolContext) {
+    const { chunkSize = 150, overlap = 20 } = args
+    const filePath = await authorizeToolPath(context, args.filePath, "read")
+    const outputDir = args.outputDir || getSessionTempDir(context, "chunks")
+
+    if (!Number.isInteger(chunkSize) || chunkSize < 1 || !Number.isInteger(overlap) || overlap < 0) {
+      return JSON.stringify({
+        success: false,
+        error: "chunkSize must be a positive integer and overlap must be a non-negative integer"
+      }, null, 2)
+    }
 
     // Validate file exists
     if (!existsSync(filePath)) {
@@ -42,6 +50,7 @@ export default tool({
     let chunkId = 1
 
     while (startLine <= totalLines) {
+      await abortCheckpoint(context, chunkId - 1)
       const endLine = Math.min(startLine + chunkSize - 1, totalLines)
       
       // Get preview (first 80 chars of first non-empty line in chunk)
@@ -68,16 +77,11 @@ export default tool({
       chunkId++
     }
 
-    // Create output directory if needed
-    if (!existsSync(outputDir)) {
-      mkdirSync(outputDir, { recursive: true })
-    }
-
     // Generate state file name based on file path hash
     const fileHash = createHash("md5").update(filePath).digest("hex").substring(0, 8)
     const fileName = basename(filePath).replace(/[^a-zA-Z0-9]/g, "-")
     const stateFileName = `${fileName}-${fileHash}-state.json`
-    const stateFilePath = `${outputDir}/${stateFileName}`
+    const stateFilePath = await authorizeToolPath(context, join(outputDir, stateFileName), "edit")
 
     // Create state object
     const state = {
@@ -92,7 +96,19 @@ export default tool({
     }
 
     // Write state file
-    writeFileSync(stateFilePath, JSON.stringify(state, null, 2))
+    throwIfAborted(context)
+    const stateDirectory = dirname(stateFilePath)
+    mkdirSync(stateDirectory, args.outputDir ? { recursive: true } : { recursive: true, mode: 0o700 })
+    if (!args.outputDir) chmodSync(stateDirectory, 0o700)
+    throwIfAborted(context)
+    writeFileSync(
+      stateFilePath,
+      JSON.stringify(state, null, 2),
+      args.outputDir ? undefined : { encoding: "utf-8", mode: 0o600 },
+    )
+    if (!args.outputDir) {
+      chmodSync(stateFilePath, 0o600)
+    }
 
     return JSON.stringify({
       success: true,

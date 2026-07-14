@@ -21,14 +21,14 @@ Delegate prompts to external provider CLIs in headless mode.
 /delegate status claude --auth
 /delegate ask auto "Summarize the architecture of this repository"
 /delegate ask claude --model sonnet "Explain the auth flow"
-/delegate ask gemini --model gemini-2.5-flash "List all API endpoints"
+/delegate ask gemini --model <provider-model-alias> "List all API endpoints"
 /delegate followup dlg-20260404123456-ab12cd "Now focus on security risks"
 /delegate runs 10
 /delegate show dlg-20260404123456-ab12cd
 ```
 
 ## Model Configuration
-Models can be set per-provider in `~/.config/opencode/workflows.json` under the `delegation` key,
+Models can be set per provider in the selected OpenCode config directory's `workflows.json` under the `delegation` key,
 or overridden per-request with `--model`. See `workflows.json.template` for examples.
 
 ## Your Task

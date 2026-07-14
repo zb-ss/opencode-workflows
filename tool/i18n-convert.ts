@@ -1,8 +1,10 @@
-import { tool } from "@opencode-ai/plugin"
-import { readFileSync, writeFileSync, existsSync, mkdirSync, copyFileSync } from "fs"
+import { tool, type ToolContext } from "@opencode-ai/plugin"
+import { chmodSync, copyFileSync, readFileSync, writeFileSync, existsSync, mkdirSync } from "fs"
 import { dirname, basename, join } from "path"
-import { execSync } from "child_process"
-import { tmpdir } from "os"
+import { execFile } from "child_process"
+import { createHash } from "crypto"
+import { promisify } from "util"
+import { authorizeToolPath, getSessionTempDir, throwIfAborted } from "../lib/tool-context.ts"
 
 interface ConversionResult {
   success: boolean
@@ -29,27 +31,22 @@ interface ConversionResult {
   message?: string
 }
 
-// Backup directory
-const BACKUP_DIR = join(tmpdir(), "opencode-i18n-backups")
+const execFileAsync = promisify(execFile)
 
-function createBackup(filePath: string, line: number): string {
-  if (!existsSync(BACKUP_DIR)) {
-    mkdirSync(BACKUP_DIR, { recursive: true })
-  }
-  
+function getBackupPath(context: ToolContext, filePath: string, line: number): string {
+  const backupDir = getSessionTempDir(context, "i18n-backups")
   const timestamp = Date.now()
-  const backupName = `${basename(filePath)}.${line}.${timestamp}.bak`
-  const backupPath = `${BACKUP_DIR}/${backupName}`
-  
-  copyFileSync(filePath, backupPath)
-  return backupPath
+  const fileHash = createHash("sha256").update(filePath).digest("hex").slice(0, 12)
+  const backupName = `${basename(filePath)}.${fileHash}.${line}.${timestamp}.bak`
+  return join(backupDir, backupName)
 }
 
-function checkPhpSyntax(filePath: string): { valid: boolean; errors: string[] } {
+async function checkPhpSyntax(filePath: string, context: ToolContext): Promise<{ valid: boolean; errors: string[] }> {
   try {
-    execSync(`php -l "${filePath}" 2>&1`, { encoding: "utf-8" })
+    await execFileAsync("php", ["-l", filePath], { encoding: "utf-8", signal: context.abort })
     return { valid: true, errors: [] }
   } catch (error: unknown) {
+    throwIfAborted(context)
     const err = error as { stdout?: string; stderr?: string; message?: string }
     const output = err.stdout || err.stderr || err.message || "Unknown error"
     const errors = output.split("\n").filter((line: string) => line.includes("error") || line.includes("Parse"))
@@ -176,8 +173,9 @@ export default tool({
     framework: tool.schema.enum(["joomla", "laravel", "symfony", "vue"]).default("joomla").describe("Framework for conversion pattern"),
     dryRun: tool.schema.boolean().default(false).describe("If true, show what would change without modifying file")
   },
-  async execute(args) {
-    const { filePath, line, originalText, keyName, type, framework = "joomla", dryRun = false } = args
+  async execute(args, context: ToolContext) {
+    const { line, originalText, keyName, type, framework = "joomla", dryRun = false } = args
+    const filePath = await authorizeToolPath(context, args.filePath, "read")
 
     if (!existsSync(filePath)) {
       return JSON.stringify({
@@ -276,57 +274,77 @@ export default tool({
       }, null, 2)
     }
 
-    // Create backup
-    const backupPath = createBackup(filePath, line)
+    const writableFilePath = await authorizeToolPath(context, filePath, "edit")
+    const backupPath = await authorizeToolPath(context, getBackupPath(context, filePath, line), "edit")
     result.backup = backupPath
 
-    // Apply change
-    lines[line - 1] = newLine
-    const newContent = lines.join("\n")
-    writeFileSync(filePath, newContent)
+    throwIfAborted(context)
+    const backupDir = dirname(backupPath)
+    mkdirSync(backupDir, { recursive: true, mode: 0o700 })
+    chmodSync(backupDir, 0o700)
+    copyFileSync(writableFilePath, backupPath)
+    chmodSync(backupPath, 0o600)
 
-    // Check PHP syntax (only for PHP files)
-    if (filePath.endsWith(".php")) {
-      const syntaxResult = checkPhpSyntax(filePath)
-      result.syntaxCheck = syntaxResult
+    let hasModifiedTarget = false
+    try {
+      // Apply change
+      lines[line - 1] = newLine
+      const newContent = lines.join("\n")
+      throwIfAborted(context)
+      writeFileSync(writableFilePath, newContent)
+      hasModifiedTarget = true
 
-      if (!syntaxResult.valid) {
-        // Try alternative conversion
-        const alternative = tryAlternativeConversion(originalLine, originalText, keyName, type)
-        
-        if (alternative && alternative !== originalLine) {
-          // Try the alternative
-          lines[line - 1] = alternative
-          writeFileSync(filePath, lines.join("\n"))
+      // Check PHP syntax (only for PHP files)
+      if (writableFilePath.endsWith(".php")) {
+        const syntaxResult = await checkPhpSyntax(writableFilePath, context)
+        result.syntaxCheck = syntaxResult
+
+        if (!syntaxResult.valid) {
+          // Try alternative conversion
+          const alternative = tryAlternativeConversion(originalLine, originalText, keyName, type)
           
-          const altSyntaxResult = checkPhpSyntax(filePath)
-          
-          result.attemptedFix = {
-            tried: true,
-            newCode: alternative,
-            valid: altSyntaxResult.valid
+          if (alternative && alternative !== originalLine) {
+            // Try the alternative
+            lines[line - 1] = alternative
+            throwIfAborted(context)
+            writeFileSync(writableFilePath, lines.join("\n"))
+
+            const altSyntaxResult = await checkPhpSyntax(writableFilePath, context)
+
+            result.attemptedFix = {
+              tried: true,
+              newCode: alternative,
+              valid: altSyntaxResult.valid
+            }
+
+            if (altSyntaxResult.valid) {
+              result.newCode = alternative
+              result.syntaxCheck = altSyntaxResult
+              result.message = "Initial conversion failed syntax check. Alternative conversion applied successfully."
+              throwIfAborted(context)
+              return JSON.stringify(result, null, 2)
+            }
           }
+
+          // Rollback to original
+          writeFileSync(writableFilePath, content)
+          result.rollback = true
+          result.flaggedForReview = true
+          result.success = false
+          result.message = "Conversion failed syntax check. Original code restored. Manual review required."
           
-          if (altSyntaxResult.valid) {
-            result.newCode = alternative
-            result.syntaxCheck = altSyntaxResult
-            result.message = "Initial conversion failed syntax check. Alternative conversion applied successfully."
-            return JSON.stringify(result, null, 2)
-          }
+          return JSON.stringify(result, null, 2)
         }
-
-        // Rollback to original
-        copyFileSync(backupPath, filePath)
-        result.rollback = true
-        result.flaggedForReview = true
-        result.success = false
-        result.message = "Conversion failed syntax check. Original code restored. Manual review required."
-        
-        return JSON.stringify(result, null, 2)
       }
-    }
 
-    result.message = "Conversion successful"
-    return JSON.stringify(result, null, 2)
+      result.message = "Conversion successful"
+      throwIfAborted(context)
+      return JSON.stringify(result, null, 2)
+    } catch (error) {
+      if (hasModifiedTarget && context.abort.aborted) {
+        writeFileSync(writableFilePath, content)
+      }
+      throw error
+    }
   }
 })

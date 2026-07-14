@@ -5,8 +5,11 @@ temperature: 0.2
 steps: 4
 permission:
   read: allow
+  edit: deny
+  bash: deny
   grep: allow
   glob: allow
+  task: deny
   delegate_command: allow
   delegate_preflight: deny
   delegate_run: deny

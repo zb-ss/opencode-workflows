@@ -2,18 +2,29 @@
 description: "Reviews E2E Playwright tests for quality, flakiness, and best practices"
 model_tier: mid
 mode: subagent
+hidden: true
 temperature: 0.1
 steps: 15
 permission:
   external_directory:
-    "~/.config/opencode/**": allow
+    "*": deny
   read: allow
   grep: allow
   glob: allow
+  edit: deny
   bash:
-    "git commit*": deny
-    "git push*": deny
-    "*": allow
+    "*": ask
+    "git *": deny
+    "git status*": allow
+    "git diff*": allow
+    "git log*": allow
+    "git show*": allow
+    "git blame*": allow
+    "git branch": allow
+    "git branch --show-current*": allow
+    "rm -rf*": deny
+    "sudo*": deny
+  task: deny
 ---
 
 # E2E Test Reviewer Agent

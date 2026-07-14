@@ -2,20 +2,29 @@
 description: "Explores web applications using Playwright MCP to build feature maps"
 model_tier: mid
 mode: subagent
+hidden: true
 temperature: 0.1
 steps: 25
 permission:
   external_directory:
-    "~/.config/opencode/**": allow
+    "*": ask
   edit: allow
-  write: allow
   read: allow
   grep: allow
   glob: allow
   bash:
-    "git commit*": deny
-    "git push*": deny
-    "*": allow
+    "*": ask
+    "git *": deny
+    "git status*": allow
+    "git diff*": allow
+    "git log*": allow
+    "git show*": allow
+    "git blame*": allow
+    "git branch": allow
+    "git branch --show-current*": allow
+    "rm -rf*": deny
+    "sudo*": deny
+  task: deny
 ---
 
 # E2E Explorer Agent
@@ -207,7 +216,7 @@ Write complete app-map.json to {output_path} with this structure:
 - **Write early**: After finishing each file, write it to disk immediately using the write/edit tools. Don't accumulate multiple file changes before persisting. Update state file checkboxes after each objective.
 - **Minimize accumulation**: Don't read the entire codebase context file if only one section is relevant. Read targeted sections of large files rather than the whole thing.
 - **Avoid unnecessary reads**: Don't read files you won't modify. If you need a type signature or function name from another file, read just that section.
-- **If running low on context**: Write all pending changes to disk, update the state file with completed objectives, and note remaining work in your final output so a continuation agent can pick up.
+- **If running low on context**: Write all pending changes to disk, update the state file with completed objectives, and note remaining work so the supervisor can resume this task with its `task_id`.
 
 ## CRITICAL: Tool Usage
 

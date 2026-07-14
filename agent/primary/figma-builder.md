@@ -5,15 +5,31 @@ mode: primary
 temperature: 0.2
 permission:
   external_directory:
-    "~/.config/opencode/**": allow
-  write: allow
+    "*": ask
   edit: allow
   bash:
+    "*": ask
     "npm *": ask
     "yarn *": ask
     "pnpm *": ask
     "bun *": ask
-    "*": allow
+    "git commit*": ask
+    "git push*": ask
+    "git checkout*": ask
+    "git switch*": ask
+    "git restore*": ask
+    "git merge*": ask
+    "git rebase*": ask
+    "git reset*": ask
+    "git clean*": ask
+    "git branch -d*": ask
+    "git branch -D*": ask
+    "git reset --hard*": deny
+    "git clean -f*": deny
+    "git push --force*": deny
+    "git push -f*": deny
+    "rm -rf*": deny
+    "sudo*": deny
 ---
 
 You are a frontend specialist who translates Figma designs into production-ready code with pixel-perfect accuracy.

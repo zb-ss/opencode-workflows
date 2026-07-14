@@ -131,7 +131,7 @@ export function buildGeminiArgs(
   if (!model) {
     throw new Error(
       'delegation.gemini.model is not set in workflows.json. ' +
-      'Add it under the "delegation.gemini" key (e.g. "model": "gemini-3.1-pro-preview").',
+      'Add a model alias exposed by your installed Gemini CLI under the "delegation.gemini" key.',
     )
   }
 

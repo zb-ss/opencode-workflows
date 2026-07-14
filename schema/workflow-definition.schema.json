@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://opencode-workflows.example/schema/workflow-definition.schema.json",
+  "title": "Automatic workflow definition",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "description", "stages"],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+    },
+    "description": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1000
+    },
+    "stages": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 100,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "description", "agent_role", "model_tier", "prompt"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1000
+          },
+          "depends_on": {
+            "type": "array",
+            "uniqueItems": true,
+            "maxItems": 100,
+            "items": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+            }
+          },
+          "required": {
+            "type": "boolean"
+          },
+          "agent_role": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+          },
+          "model_tier": {
+            "type": "string",
+            "enum": ["low", "mid", "high"]
+          },
+          "prompt": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 20000
+          }
+        }
+      }
+    }
+  }
+}

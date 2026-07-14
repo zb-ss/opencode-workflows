@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://opencode-workflows.example/schema/install-manifest.schema.json",
+  "title": "OpenCode Workflows Installation Manifest",
+  "type": "object",
+  "properties": {
+    "$schema": { "type": "string" },
+    "schema_version": { "const": 2 },
+    "package": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "version": { "type": "string", "minLength": 1 }
+      },
+      "required": ["name", "version"],
+      "additionalProperties": false
+    },
+    "target": {
+      "type": "object",
+      "properties": {
+        "config_dir": { "type": "string", "minLength": 1 },
+        "platform": { "type": "string", "minLength": 1 }
+      },
+      "required": ["config_dir", "platform"],
+      "additionalProperties": false
+    },
+    "install": {
+      "type": "object",
+      "properties": {
+        "mode": { "enum": ["copy", "symlink"] },
+        "modules": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        },
+        "model_strategy": { "enum": ["runtime", "materialize"] },
+        "installed_at": { "type": "string" }
+      },
+      "required": ["mode", "modules", "model_strategy", "installed_at"],
+      "additionalProperties": false
+    },
+    "files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "path": { "type": "string", "minLength": 1 },
+          "source": { "type": ["string", "null"] },
+          "mode": { "enum": ["copy", "symlink", "generated"] },
+          "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+        },
+        "required": ["path", "source", "mode", "sha256"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["schema_version", "package", "target", "install", "files"],
+  "additionalProperties": false
+}

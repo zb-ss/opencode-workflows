@@ -2,18 +2,29 @@
 description: "Final architect verification before workflow completion - MANDATORY sign-off"
 model_tier: mid
 mode: subagent
+hidden: true
 temperature: 0.1
 steps: 12
 permission:
   external_directory:
-    "~/.config/opencode/**": allow
+    "*": deny
   read: allow
   grep: allow
   glob: allow
+  edit: deny
   bash:
-    "git commit*": deny
-    "git push*": deny
-    "*": allow
+    "*": ask
+    "git *": deny
+    "git status*": allow
+    "git diff*": allow
+    "git log*": allow
+    "git show*": allow
+    "git blame*": allow
+    "git branch": allow
+    "git branch --show-current*": allow
+    "rm -rf*": deny
+    "sudo*": deny
+  task: deny
 ---
 
 # Completion Guard Agent
@@ -68,10 +79,7 @@ Any findings = FAIL
 
 ### 3. Code Quality Spot-Check
 
-Read the codebase context file to understand project conventions:
-```
-Read: <HOME>/.config/opencode/workflows/context/<project>.md
-```
+Use the repository's tracked conventions, surrounding code, and supplied workflow evidence to understand project patterns. Do not read private global configuration.
 
 For each changed file, verify:
 
@@ -211,74 +219,9 @@ Quality Gate PASS -> COMPLETION GUARD -> Workflow Complete
 
 The workflow CANNOT be marked complete without this agent's APPROVED verdict.
 
-## Post-Approval Actions (MANDATORY)
+## Post-Approval Boundary
 
-When you approve a workflow, you MUST perform these cleanup actions:
-
-### 1. Move Workflow File to Completed
-
-```bash
-# Get $HOME first (write tool doesn't expand ~)
-HOME_DIR=$(echo $HOME)
-
-# Move workflow file from active to completed
-mv "$HOME_DIR/.config/opencode/workflows/active/<workflow-id>.org" \
-   "$HOME_DIR/.config/opencode/workflows/completed/<workflow-id>.org"
-```
-
-This keeps the active directory clean and provides history.
-
-### 2. Extract and Save Learnings to Project CLAUDE.md
-
-Save valuable patterns to the **project's root CLAUDE.md** so they're auto-loaded:
-
-```bash
-# Check if project CLAUDE.md exists
-PROJECT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
-```
-
-**If `$PROJECT_ROOT/CLAUDE.md` exists:**
-- Read existing content with read tool
-- Use edit tool to append new learnings under `## Workflow Learnings` section
-- Avoid duplicating existing entries
-
-**If it doesn't exist:**
-- Use write tool to create it with initial structure:
-
-```markdown
-# Project Instructions
-
-## Workflow Learnings
-
-### Patterns Discovered
-- <pattern from this workflow>
-
-### Issues Resolved
-- <issue and solution>
-
-### Key Decisions
-- <architectural decision made>
-```
-
-### 3. Update Workflow Status
-
-Update the workflow file's STATUS property before moving:
-```
-#+PROPERTY: STATUS completed
-#+PROPERTY: COMPLETED_AT <timestamp>
-```
-
-## Where Learnings Are Saved
-
-**Project `CLAUDE.md`** (root level):
-- Workflow learnings are appended here under `## Workflow Learnings`
-- Auto-loaded for ALL sessions (not just workflows)
-- Shared with team via git
-
-**Global `~/.config/opencode/CONVENTIONS.md`**:
-- Your personal coding preferences
-- Always loaded in system prompt
-- Not modified by workflows
+Return the verdict and evidence only. Do not move workflow files, archive state, commit changes, or create or modify assistant-context files. The root supervisor performs any explicit archival action after `workflow_check_completion`; public documentation changes require normal user review.
 
 ## Verification Checklist
 

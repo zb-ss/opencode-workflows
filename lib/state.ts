@@ -7,52 +7,38 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import os from 'node:os';
 import crypto from 'node:crypto';
 
 import type { WorkflowState, SessionBinding, SessionMarker, GateState } from './types.js';
+import { ensurePrivateDirectory, getConfigDir, getRuntimeDir, getSessionRuntimeDir, isPathInside } from './paths.ts';
 
-const xdg = process.env.XDG_CONFIG_HOME;
-const CONFIG_DIR = xdg
-  ? path.join(xdg, 'opencode')
-  : path.join(os.homedir(), '.config', 'opencode');
+const CONFIG_DIR = getConfigDir();
 
 export const WORKFLOWS_DIR = path.join(CONFIG_DIR, 'workflows');
 export const ACTIVE_DIR = path.join(WORKFLOWS_DIR, 'active');
 export const COMPLETED_DIR = path.join(WORKFLOWS_DIR, 'completed');
 export const PLANS_DIR = path.join(CONFIG_DIR, 'plans');
 
+function sessionBindingPath(sessionId: string): string {
+  return path.join(ensurePrivateDirectory(getSessionRuntimeDir(sessionId)), 'binding.json');
+}
+
+function sessionMarkerPath(sessionId: string): string {
+  return path.join(ensurePrivateDirectory(getSessionRuntimeDir(sessionId)), 'identity.json');
+}
+
 /**
  * Validate a file path to prevent traversal attacks.
- * Only allows paths under ~/.config/opencode/workflows/ or os.tmpdir().
+ * Only allows workflow state below the selected OpenCode config directory.
  */
 export function validatePath(inputPath: string | null | undefined): string | null {
   if (!inputPath || typeof inputPath !== 'string') return null;
 
-  const dangerousPatterns = [
-    /\.\.[\/\\]/,
-    /[<>|"'`$(){}]/,
-    /\0/,
-    /^[\/\\]{2}/,
-  ];
-
-  for (const pattern of dangerousPatterns) {
-    if (pattern.test(inputPath)) return null;
-  }
+  if (inputPath.includes('\0')) return null;
 
   try {
     const resolved = path.resolve(inputPath);
-    const allowedRoots = [
-      path.resolve(WORKFLOWS_DIR),
-      path.resolve(os.tmpdir()),
-    ];
-
-    const isAllowed = allowedRoots.some(root => {
-      const normalizedRoot = root.endsWith(path.sep) ? root : root + path.sep;
-      return resolved === root || resolved.startsWith(normalizedRoot);
-    });
-
-    return isAllowed ? resolved : null;
+    return isPathInside(WORKFLOWS_DIR, resolved) ? resolved : null;
   } catch {
     return null;
   }
@@ -119,6 +105,12 @@ function normalizeState(raw: Record<string, unknown>): WorkflowState {
   if (!state.updated_at) {
     state.updated_at = new Date().toISOString();
   }
+  state.schema_version = state.schema_version || 1;
+  state.revision = Number.isInteger(state.revision) ? state.revision : 0;
+  state.task_ids = state.task_ids || {};
+  state.status = state.status || 'running';
+  state.driver = state.driver || 'manual';
+  state.created_at = state.created_at || state.updated_at;
 
   return state;
 }
@@ -131,11 +123,13 @@ export function writeState(statePath: string, obj: WorkflowState): boolean {
   const validated = validatePath(statePath);
   if (!validated) return false;
 
-  const tmpPath = validated + '.tmp';
+  const tmpPath = `${validated}.${process.pid}.${crypto.randomUUID()}.tmp`;
   try {
     const content = JSON.stringify(obj, null, 2) + '\n';
-    fs.writeFileSync(tmpPath, content, 'utf8');
+    fs.mkdirSync(path.dirname(validated), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(tmpPath, content, { encoding: 'utf8', mode: 0o600 });
     fs.renameSync(tmpPath, validated);
+    try { fs.chmodSync(validated, 0o600); } catch {}
     return true;
   } catch {
     try { fs.unlinkSync(tmpPath); } catch {}
@@ -169,6 +163,8 @@ export function createInitialState(
   }
 
   const state: WorkflowState = {
+    schema_version: 1,
+    revision: 0,
     workflow_id: workflowId,
     workflow_type: workflowType,
     phase: {
@@ -180,6 +176,10 @@ export function createInitialState(
     agent_log: [],
     mode: { current: mode },
     updated_at: new Date().toISOString(),
+    created_at: new Date().toISOString(),
+    status: 'running',
+    driver: 'manual',
+    task_ids: {},
     org_file: orgFilePath,
   };
 
@@ -201,6 +201,7 @@ export function updateState(
     const updated = fn(current);
     if (!updated) return null;
     updated.updated_at = new Date().toISOString();
+    updated.revision = (current.revision || 0) + 1;
     return writeState(statePath, updated) ? updated : null;
   } catch {
     return null;
@@ -250,15 +251,15 @@ export function getActiveWorkflow(): { path: string; state: WorkflowState } | nu
 
 /**
  * Write a session marker file so skills can discover the session_id.
- * Writes /tmp/workflow-session-marker-{sessionId}.json.
+ * Writes a private marker below the configured workflow runtime directory.
  */
 export function writeSessionMarker(sessionId: string): boolean {
   if (!sessionId || typeof sessionId !== 'string') return false;
-  const markerPath = path.join(os.tmpdir(), `workflow-session-marker-${sessionId}.json`);
+  const markerPath = sessionMarkerPath(sessionId);
   try {
     const marker: SessionMarker = { session_id: sessionId, timestamp: new Date().toISOString() };
     const content = JSON.stringify(marker) + '\n';
-    fs.writeFileSync(markerPath, content, 'utf8');
+    fs.writeFileSync(markerPath, content, { encoding: 'utf8', mode: 0o600 });
     return true;
   } catch {
     return false;
@@ -267,7 +268,7 @@ export function writeSessionMarker(sessionId: string): boolean {
 
 /**
  * Bind a session to a specific workflow.
- * Writes /tmp/workflow-binding-{sessionId}.json.
+ * Writes a private session binding below the workflow runtime directory.
  */
 export function bindSessionToWorkflow(
   sessionId: string,
@@ -275,7 +276,7 @@ export function bindSessionToWorkflow(
   workflowId: string | null,
 ): boolean {
   if (!sessionId || !workflowPath) return false;
-  const bindingPath = path.join(os.tmpdir(), `workflow-binding-${sessionId}.json`);
+  const bindingPath = sessionBindingPath(sessionId);
   try {
     const binding: SessionBinding = {
       session_id: sessionId,
@@ -284,7 +285,7 @@ export function bindSessionToWorkflow(
       bound_at: new Date().toISOString(),
     };
     const content = JSON.stringify(binding) + '\n';
-    fs.writeFileSync(bindingPath, content, 'utf8');
+    fs.writeFileSync(bindingPath, content, { encoding: 'utf8', mode: 0o600 });
     return true;
   } catch {
     return false;
@@ -294,28 +295,28 @@ export function bindSessionToWorkflow(
 /**
  * Get the workflow bound to a session.
  * Reads the binding file, loads the state, and returns { path, state }.
- * Falls back to getActiveWorkflow() if no binding exists.
+ * Returns null when no exact session binding exists.
  */
 export function getWorkflowForSession(
   sessionId: string | null | undefined,
 ): { path: string; state: WorkflowState } | null {
   if (sessionId && typeof sessionId === 'string') {
-    const bindingPath = path.join(os.tmpdir(), `workflow-binding-${sessionId}.json`);
+    const bindingPath = sessionBindingPath(sessionId);
     try {
       if (fs.existsSync(bindingPath)) {
         const binding = JSON.parse(fs.readFileSync(bindingPath, 'utf8')) as SessionBinding;
         if (binding.workflow_path) {
           const state = readState(binding.workflow_path);
-          if (state) {
+          if (state && state.status !== 'completed') {
             return { path: binding.workflow_path, state };
           }
         }
       }
     } catch {
-      // Fall through to getActiveWorkflow()
+      return null;
     }
   }
-  return getActiveWorkflow();
+  return null;
 }
 
 /**
@@ -323,7 +324,7 @@ export function getWorkflowForSession(
  */
 export function clearSessionBinding(sessionId: string): boolean {
   if (!sessionId || typeof sessionId !== 'string') return false;
-  const bindingPath = path.join(os.tmpdir(), `workflow-binding-${sessionId}.json`);
+  const bindingPath = sessionBindingPath(sessionId);
   try {
     if (fs.existsSync(bindingPath)) {
       fs.unlinkSync(bindingPath);
@@ -331,6 +332,70 @@ export function clearSessionBinding(sessionId: string): boolean {
     return true;
   } catch {
     return false;
+  }
+}
+
+/** Remove every session binding that references one workflow state file. */
+export function clearWorkflowBindings(workflowPath: string): number {
+  const validated = validatePath(workflowPath);
+  if (!validated) return 0;
+  const sessionsDirectory = path.join(getRuntimeDir(), 'sessions');
+  if (!fs.existsSync(sessionsDirectory)) return 0;
+  let removed = 0;
+  for (const entry of fs.readdirSync(sessionsDirectory, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const bindingPath = path.join(sessionsDirectory, entry.name, 'binding.json');
+    try {
+      const binding = JSON.parse(fs.readFileSync(bindingPath, 'utf8')) as SessionBinding;
+      if (path.resolve(binding.workflow_path) !== validated) continue;
+      fs.unlinkSync(bindingPath);
+      removed++;
+    } catch {
+      // Missing or malformed bindings are ignored.
+    }
+  }
+  return removed;
+}
+
+/** Move a completed manual workflow's state and companion org file together. */
+export function archiveCompletedWorkflow(statePath: string): { state_path: string; org_path: string | null } | null {
+  const validated = validatePath(statePath);
+  if (!validated || path.dirname(validated) !== path.resolve(ACTIVE_DIR)) return null;
+  const state = readState(validated);
+  if (!state || !allMandatoryGatesPassed(state)) return null;
+  if (!validated.endsWith('.state.json') || !state.org_file) return null;
+
+  ensurePrivateDirectory(COMPLETED_DIR);
+  const completedStatePath = path.join(COMPLETED_DIR, path.basename(validated));
+  if (fs.existsSync(completedStatePath)) return null;
+
+  const activeOrgPath = validatePath(state.org_file);
+  if (!activeOrgPath || path.dirname(activeOrgPath) !== path.resolve(ACTIVE_DIR)) return null;
+  const stateStem = path.basename(validated, '.state.json');
+  const orgExtension = path.extname(activeOrgPath);
+  if (!['.org', '.md'].includes(orgExtension) || path.basename(activeOrgPath, orgExtension) !== stateStem) return null;
+  if (!fs.existsSync(activeOrgPath)) return null;
+  const completedOrgPath = path.join(COMPLETED_DIR, path.basename(activeOrgPath));
+  if (fs.existsSync(completedOrgPath)) return null;
+
+  const completedState: WorkflowState = {
+    ...state,
+    status: 'completed',
+    updated_at: new Date().toISOString(),
+    org_file: completedOrgPath,
+  };
+  if (!writeState(completedStatePath, completedState)) return null;
+
+  try {
+    fs.renameSync(activeOrgPath, completedOrgPath);
+    fs.unlinkSync(validated);
+    return { state_path: completedStatePath, org_path: completedOrgPath };
+  } catch {
+    try { fs.unlinkSync(completedStatePath); } catch {}
+    if (fs.existsSync(completedOrgPath) && !fs.existsSync(activeOrgPath)) {
+      try { fs.renameSync(completedOrgPath, activeOrgPath); } catch {}
+    }
+    return null;
   }
 }
 

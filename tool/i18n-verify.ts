@@ -1,7 +1,11 @@
-import { tool } from "@opencode-ai/plugin"
+import { tool, type ToolContext } from "@opencode-ai/plugin"
 import { readFileSync, existsSync } from "fs"
-import { basename, dirname, join } from "path"
-import { execSync } from "child_process"
+import { basename, join } from "path"
+import { execFile } from "child_process"
+import { promisify } from "util"
+import { abortCheckpoint, authorizeToolPath, throwIfAborted } from "../lib/tool-context.ts"
+
+const execFileAsync = promisify(execFile)
 
 interface MissingKey {
   key: string
@@ -28,14 +32,16 @@ interface VerifyResult {
 }
 
 // Parse INI file and return key-value map
-function parseIniFile(filePath: string): Map<string, string> {
+function parseIniFile(filePath: string, context: ToolContext): Map<string, string> {
   const keys = new Map<string, string>()
   if (!existsSync(filePath)) return keys
   
   const content = readFileSync(filePath, "utf-8")
   const lines = content.split("\n")
   
-  for (const line of lines) {
+  for (let i = 0; i < lines.length; i++) {
+    if (i % 128 === 0) throwIfAborted(context)
+    const line = lines[i]
     const trimmed = line.trim()
     if (!trimmed || trimmed.startsWith(";") || trimmed.startsWith("#")) continue
     
@@ -49,19 +55,25 @@ function parseIniFile(filePath: string): Map<string, string> {
 }
 
 // Extract all Text::_() calls from PHP files
-function extractTextCalls(componentPath: string): Map<string, { files: string[], lines: number[] }> {
+async function extractTextCalls(
+  componentPath: string,
+  context: ToolContext,
+): Promise<Map<string, { files: string[], lines: number[] }>> {
   const calls = new Map<string, { files: string[], lines: number[] }>()
   
   try {
     // Find all PHP files in the component
-    const result = execSync(
-      `grep -rn "Text::_\\|JText::_\\|Joomla\\.JText\\._\\|Joomla\\.Text\\._" "${componentPath}" --include="*.php" 2>/dev/null || true`,
-      { encoding: "utf-8", maxBuffer: 10 * 1024 * 1024 }
+    const { stdout: result } = await execFileAsync(
+      "grep",
+      ["-rn", "-E", "--include=*.php", "Text::_|JText::_|Joomla\\.JText\\._|Joomla\\.Text\\._", "--", componentPath],
+      { encoding: "utf-8", maxBuffer: 10 * 1024 * 1024, signal: context.abort },
     )
     
     const lines = result.split("\n").filter(l => l.trim())
     
-    for (const line of lines) {
+    for (let i = 0; i < lines.length; i++) {
+      await abortCheckpoint(context, i)
+      const line = lines[i]
       // Format: file:linenum:content
       const match = line.match(/^([^:]+):(\d+):(.+)$/)
       if (!match) continue
@@ -96,7 +108,8 @@ function extractTextCalls(componentPath: string): Map<string, { files: string[],
         }
       }
     }
-  } catch (e) {
+  } catch {
+    throwIfAborted(context)
     // Ignore errors, return what we found
   }
   
@@ -106,12 +119,15 @@ function extractTextCalls(componentPath: string): Map<string, { files: string[],
 // Find orphan keys (in INI but not used in PHP)
 function findOrphanKeys(
   iniKeys: Map<string, string>, 
-  usedKeys: Map<string, any>,
-  componentPrefix: string
+  usedKeys: ReadonlyMap<string, unknown>,
+  componentPrefix: string,
+  context: ToolContext,
 ): string[] {
   const orphans: string[] = []
   
+  let index = 0
   for (const key of iniKeys.keys()) {
+    if (index++ % 128 === 0) throwIfAborted(context)
     // Only check component-specific keys (not JOOMLA core keys)
     if (key.startsWith(componentPrefix) && !usedKeys.has(key)) {
       orphans.push(key)
@@ -122,7 +138,6 @@ function findOrphanKeys(
 }
 
 export default tool({
-  name: "i18n_verify",
   description: "Verify all Text::_() calls have matching INI keys. Finds missing translations and orphan keys.",
   args: {
     componentPath: tool.schema.string().describe("Path to Joomla component"),
@@ -130,8 +145,11 @@ export default tool({
     targetIni: tool.schema.string().optional().describe("Path to target INI. Auto-detected if not provided."),
     targetLanguage: tool.schema.string().optional().describe("Target language code (e.g., fr-CA). Default: fr-CA")
   },
-  async execute(args): Promise<string> {
-    const componentPath = args.componentPath
+  async execute(args, context: ToolContext): Promise<string> {
+    const componentPath = await authorizeToolPath(context, args.componentPath, "read", {
+      kind: "directory",
+      recursive: true,
+    })
     const targetLang = args.targetLanguage || "fr-CA"
     
     if (!existsSync(componentPath)) {
@@ -144,26 +162,33 @@ export default tool({
     const componentPrefix = `COM_${componentName.toUpperCase()}`
     
     // Find INI files
-    const isAdmin = componentPath.includes("/administrator/")
     const basePath = componentPath.replace(/\/components\/com_\w+.*$/, "")
     
-    const sourceIniPath = args.sourceIni || 
-      join(basePath, `language/en-GB/en-GB.com_${componentName}.ini`)
-    const targetIniPath = args.targetIni || 
-      join(basePath, `language/${targetLang}/${targetLang}.com_${componentName}.ini`)
+    const sourceIniPath = await authorizeToolPath(
+      context,
+      args.sourceIni || join(basePath, `language/en-GB/en-GB.com_${componentName}.ini`),
+      "read",
+    )
+    const targetIniPath = await authorizeToolPath(
+      context,
+      args.targetIni || join(basePath, `language/${targetLang}/${targetLang}.com_${componentName}.ini`),
+      "read",
+    )
     
     // Parse INI files
-    const sourceKeys = parseIniFile(sourceIniPath)
-    const targetKeys = parseIniFile(targetIniPath)
+    const sourceKeys = parseIniFile(sourceIniPath, context)
+    const targetKeys = parseIniFile(targetIniPath, context)
     
     // Extract all Text::_() calls from PHP files
-    const usedKeys = extractTextCalls(componentPath)
+    const usedKeys = await extractTextCalls(componentPath, context)
     
     // Find missing keys
     const missingInSource: MissingKey[] = []
     const missingInTarget: MissingKey[] = []
     
+    let usageIndex = 0
     for (const [key, usage] of usedKeys.entries()) {
+      await abortCheckpoint(context, usageIndex++)
       // Skip Joomla core keys (J* prefix)
       if (key.startsWith("J") && !key.startsWith(componentPrefix)) continue
       
@@ -187,8 +212,8 @@ export default tool({
     }
     
     // Find orphan keys (in INI but not used)
-    const orphanSource = findOrphanKeys(sourceKeys, usedKeys, componentPrefix)
-    const orphanTarget = findOrphanKeys(targetKeys, usedKeys, componentPrefix)
+    const orphanSource = findOrphanKeys(sourceKeys, usedKeys, componentPrefix, context)
+    const orphanTarget = findOrphanKeys(targetKeys, usedKeys, componentPrefix, context)
     
     // Build summary
     const issues: string[] = []

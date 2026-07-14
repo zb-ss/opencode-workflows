@@ -13,6 +13,7 @@ import { spawn, spawnSync } from "node:child_process"
 import fs from "node:fs"
 import path from "node:path"
 import os from "node:os"
+import { log } from "../lib/logger.ts"
 
 const DANGEROUS_PATTERNS = [
   /\.\.[\/\\]/,
@@ -21,7 +22,7 @@ const DANGEROUS_PATTERNS = [
   /^[\/\\]{2}/,
 ]
 
-function validateFilePath(inputPath: string): string | null {
+function validateFilePath(inputPath: string, directory: string): string | null {
   if (!inputPath || typeof inputPath !== 'string') return null
 
   for (const pattern of DANGEROUS_PATTERNS) {
@@ -29,15 +30,16 @@ function validateFilePath(inputPath: string): string | null {
   }
 
   try {
-    const resolved = path.resolve(inputPath)
-    const cwd = process.cwd()
+    const resolved = path.resolve(directory, inputPath)
     const tmpDir = os.tmpdir()
     const homeDir = os.homedir()
+    const configDir = process.env.OPENCODE_CONFIG_DIR
+      || path.join(process.env.XDG_CONFIG_HOME || path.join(homeDir, '.config'), 'opencode')
 
     const allowedRoots = [
-      path.resolve(cwd),
+      path.resolve(directory),
       path.resolve(tmpDir),
-      path.resolve(path.join(homeDir, '.config', 'opencode')),
+      path.resolve(configDir),
     ]
 
     const isAllowed = allowedRoots.some(root => {
@@ -46,7 +48,7 @@ function validateFilePath(inputPath: string): string | null {
     })
 
     if (!isAllowed) {
-      if (path.dirname(resolved) === path.resolve(cwd)) return resolved
+      if (path.dirname(resolved) === path.resolve(directory)) return resolved
       return null
     }
 
@@ -190,46 +192,75 @@ function alignOrgTables(file: string): void {
   }
 }
 
-export const FileValidator: Plugin = async ({ $ }) => {
+function editedFilePaths(tool: string, args: Record<string, unknown>): string[] {
+  const normalizedTool = tool.toLowerCase()
+  if (!['edit', 'write', 'apply_patch'].includes(normalizedTool)) return []
+
+  const files = new Set<string>()
+  const directPath = args.filePath ?? args.file_path ?? args.path
+  if (typeof directPath === 'string') files.add(directPath)
+
+  if (normalizedTool === 'apply_patch') {
+    const patchText = args.patchText ?? args.patch_text ?? args.patch
+    if (typeof patchText === 'string') {
+      const headerPattern = /^\*\*\* (Add|Update) File: (.+)$/gm
+      for (const match of patchText.matchAll(headerPattern)) files.add(match[2].trim())
+
+      const movePattern = /^\*\*\* Move to: (.+)$/gm
+      for (const match of patchText.matchAll(movePattern)) files.add(match[1].trim())
+    }
+  }
+
+  return [...files]
+}
+
+async function validateEditedFile(filePath: string, directory: string): Promise<string | null> {
+  const validated = validateFilePath(filePath, directory)
+  if (!validated || !fs.existsSync(validated)) return null
+
+  const ext = path.extname(validated).toLowerCase()
+  switch (ext) {
+    case '.ts':
+    case '.tsx':
+      return runValidator('npx', ['tsc', '--noEmit', '--skipLibCheck'], validated)
+    case '.php':
+      return runValidator('php', ['-l', validated], validated)
+    case '.py': {
+      const pythonCmd = commandExists('python3') ? 'python3' : 'python'
+      return runValidator(pythonCmd, ['-m', 'py_compile', validated], validated)
+    }
+    case '.json':
+      return validateJson(validated)
+    case '.org':
+      alignOrgTables(validated)
+      return null
+    default:
+      return null
+  }
+}
+
+export const FileValidator: Plugin = async ({ directory }) => {
   return {
-    "tool.execute.after": async ({ tool, args, output }) => {
-      // Only validate after edit/write operations
-      const editTools = ['edit', 'write', 'Edit', 'Write']
-      if (!editTools.includes(tool)) return
+    event: async ({ event }) => {
+      if (event.type !== 'file.edited') return
+      const validationError = await validateEditedFile(event.properties.file, directory)
+      if (validationError) {
+        log('file-validator', validationError)
+      }
+    },
 
-      const filePath = args?.file_path || args?.path
-      if (!filePath) return
+    "tool.execute.after": async (input, output) => {
+      const files = editedFilePaths(input.tool, input.args || {})
+      if (files.length === 0) return
 
-      const validated = validateFilePath(filePath)
-      if (!validated) return
-
-      const ext = path.extname(validated).toLowerCase()
-
-      let validationError: string | null = null
-
-      switch (ext) {
-        case '.ts':
-        case '.tsx':
-          validationError = await runValidator('npx', ['tsc', '--noEmit', '--skipLibCheck'], validated)
-          break
-        case '.php':
-          validationError = await runValidator('php', ['-l', validated], validated)
-          break
-        case '.py': {
-          const pythonCmd = commandExists('python3') ? 'python3' : 'python'
-          validationError = await runValidator(pythonCmd, ['-m', 'py_compile', validated], validated)
-          break
-        }
-        case '.json':
-          validationError = validateJson(validated)
-          break
-        case '.org':
-          alignOrgTables(validated)
-          break
+      const warnings: string[] = []
+      for (const filePath of files) {
+        const validationError = await validateEditedFile(filePath, directory)
+        if (validationError) warnings.push(validationError)
       }
 
-      if (validationError) {
-        output.output = (output.output || '') + `\n\nValidation warning: ${validationError}`
+      if (warnings.length > 0) {
+        output.output += `\n\nValidation warning: ${warnings.join('\n')}`
       }
     }
   }

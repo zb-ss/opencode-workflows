@@ -1,40 +1,91 @@
 /**
  * OpenCode External CLI Delegation Plugin
  *
- * Provides tool wrappers for delegating prompts to official provider CLIs:
- * - Claude Code CLI (`claude`)
- * - Gemini CLI (`gemini`)
- *
- * Design goals:
- * - Headless execution only (stdout/stderr capture)
- * - Non-blocking diagnostics (warn instead of hard-fail where possible)
- * - Safe process spawning (no shell interpolation)
- * - Run metadata persistence for follow-up chaining
+ * Provider CLIs run as argv-only child processes after OpenCode permission
+ * approval. Run records and bounded process output are isolated by session.
  */
 
-import type { Plugin } from '@opencode-ai/plugin'
-import { spawn, spawnSync } from 'node:child_process'
+import type { Plugin, ToolContext } from '@opencode-ai/plugin'
+import { spawn } from 'node:child_process'
 import crypto from 'node:crypto'
 import fs from 'node:fs'
-import os from 'node:os'
 import path from 'node:path'
 
-type Provider = 'claude' | 'gemini'
-type OutputFormat = 'text' | 'json'
+import {
+  ensurePrivateDirectory,
+  getConfigDir,
+  getSessionRuntimeDir,
+  hashIdentifier,
+  isPathInside,
+} from '../lib/paths.ts'
+import { throwIfAborted } from '../lib/tool-context.ts'
+import { getDelegationWorktreeName, getWorktreeDir } from '../lib/worktree-manager.ts'
+
+export type DelegationProvider = 'claude' | 'gemini'
+export type DelegationOutputFormat = 'text' | 'json'
+
+type AttemptCategory =
+  | 'success'
+  | 'missing_binary'
+  | 'timeout'
+  | 'execution_failed'
+  | 'storage_failed'
+  | 'auth_required'
+  | 'rate_limited'
+  | 'model_unavailable'
+  | 'invalid_request'
+  | 'unsupported_flag'
+  | 'provider_error'
+  | 'empty_output'
+
+interface ProviderConfig {
+  model?: string
+  timeout_ms?: number
+  permission_mode?: string
+}
+
+interface DelegationConfig {
+  claude?: ProviderConfig
+  gemini?: ProviderConfig
+  default_provider?: DelegationProvider | 'auto'
+  fallback_order?: DelegationProvider[]
+  max_output_bytes?: number
+}
+
+interface OutputFilePaths {
+  stdoutAbsolute: string
+  stderrAbsolute: string
+  stdoutRelative: string
+  stderrRelative: string
+}
 
 interface ExecResult {
   exit_code: number | null
   stdout: string
   stderr: string
+  stdout_bytes: number
+  stderr_bytes: number
+  stdout_truncated: boolean
+  stderr_truncated: boolean
   timed_out: boolean
   duration_ms: number
   spawn_error: string | null
+  storage_error: string | null
+}
+
+interface AttemptOutput {
+  stdout_file: string | null
+  stderr_file: string | null
+  stdout_bytes: number
+  stderr_bytes: number
+  stdout_truncated: boolean
+  stderr_truncated: boolean
 }
 
 interface ProviderAttempt {
-  provider: Provider
+  provider: DelegationProvider
   success: boolean
-  category: string
+  category: AttemptCategory
   message: string
   exit_code: number | null
   duration_ms: number
@@ -45,11 +96,34 @@ interface ProviderAttempt {
   raw_stderr: string
   warnings: string[]
   resume_token: string | null
+  output: AttemptOutput
+  model_alias: string | null
 }
 
-interface DelegationRunRecord {
+interface AttemptSummary {
+  provider: DelegationProvider
+  success: boolean
+  category: AttemptCategory
+  message: string
+  exit_code: number | null
+  duration_ms: number
+  timed_out: boolean
+  stdout_file: string | null
+  stderr_file: string | null
+  stdout_bytes: number
+  stderr_bytes: number
+  stdout_truncated: boolean
+  stderr_truncated: boolean
+  model_alias: string | null
+}
+
+export interface DelegationRunRecord {
+  version: 2
   id: string
-  provider: Provider
+  provider: DelegationProvider | null
+  session_id: string
+  directory: string
+  worktree: string
   created_at: string
   updated_at: string
   status: 'success' | 'failed'
@@ -57,80 +131,116 @@ interface DelegationRunRecord {
   parent_run_id: string | null
   used_native_resume: boolean
   stateless_followup: boolean
-  output_format: OutputFormat
+  output_format: DelegationOutputFormat
   prompt_hash: string
   prompt_preview: string
   response_text: string
   response_json: unknown | null
   warnings: string[]
   attempt_count: number
-  attempts: Array<{
-    provider: Provider
-    success: boolean
-    category: string
-    message: string
-    exit_code: number | null
-    duration_ms: number
-    timed_out: boolean
-  }>
+  attempts: AttemptSummary[]
   resume_token: string | null
+  imported_from_legacy?: boolean
 }
 
-interface DelegationConfig {
-  claude?: { model?: string; timeout_ms?: number }
-  gemini?: { model?: string; timeout_ms?: number }
-  default_provider?: Provider | 'auto'
-  fallback_order?: Provider[]
+export interface ExecuteDelegationArgs {
+  provider: DelegationProvider | 'auto' | string | null | undefined
+  prompt: string | null | undefined
+  outputFormat?: DelegationOutputFormat
+  timeoutMs?: number
+  workflowId?: string
+  allowFallback?: boolean
+  fallbackOrder?: Array<DelegationProvider | string>
+  resumeToken?: string | null
+  parentRunId?: string | null
+  model?: string | null
 }
 
-const xdg = process.env.XDG_CONFIG_HOME
-const CONFIG_DIR = xdg
-  ? path.join(xdg, 'opencode')
-  : path.join(os.homedir(), '.config', 'opencode')
+interface PreflightOptions {
+  checkAuth?: boolean
+  versionTimeoutMs?: number
+  authTimeoutMs?: number
+}
 
-const WORKFLOWS_JSON = path.join(CONFIG_DIR, 'workflows.json')
-const DELEGATION_DIR = path.join(CONFIG_DIR, 'workflows', 'context', 'delegation')
-const RUNS_DIR = path.join(DELEGATION_DIR, 'runs')
+interface PreflightResult {
+  provider: DelegationProvider
+  installed: boolean
+  binary_path: string | null
+  version: string | null
+  auth_state: 'authenticated' | 'unauthenticated' | 'unknown'
+  warnings: string[]
+  ready: boolean
+}
 
-const MAX_STORE_TEXT = 120_000
+interface InvocationPaths {
+  directory: string
+  worktree: string
+}
+
+interface ExecuteCommandOptions {
+  timeoutMs: number
+  signal: AbortSignal
+  cwd: string
+  outputFiles?: OutputFilePaths
+  maxOutputBytes?: number
+}
+
+const DEFAULT_TIMEOUT_MS = 120_000
+const MIN_TIMEOUT_MS = 5_000
+const MAX_TIMEOUT_MS = 600_000
+const MAX_STDOUT_BYTES = 64 * 1024
+const MAX_STDERR_BYTES = 16 * 1024
 const MAX_PREVIEW = 500
 const MAX_FOLLOWUP_CONTEXT = 8_000
+const MAX_LIST_LIMIT = 100
+const DEFAULT_MAX_OUTPUT_BYTES = 1_048_576
+const EXTERNAL_PERMISSION = 'delegation'
+const UNSAFE_PERMISSION = 'delegation_unsafe'
+const LEGACY_PERMISSION = 'delegation_legacy'
+const EXTERNAL_DIRECTORY_PERMISSION = 'external_directory'
+const SAFE_RUN_ID = /^[a-zA-Z0-9_-]+$/
+const SAFE_SLUG = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$/
 
-function loadDelegationConfig(): DelegationConfig {
-  try {
-    if (fs.existsSync(WORKFLOWS_JSON)) {
-      const raw = JSON.parse(fs.readFileSync(WORKFLOWS_JSON, 'utf8'))
-      const section = raw?.delegation
-      if (!section || typeof section !== 'object') return {}
+class BoundedCapture {
+  private readonly chunks: Buffer[] = []
+  private capturedBytes = 0
+  private totalBytes = 0
 
-      // Resolve _example_ prefixed keys: only active (non-prefixed) keys take effect
-      const resolveProviderConfig = (provider: string): { model?: string; timeout_ms?: number } | undefined => {
-        const cfg = section[provider]
-        if (!cfg || typeof cfg !== 'object') return undefined
-        const result: { model?: string; timeout_ms?: number } = {}
-        // Active key takes precedence over _example_ key
-        if (typeof cfg.model === 'string') result.model = cfg.model
-        else if (typeof cfg._example_model === 'string') { /* skip inactive */ }
-        if (typeof cfg.timeout_ms === 'number') result.timeout_ms = cfg.timeout_ms
-        else if (typeof cfg._example_timeout_ms === 'number') { /* skip inactive */ }
-        return Object.keys(result).length > 0 ? result : undefined
-      }
+  constructor(private readonly limit: number) {}
 
-      return {
-        claude: resolveProviderConfig('claude'),
-        gemini: resolveProviderConfig('gemini'),
-        default_provider: section.default_provider,
-        fallback_order: Array.isArray(section.fallback_order) ? section.fallback_order : undefined,
-      }
-    }
-  } catch {
-    // fall through to defaults
+  append(chunk: Buffer): void {
+    this.totalBytes += chunk.length
+    const remaining = this.limit - this.capturedBytes
+    if (remaining <= 0) return
+
+    const captured = Buffer.from(chunk.subarray(0, remaining))
+    this.chunks.push(captured)
+    this.capturedBytes += captured.length
   }
-  return {}
+
+  text(): string {
+    return Buffer.concat(this.chunks, this.capturedBytes).toString('utf8')
+  }
+
+  formattedText(): string {
+    const text = this.text()
+    const omitted = this.totalBytes - this.capturedBytes
+    return omitted > 0
+      ? `${text}\n...[truncated ${omitted} bytes; additional output was omitted]`
+      : text
+  }
+
+  get bytes(): number {
+    return this.totalBytes
+  }
+
+  get truncated(): boolean {
+    return this.totalBytes > this.capturedBytes
+  }
 }
 
-function ensureDirs(): void {
-  fs.mkdirSync(RUNS_DIR, { recursive: true })
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
 }
 
 function nowIso(): string {
@@ -138,7 +248,6 @@ function nowIso(): string {
 }
 
 function truncate(input: string, max: number): string {
-  if (!input) return ''
   if (input.length <= max) return input
   return `${input.slice(0, max)}\n...[truncated ${input.length - max} chars]`
 }
@@ -148,541 +257,787 @@ function hashText(input: string): string {
 }
 
 function makeRunId(): string {
-  const ts = new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14)
-  const rnd = crypto.randomBytes(3).toString('hex')
-  return `dlg-${ts}-${rnd}`
+  const timestamp = new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14)
+  return `dlg-${timestamp}-${crypto.randomBytes(6).toString('hex')}`
 }
 
-function commandExists(command: string): { available: boolean; path: string | null } {
+function clampTimeout(value: number | undefined, fallback: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return fallback
+  return Math.max(MIN_TIMEOUT_MS, Math.min(value, MAX_TIMEOUT_MS))
+}
+
+function normalizeModelAlias(value: string | null | undefined): string | null {
+  if (typeof value !== 'string') return null
+  const alias = value.trim()
+  if (!alias) return null
+  if (/[\0\r\n]/.test(alias)) throw new Error('Provider CLI model alias contains control characters')
+  if (alias.startsWith('-')) throw new Error('Provider CLI model alias cannot start with a flag prefix')
+  return alias
+}
+
+function normalizeResumeToken(value: string | null | undefined): string | null {
+  if (typeof value !== 'string') return null
+  const token = value.trim()
+  if (!token) return null
+  if (token.startsWith('-') || /[\0\r\n]/.test(token)) {
+    throw new Error('Provider resume token is not safe for argv use')
+  }
+  return token
+}
+
+function resolveInvocationPaths(context: ToolContext): InvocationPaths {
+  throwIfAborted(context)
+  const directory = fs.realpathSync(context.directory)
+  const worktree = fs.realpathSync(context.worktree)
+  if (!isPathInside(worktree, directory)) {
+    throw new Error('ToolContext directory is outside the ToolContext worktree')
+  }
+  return { directory, worktree }
+}
+
+function loadDelegationConfig(): DelegationConfig {
+  const configPath = path.join(getConfigDir(), 'workflows.json')
   try {
-    const probe = process.platform === 'win32' ? 'where' : 'which'
-    const result = spawnSync(probe, [command], {
-      encoding: 'utf8',
-      timeout: 5000,
-      stdio: ['ignore', 'pipe', 'ignore'],
-      shell: false,
-    })
-    if (result.status === 0) {
-      const first = (result.stdout || '').split('\n').map(v => v.trim()).find(Boolean) || null
-      return { available: true, path: first }
+    const root: unknown = JSON.parse(fs.readFileSync(configPath, 'utf8'))
+    if (!isRecord(root) || !isRecord(root.delegation)) return {}
+    const section = root.delegation
+
+    const providerConfig = (provider: DelegationProvider): ProviderConfig | undefined => {
+      const value = section[provider]
+      if (!isRecord(value)) return undefined
+      const config: ProviderConfig = {}
+      if (typeof value.model === 'string') config.model = value.model
+      if (typeof value.timeout_ms === 'number') config.timeout_ms = value.timeout_ms
+      if (typeof value.permission_mode === 'string') config.permission_mode = value.permission_mode
+      return Object.keys(config).length > 0 ? config : undefined
     }
-    return { available: false, path: null }
+
+    const fallbackOrder = Array.isArray(section.fallback_order)
+      ? section.fallback_order.filter(isProvider)
+      : undefined
+    const defaultProvider = section.default_provider
+
+    return {
+      claude: providerConfig('claude'),
+      gemini: providerConfig('gemini'),
+      default_provider: defaultProvider === 'claude' || defaultProvider === 'gemini' || defaultProvider === 'auto'
+        ? defaultProvider
+        : undefined,
+      fallback_order: fallbackOrder,
+      max_output_bytes: typeof section.max_output_bytes === 'number' && section.max_output_bytes > 0
+        ? Math.floor(section.max_output_bytes)
+        : undefined,
+    }
   } catch {
-    return { available: false, path: null }
+    return {}
   }
 }
 
-async function execCommand(command: string, args: string[], timeoutMs: number): Promise<ExecResult> {
-  const started = Date.now()
+function isProvider(value: unknown): value is DelegationProvider {
+  return value === 'claude' || value === 'gemini'
+}
 
-  return await new Promise((resolve) => {
-    let stdout = ''
-    let stderr = ''
-    let timedOut = false
-    let spawnError: string | null = null
-    let finished = false
-    let timer: ReturnType<typeof setTimeout> | null = null
+export function buildProviderOrder(
+  requested: DelegationProvider | 'auto',
+  allowFallback: boolean,
+  configuredOrder: DelegationProvider[],
+  defaultProvider: DelegationProvider | 'auto' = 'auto',
+): DelegationProvider[] {
+  const configured = [...new Set(configuredOrder)]
+  const defaults: DelegationProvider[] = configured.length > 0 ? configured : ['claude', 'gemini']
 
-    const finish = (exitCode: number | null) => {
-      if (finished) return
-      finished = true
-      if (timer) clearTimeout(timer)
-      resolve({
-        exit_code: exitCode,
-        stdout,
-        stderr,
-        timed_out: timedOut,
-        duration_ms: Date.now() - started,
-        spawn_error: spawnError,
-      })
+  if (requested === 'auto') {
+    if (defaultProvider === 'claude' || defaultProvider === 'gemini') {
+      return [defaultProvider, ...defaults.filter(provider => provider !== defaultProvider)]
     }
+    return defaults
+  }
 
-    const child = spawn(command, args, {
-      shell: false,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
-
-    child.stdout.on('data', (chunk: Buffer) => {
-      stdout += chunk.toString()
-    })
-
-    child.stderr.on('data', (chunk: Buffer) => {
-      stderr += chunk.toString()
-    })
-
-    child.on('error', (error: Error) => {
-      spawnError = error.message
-      finish(null)
-    })
-
-    timer = setTimeout(() => {
-      timedOut = true
-      try {
-        child.kill('SIGKILL')
-      } catch {
-        // best-effort
-      }
-      // If process does not emit close after kill, finish anyway.
-      setTimeout(() => finish(null), 250)
-    }, timeoutMs)
-
-    child.on('close', (exitCode: number | null) => {
-      finish(exitCode)
-    })
-  })
+  if (!allowFallback) return [requested]
+  return [requested, ...defaults.filter(provider => provider !== requested)]
 }
 
-function detectAuthState(text: string, provider: Provider): 'authenticated' | 'unauthenticated' | 'unknown' {
-  // Claude `auth status` returns JSON: {"loggedIn": true/false, ...}
-  if (provider === 'claude') {
-    try {
-      const json = JSON.parse(text.trim())
-      if (typeof json.loggedIn === 'boolean') {
-        return json.loggedIn ? 'authenticated' : 'unauthenticated'
-      }
-    } catch {
-      // not JSON, fall through to regex
-    }
-  }
-
-  const normalized = text.toLowerCase()
-
-  if (/(not\s+logged\s+in|loggedin["']?\s*:\s*false|login\s+required|sign\s+in|unauth|authentication\s+required)/i.test(normalized)) {
-    return 'unauthenticated'
-  }
-
-  if (/(logged\s*in|loggedin["']?\s*:\s*true|authenticated|active\s+account|subscription|account\s*:\s*|auth\s*:\s*ok)/i.test(normalized)) {
-    return 'authenticated'
-  }
-
-  return 'unknown'
+function ensureSessionDelegationDirectory(context: ToolContext): string {
+  const sessionRuntime = getSessionRuntimeDir(context.sessionID)
+  const directories = [
+    path.dirname(path.dirname(sessionRuntime)),
+    path.dirname(sessionRuntime),
+    sessionRuntime,
+    path.join(sessionRuntime, 'external-cli-delegation'),
+  ]
+  for (const directory of directories) ensurePrivateDirectory(directory)
+  return directories.at(-1)!
 }
 
-function parseJsonLoose(input: string): unknown | null {
-  const trimmed = input.trim()
-  if (!trimmed) return null
+export function getSessionDelegationDirectory(context: ToolContext): string {
+  return path.join(getSessionRuntimeDir(context.sessionID), 'external-cli-delegation')
+}
 
+export function getSessionRunsDirectory(context: ToolContext): string {
+  return path.join(getSessionDelegationDirectory(context), 'runs')
+}
+
+function ensureRunsDirectory(context: ToolContext): string {
+  ensureSessionDelegationDirectory(context)
+  return ensurePrivateDirectory(getSessionRunsDirectory(context))
+}
+
+function legacyRunsDirectory(): string {
+  return path.join(getConfigDir(), 'workflows', 'context', 'delegation', 'runs')
+}
+
+function writePrivateFile(filePath: string, content: string): void {
+  fs.writeFileSync(filePath, content, { encoding: 'utf8', mode: 0o600 })
   try {
-    return JSON.parse(trimmed)
+    fs.chmodSync(filePath, 0o600)
   } catch {
-    // continue
+    // Some filesystems do not expose POSIX permissions.
   }
-
-  const firstObject = trimmed.indexOf('{')
-  const lastObject = trimmed.lastIndexOf('}')
-  if (firstObject !== -1 && lastObject > firstObject) {
-    try {
-      return JSON.parse(trimmed.slice(firstObject, lastObject + 1))
-    } catch {
-      // continue
-    }
-  }
-
-  const firstArray = trimmed.indexOf('[')
-  const lastArray = trimmed.lastIndexOf(']')
-  if (firstArray !== -1 && lastArray > firstArray) {
-    try {
-      return JSON.parse(trimmed.slice(firstArray, lastArray + 1))
-    } catch {
-      // ignore
-    }
-  }
-
-  return null
 }
 
-function extractResponseText(responseJson: unknown, fallback: string): string {
-  if (typeof responseJson === 'string') return responseJson
-  if (responseJson && typeof responseJson === 'object') {
-    const obj = responseJson as Record<string, unknown>
-    // Claude JSON: { result: "response text", ... }
-    // Gemini JSON: may use response, output, text, or message
-    const candidates = [
-      obj.result,
-      obj.response,
-      obj.output,
-      obj.text,
-      obj.message,
-      (obj.result && typeof obj.result === 'object' ? (obj.result as Record<string, unknown>).text : null),
-    ]
-
-    for (const value of candidates) {
-      if (typeof value === 'string' && value.trim()) {
-        return value
-      }
-    }
-  }
-
-  return fallback
+function saveRun(context: ToolContext, record: DelegationRunRecord): void {
+  const runPath = path.join(ensureRunsDirectory(context), `${record.id}.json`)
+  writePrivateFile(runPath, `${JSON.stringify(record, null, 2)}\n`)
 }
 
-function extractResumeToken(responseJson: unknown): string | null {
-  if (!responseJson || typeof responseJson !== 'object') return null
-  const obj = responseJson as Record<string, unknown>
-  const keys = ['session_id', 'sessionId', 'conversation_id', 'conversationId', 'run_id', 'runId']
-  for (const key of keys) {
-    const value = obj[key]
-    if (typeof value === 'string' && value.trim()) return value.trim()
+function normalizeRunRecord(value: unknown): DelegationRunRecord | null {
+  if (!isRecord(value) || typeof value.id !== 'string' || !SAFE_RUN_ID.test(value.id)) return null
+  if (!isProvider(value.provider)) return null
+  if (value.status !== 'success' && value.status !== 'failed') return null
+  if (value.output_format !== 'text' && value.output_format !== 'json') return null
+  if (typeof value.prompt_preview !== 'string' || typeof value.response_text !== 'string') return null
+
+  const attempts = Array.isArray(value.attempts)
+    ? value.attempts.filter(isRecord).map((attempt): AttemptSummary => ({
+        provider: isProvider(attempt.provider) ? attempt.provider : value.provider as DelegationProvider,
+        success: attempt.success === true,
+        category: typeof attempt.category === 'string' ? attempt.category as AttemptCategory : 'execution_failed',
+        message: typeof attempt.message === 'string' ? attempt.message : '',
+        exit_code: typeof attempt.exit_code === 'number' ? attempt.exit_code : null,
+        duration_ms: typeof attempt.duration_ms === 'number' ? attempt.duration_ms : 0,
+        timed_out: attempt.timed_out === true,
+        stdout_file: typeof attempt.stdout_file === 'string' ? attempt.stdout_file : null,
+        stderr_file: typeof attempt.stderr_file === 'string' ? attempt.stderr_file : null,
+        stdout_bytes: typeof attempt.stdout_bytes === 'number' ? attempt.stdout_bytes : 0,
+        stderr_bytes: typeof attempt.stderr_bytes === 'number' ? attempt.stderr_bytes : 0,
+        stdout_truncated: attempt.stdout_truncated === true,
+        stderr_truncated: attempt.stderr_truncated === true,
+        model_alias: typeof attempt.model_alias === 'string' ? attempt.model_alias : null,
+      }))
+    : []
+
+  return {
+    version: 2,
+    id: value.id,
+    provider: value.provider,
+    session_id: typeof value.session_id === 'string' ? value.session_id : '',
+    directory: typeof value.directory === 'string' ? value.directory : '',
+    worktree: typeof value.worktree === 'string' ? value.worktree : '',
+    created_at: typeof value.created_at === 'string' ? value.created_at : nowIso(),
+    updated_at: typeof value.updated_at === 'string' ? value.updated_at : nowIso(),
+    status: value.status,
+    workflow_id: typeof value.workflow_id === 'string' ? value.workflow_id : null,
+    parent_run_id: typeof value.parent_run_id === 'string' ? value.parent_run_id : null,
+    used_native_resume: value.used_native_resume === true,
+    stateless_followup: value.stateless_followup === true,
+    output_format: value.output_format,
+    prompt_hash: typeof value.prompt_hash === 'string' ? value.prompt_hash : '',
+    prompt_preview: value.prompt_preview,
+    response_text: value.response_text,
+    response_json: value.response_json ?? null,
+    warnings: Array.isArray(value.warnings) ? value.warnings.filter(item => typeof item === 'string') : [],
+    attempt_count: typeof value.attempt_count === 'number' ? value.attempt_count : attempts.length,
+    attempts,
+    resume_token: typeof value.resume_token === 'string' ? value.resume_token : null,
+    imported_from_legacy: value.imported_from_legacy === true,
   }
-  return null
 }
 
-function getProviderArgs(
-  provider: Provider,
-  prompt: string,
-  outputFormat: OutputFormat,
-  resumeToken: string | null,
-  model: string | null,
-): string[] {
-  if (provider === 'claude') {
-    return getClaudeArgs(prompt, outputFormat, resumeToken, model)
+function publicRunRecord(record: DelegationRunRecord): Record<string, unknown> {
+  return {
+    id: record.id,
+    provider: record.provider,
+    created_at: record.created_at,
+    updated_at: record.updated_at,
+    status: record.status,
+    workflow_id: record.workflow_id,
+    parent_run_id: record.parent_run_id,
+    used_native_resume: record.used_native_resume,
+    stateless_followup: record.stateless_followup,
+    output_format: record.output_format,
+    prompt_preview: record.prompt_preview,
+    response_text: record.response_text,
+    warnings: record.warnings,
+    attempt_count: record.attempt_count,
+    imported_from_legacy: record.imported_from_legacy === true,
+    attempts: record.attempts.map((attempt) => ({
+      provider: attempt.provider,
+      success: attempt.success,
+      category: attempt.category,
+      message: attempt.message,
+      exit_code: attempt.exit_code,
+      duration_ms: attempt.duration_ms,
+      timed_out: attempt.timed_out,
+      stdout_bytes: attempt.stdout_bytes,
+      stderr_bytes: attempt.stderr_bytes,
+      stdout_truncated: attempt.stdout_truncated,
+      stderr_truncated: attempt.stderr_truncated,
+      model_alias: attempt.model_alias,
+    })),
   }
-  return getGeminiArgs(prompt, outputFormat, model)
 }
 
-/**
- * Claude CLI: `--print` is a boolean flag (non-interactive mode),
- * prompt is a positional argument, `--resume SESSION_ID` for continuation.
- * Always request JSON output to get session_id for resume capability.
- */
-function getClaudeArgs(
-  prompt: string,
-  outputFormat: OutputFormat,
-  resumeToken: string | null,
-  model: string | null,
-): string[] {
-  const args: string[] = ['--print']
-
-  if (resumeToken) {
-    args.push('--resume', resumeToken)
-  }
-
-  if (model) {
-    args.push('--model', model)
-  }
-
-  // Always use JSON internally for structured parsing + session_id extraction.
-  // We extract the human-readable text from the JSON response.
-  args.push('--output-format', 'json')
-
-  // -- separates flags from positional prompt (prevents prompts starting with - from being misinterpreted)
-  args.push('--', prompt)
-
-  return args
-}
-
-/**
- * Gemini CLI: `--prompt TEXT` takes the prompt as a string value (non-interactive mode).
- * Resume uses `--resume latest|INDEX`, NOT session IDs — native resume is unsupported.
- */
-function getGeminiArgs(
-  prompt: string,
-  outputFormat: OutputFormat,
-  model: string | null,
-): string[] {
-  const args: string[] = []
-
-  if (model) {
-    args.push('--model', model)
-  }
-
-  if (outputFormat === 'json') {
-    args.push('--output-format', 'json')
-  }
-
-  // Gemini uses --prompt as a string option (not a boolean flag like Claude)
-  args.push('--prompt', prompt)
-
-  return args
-}
-
-function saveRun(record: DelegationRunRecord): void {
-  ensureDirs()
-  const runPath = path.join(RUNS_DIR, `${record.id}.json`)
-  fs.writeFileSync(runPath, JSON.stringify(record, null, 2) + '\n', 'utf8')
-}
-
-function loadRun(runId: string): DelegationRunRecord | null {
-  if (!runId || /[^a-zA-Z0-9-_]/.test(runId)) return null
-  const runPath = path.join(RUNS_DIR, `${runId}.json`)
-  if (!fs.existsSync(runPath)) return null
-
+function readRunFile(filePath: string): DelegationRunRecord | null {
   try {
-    const raw = fs.readFileSync(runPath, 'utf8')
-    return JSON.parse(raw) as DelegationRunRecord
+    return normalizeRunRecord(JSON.parse(fs.readFileSync(filePath, 'utf8')))
   } catch {
     return null
   }
 }
 
-function listRuns(limit: number): DelegationRunRecord[] {
-  ensureDirs()
-  const safeLimit = Math.max(1, Math.min(limit, 100))
-  const files = fs.readdirSync(RUNS_DIR)
-    .filter(name => name.endsWith('.json'))
+async function loadRun(context: ToolContext, runId: string): Promise<DelegationRunRecord | null> {
+  throwIfAborted(context)
+  if (!SAFE_RUN_ID.test(runId)) return null
 
-  const records: DelegationRunRecord[] = []
-  for (const file of files) {
-    try {
-      const content = fs.readFileSync(path.join(RUNS_DIR, file), 'utf8')
-      records.push(JSON.parse(content) as DelegationRunRecord)
-    } catch {
-      // skip unreadable records
-    }
-  }
+  const currentPath = path.join(getSessionRunsDirectory(context), `${runId}.json`)
+  const current = readRunFile(currentPath)
+  if (current?.id === runId && current.session_id === context.sessionID) return current
 
-  records.sort((a, b) => {
-    const ta = new Date(a.created_at).getTime()
-    const tb = new Date(b.created_at).getTime()
-    return tb - ta
+  const legacyPath = path.join(legacyRunsDirectory(), `${runId}.json`)
+  if (!fs.existsSync(legacyPath)) return null
+
+  const pattern = `import:${runId}`
+  await context.ask({
+    permission: LEGACY_PERMISSION,
+    patterns: [pattern],
+    always: [pattern],
+    metadata: { runId, source: legacyPath },
   })
+  throwIfAborted(context)
 
+  const legacy = readRunFile(legacyPath)
+  if (legacy?.id !== runId) return null
+  const invocation = resolveInvocationPaths(context)
+  const imported: DelegationRunRecord = {
+    ...legacy,
+    session_id: context.sessionID,
+    directory: invocation.directory,
+    worktree: invocation.worktree,
+    attempts: legacy.attempts.map(attempt => ({
+      ...attempt,
+      stdout_file: null,
+      stderr_file: null,
+    })),
+    imported_from_legacy: true,
+    updated_at: nowIso(),
+  }
+  saveRun(context, imported)
+  return imported
+}
+
+function listRuns(context: ToolContext, limit: number): DelegationRunRecord[] {
+  throwIfAborted(context)
+  const runsDirectory = ensureRunsDirectory(context)
+  const safeLimit = Math.max(1, Math.min(Number.isFinite(limit) ? Math.trunc(limit) : 20, MAX_LIST_LIMIT))
+  const records = fs.readdirSync(runsDirectory)
+    .filter(fileName => fileName.endsWith('.json'))
+    .map(fileName => readRunFile(path.join(runsDirectory, fileName)))
+    .filter((record): record is DelegationRunRecord => record?.session_id === context.sessionID)
+
+  records.sort((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at))
   return records.slice(0, safeLimit)
 }
 
-async function preflightProvider(
-  provider: Provider,
-  opts?: { checkAuth?: boolean; versionTimeoutMs?: number; authTimeoutMs?: number },
-): Promise<Record<string, unknown>> {
-  const binary = commandExists(provider)
-  const warnings: string[] = []
-  const checkAuth = opts?.checkAuth !== false
-  const versionTimeoutMs = Math.max(1000, Math.min(opts?.versionTimeoutMs || 3000, 15000))
-  const authTimeoutMs = Math.max(1000, Math.min(opts?.authTimeoutMs || 2500, 15000))
+function resolveExecutable(command: string, env: NodeJS.ProcessEnv = process.env): string | null {
+  const pathValue = env.PATH
+  if (!pathValue) return null
 
-  if (!binary.available) {
-    return {
-      provider,
-      installed: false,
-      binary_path: null,
-      version: null,
-      auth_state: 'unknown',
-      warnings: [`${provider} CLI not found in PATH`],
-      ready: false,
+  const extensions = process.platform === 'win32'
+    ? (env.PATHEXT ?? '.EXE;.CMD;.BAT;.COM').split(';')
+    : ['']
+  for (const directory of pathValue.split(path.delimiter).filter(Boolean)) {
+    for (const extension of extensions) {
+      const candidate = path.join(directory, `${command}${extension}`)
+      try {
+        fs.accessSync(candidate, process.platform === 'win32' ? fs.constants.F_OK : fs.constants.X_OK)
+        if (fs.statSync(candidate).isFile()) return candidate
+      } catch {
+        // Continue searching PATH.
+      }
+    }
+  }
+  return null
+}
+
+function writeAll(fd: number, chunk: Buffer): void {
+  let offset = 0
+  while (offset < chunk.length) offset += fs.writeSync(fd, chunk, offset, chunk.length - offset)
+}
+
+function throwIfSignalAborted(signal: AbortSignal): void {
+  if (!signal.aborted) return
+  if (signal.reason instanceof Error) throw signal.reason
+  const error = new Error('The operation was aborted')
+  error.name = 'AbortError'
+  throw error
+}
+
+async function execCommand(
+  command: string,
+  args: string[],
+  options: ExecuteCommandOptions,
+): Promise<ExecResult> {
+  throwIfSignalAborted(options.signal)
+  const startedAt = Date.now()
+  const stdoutCapture = new BoundedCapture(MAX_STDOUT_BYTES)
+  const stderrCapture = new BoundedCapture(MAX_STDERR_BYTES)
+  let stdoutFd: number | null = null
+  let stderrFd: number | null = null
+  let storedOutputBytes = 0
+  let stdoutStorageTruncated = false
+  let stderrStorageTruncated = false
+  const maxOutputBytes = options.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES
+
+  if (options.outputFiles) {
+    stdoutFd = fs.openSync(options.outputFiles.stdoutAbsolute, 'w', 0o600)
+    try {
+      stderrFd = fs.openSync(options.outputFiles.stderrAbsolute, 'w', 0o600)
+      fs.chmodSync(options.outputFiles.stdoutAbsolute, 0o600)
+      fs.chmodSync(options.outputFiles.stderrAbsolute, 0o600)
+    } catch (error) {
+      fs.closeSync(stdoutFd)
+      if (stderrFd !== null) fs.closeSync(stderrFd)
+      throw error
     }
   }
 
-  let version: string | null = null
-  const versionResult = await execCommand(provider, ['--version'], versionTimeoutMs)
-  if (versionResult.timed_out) {
-    warnings.push(`${provider} --version timed out after ${versionTimeoutMs}ms.`)
-  }
-  const versionLine = (versionResult.stdout || versionResult.stderr).split('\n').map(v => v.trim()).find(Boolean)
-  if (versionLine) {
-    version = versionLine
-  }
+  return await new Promise<ExecResult>((resolve) => {
+    let finished = false
+    let timedOut = false
+    let spawnError: string | null = null
+    let storageError: string | null = null
+    let timeout: ReturnType<typeof setTimeout> | null = null
+    let killFallback: ReturnType<typeof setTimeout> | null = null
 
-  // Claude: `auth status` returns JSON {"loggedIn": true/false, ...}
-  // Gemini: no dedicated auth subcommand; probe with a minimal headless prompt
-  const authProbeCommands: Record<Provider, string[][]> = {
-    claude: [
-      ['auth', 'status'],
-    ],
-    gemini: [
-      // Gemini has no auth subcommand. Run a trivial headless prompt to detect auth errors.
-      ['--prompt', 'ping', '--output-format', 'text'],
-    ],
-  }
-
-  let authState: 'authenticated' | 'unauthenticated' | 'unknown' = 'unknown'
-
-  if (checkAuth) {
-    for (const probeArgs of authProbeCommands[provider]) {
-      const probe = await execCommand(provider, probeArgs, authTimeoutMs)
-      if (probe.timed_out) {
-        warnings.push(`${provider} ${probeArgs.join(' ')} timed out after ${authTimeoutMs}ms.`)
-        continue
+    const closeFiles = () => {
+      for (const fd of [stdoutFd, stderrFd]) {
+        if (fd === null) continue
+        try {
+          fs.closeSync(fd)
+        } catch {
+          // The first completion path owns cleanup.
+        }
       }
-
-      const probeOutput = `${probe.stdout}\n${probe.stderr}`.trim()
-      if (!probeOutput) continue
-      authState = detectAuthState(probeOutput, provider)
-
-      // For Gemini's trivial-prompt probe: exit 0 with output means authenticated
-      if (provider === 'gemini' && authState === 'unknown') {
-        authState = probe.exit_code === 0 && probeOutput.length > 0 ? 'authenticated' : 'unknown'
-      }
-
-      if (authState !== 'unknown') break
+      stdoutFd = null
+      stderrFd = null
     }
-  } else {
-    warnings.push(`Skipped ${provider} auth probe (checkAuth=false).`)
+
+    const finish = (exitCode: number | null) => {
+      if (finished) return
+      finished = true
+      if (timeout) clearTimeout(timeout)
+      if (killFallback) clearTimeout(killFallback)
+      options.signal.removeEventListener('abort', onAbort)
+      closeFiles()
+      resolve({
+        exit_code: exitCode,
+        stdout: stdoutCapture.formattedText(),
+        stderr: stderrCapture.formattedText(),
+        stdout_bytes: stdoutCapture.bytes,
+        stderr_bytes: stderrCapture.bytes,
+        stdout_truncated: stdoutCapture.truncated || stdoutStorageTruncated,
+        stderr_truncated: stderrCapture.truncated || stderrStorageTruncated,
+        timed_out: timedOut,
+        duration_ms: Date.now() - startedAt,
+        spawn_error: spawnError,
+        storage_error: storageError,
+      })
+    }
+
+    let child: ReturnType<typeof spawn>
+    try {
+      child = spawn(command, args, {
+        shell: false,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        cwd: options.cwd,
+        detached: process.platform !== 'win32',
+      })
+    } catch (error) {
+      spawnError = error instanceof Error ? error.message : String(error)
+      finish(null)
+      return
+    }
+
+    const stop = (reason: 'abort' | 'timeout') => {
+      if (finished) return
+      timedOut = reason === 'timeout'
+      try {
+        if (process.platform !== 'win32' && child.pid) process.kill(-child.pid, 'SIGKILL')
+        else child.kill('SIGKILL')
+      } catch {
+        // The fallback completion still closes files and settles the call.
+      }
+      killFallback = setTimeout(() => finish(null), 250)
+    }
+    const onAbort = () => stop('abort')
+
+    child.stdout?.on('data', (value: Buffer | string) => {
+      if (finished) return
+      const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value)
+      stdoutCapture.append(chunk)
+      if (stdoutFd === null) return
+      try {
+        const captured = chunk.subarray(0, Math.max(0, maxOutputBytes - storedOutputBytes))
+        if (captured.length > 0) writeAll(stdoutFd, captured)
+        storedOutputBytes += captured.length
+        stdoutStorageTruncated ||= captured.length < chunk.length
+      } catch (error) {
+        storageError ??= error instanceof Error ? error.message : String(error)
+      }
+    })
+    child.stderr?.on('data', (value: Buffer | string) => {
+      if (finished) return
+      const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value)
+      stderrCapture.append(chunk)
+      if (stderrFd === null) return
+      try {
+        const captured = chunk.subarray(0, Math.max(0, maxOutputBytes - storedOutputBytes))
+        if (captured.length > 0) writeAll(stderrFd, captured)
+        storedOutputBytes += captured.length
+        stderrStorageTruncated ||= captured.length < chunk.length
+      } catch (error) {
+        storageError ??= error instanceof Error ? error.message : String(error)
+      }
+    })
+    child.on('error', (error: Error) => {
+      spawnError = error.message
+      finish(null)
+    })
+    child.on('close', (exitCode: number | null) => finish(exitCode))
+    options.signal.addEventListener('abort', onAbort, { once: true })
+    timeout = setTimeout(() => stop('timeout'), options.timeoutMs)
+    if (options.signal.aborted) onAbort()
+  })
+}
+
+async function requestExternalExecution(
+  context: ToolContext,
+  provider: DelegationProvider,
+  cwd: string,
+  unsafeFlag: string | null,
+): Promise<void> {
+  throwIfAborted(context)
+  const externalPattern = `external:${provider}`
+  await context.ask({
+    permission: EXTERNAL_PERMISSION,
+    patterns: [externalPattern],
+    always: [externalPattern],
+    metadata: { provider, cwd },
+  })
+  throwIfAborted(context)
+
+  if (!unsafeFlag) return
+  const unsafePattern = `${provider}:${unsafeFlag}`
+  await context.ask({
+    permission: UNSAFE_PERMISSION,
+    patterns: [unsafePattern],
+    always: [],
+    metadata: { provider, flag: unsafeFlag, cwd },
+  })
+  throwIfAborted(context)
+}
+
+async function resolveExecutionDirectory(
+  context: ToolContext,
+  invocation: InvocationPaths,
+  requestedDirectory?: string,
+): Promise<string> {
+  if (!requestedDirectory) return invocation.directory
+  const executionDirectory = fs.realpathSync(requestedDirectory)
+  if (isPathInside(invocation.worktree, executionDirectory)) return executionDirectory
+
+  const managedRoot = getWorktreeDir(invocation.worktree)
+  if (path.dirname(executionDirectory) !== managedRoot
+    || !path.basename(executionDirectory).startsWith('delegate-')) {
+    throw new Error('Delegation execution directory is outside the current project and managed runtime worktrees')
+  }
+  await context.ask({
+    permission: EXTERNAL_DIRECTORY_PERMISSION,
+    patterns: [executionDirectory],
+    always: [],
+    metadata: { directory: executionDirectory, operation: 'delegation' },
+  })
+  throwIfAborted(context)
+  return executionDirectory
+}
+
+function configuredUnsafeFlag(
+  provider: DelegationProvider,
+  config: ProviderConfig | undefined,
+  warnings: string[],
+): string | null {
+  const mode = config?.permission_mode
+  if (!mode) return null
+  if (provider === 'claude' && mode === 'dangerously-skip-permissions') {
+    return '--dangerously-skip-permissions'
+  }
+  if (provider === 'gemini' && mode === 'yolo') return '--yolo'
+
+  warnings.push(`Ignored unsupported ${provider} permission_mode '${mode}'.`)
+  return null
+}
+
+export function getProviderArgs(
+  provider: DelegationProvider,
+  prompt: string,
+  outputFormat: DelegationOutputFormat,
+  resumeToken: string | null,
+  modelAlias: string | null,
+  unsafeFlag: string | null = null,
+): string[] {
+  if (provider === 'claude') {
+    const args = ['--print']
+    if (unsafeFlag) args.push(unsafeFlag)
+    if (resumeToken) args.push('--resume', resumeToken)
+    if (modelAlias) args.push('--model', modelAlias)
+    args.push('--output-format', 'json', '--', prompt)
+    return args
   }
 
-  if (authState === 'unknown') {
-    warnings.push(`Could not confidently determine ${provider} auth state. Run '${provider}' once interactively if needed.`)
-  }
+  const args: string[] = []
+  if (unsafeFlag) args.push(unsafeFlag)
+  if (modelAlias) args.push('--model', modelAlias)
+  if (outputFormat === 'json') args.push('--output-format', 'json')
+  args.push('--prompt', prompt)
+  return args
+}
 
-  if (authState === 'unauthenticated') {
-    warnings.push(`${provider} appears unauthenticated. Run '${provider}' interactively to complete login.`)
-  }
-
+function createAttemptOutputFiles(
+  context: ToolContext,
+  runId: string,
+  attemptNumber: number,
+  provider: DelegationProvider,
+): OutputFilePaths {
+  const delegationDirectory = ensureSessionDelegationDirectory(context)
+  const outputDirectory = ensurePrivateDirectory(path.join(delegationDirectory, 'outputs', runId))
+  const prefix = `${String(attemptNumber).padStart(2, '0')}-${provider}`
+  const stdoutAbsolute = path.join(outputDirectory, `${prefix}.stdout.log`)
+  const stderrAbsolute = path.join(outputDirectory, `${prefix}.stderr.log`)
   return {
-    provider,
-    installed: true,
-    binary_path: binary.path,
-    version,
-    auth_state: authState,
-    warnings,
-    ready: authState !== 'unauthenticated',
+    stdoutAbsolute,
+    stderrAbsolute,
+    stdoutRelative: path.relative(delegationDirectory, stdoutAbsolute),
+    stderrRelative: path.relative(delegationDirectory, stderrAbsolute),
   }
 }
 
+function emptyAttemptOutput(): AttemptOutput {
+  return {
+    stdout_file: null,
+    stderr_file: null,
+    stdout_bytes: 0,
+    stderr_bytes: 0,
+    stdout_truncated: false,
+    stderr_truncated: false,
+  }
+}
+
+function outputFromResult(files: OutputFilePaths, result: ExecResult): AttemptOutput {
+  return {
+    stdout_file: files.stdoutRelative,
+    stderr_file: files.stderrRelative,
+    stdout_bytes: result.stdout_bytes,
+    stderr_bytes: result.stderr_bytes,
+    stdout_truncated: result.stdout_truncated,
+    stderr_truncated: result.stderr_truncated,
+  }
+}
+
+function failedAttempt(
+  provider: DelegationProvider,
+  category: AttemptCategory,
+  message: string,
+  result: ExecResult | null,
+  warnings: string[],
+  output: AttemptOutput,
+  modelAlias: string | null,
+): ProviderAttempt {
+  return {
+    provider,
+    success: false,
+    category,
+    message,
+    exit_code: result?.exit_code ?? null,
+    duration_ms: result?.duration_ms ?? 0,
+    timed_out: result?.timed_out ?? false,
+    response_text: null,
+    response_json: null,
+    raw_stdout: result?.stdout ?? '',
+    raw_stderr: result?.stderr ?? '',
+    warnings,
+    resume_token: null,
+    output,
+    model_alias: modelAlias,
+  }
+}
+
+function parseJsonLoose(input: string): unknown | null {
+  const trimmed = input.trim()
+  if (!trimmed) return null
+  try {
+    return JSON.parse(trimmed)
+  } catch {
+    const objectStart = trimmed.indexOf('{')
+    const objectEnd = trimmed.lastIndexOf('}')
+    if (objectStart !== -1 && objectEnd > objectStart) {
+      try {
+        return JSON.parse(trimmed.slice(objectStart, objectEnd + 1))
+      } catch {
+        // Try an array next.
+      }
+    }
+    const arrayStart = trimmed.indexOf('[')
+    const arrayEnd = trimmed.lastIndexOf(']')
+    if (arrayStart !== -1 && arrayEnd > arrayStart) {
+      try {
+        return JSON.parse(trimmed.slice(arrayStart, arrayEnd + 1))
+      } catch {
+        return null
+      }
+    }
+    return null
+  }
+}
+
+function extractResponseText(responseJson: unknown, fallback: string): string {
+  if (typeof responseJson === 'string') return responseJson
+  if (isRecord(responseJson)) {
+    const nestedResult = isRecord(responseJson.result) ? responseJson.result.text : null
+    for (const value of [
+      responseJson.result,
+      responseJson.response,
+      responseJson.output,
+      responseJson.text,
+      responseJson.message,
+      nestedResult,
+    ]) {
+      if (typeof value === 'string' && value.trim()) return value
+    }
+  }
+  return fallback
+}
+
+function extractResumeToken(responseJson: unknown): string | null {
+  if (!isRecord(responseJson)) return null
+  for (const key of ['session_id', 'sessionId', 'conversation_id', 'conversationId', 'run_id', 'runId']) {
+    const value = responseJson[key]
+    if (typeof value === 'string' && value.trim()) return value.trim()
+  }
+  return null
+}
+
+function classifyExitFailure(output: string): AttemptCategory {
+  if (/(not\s+logged\s+in|login\s+required|sign\s+in|unauth|authentication\s+required|\b401\b|\b403\b)/i.test(output)) {
+    return 'auth_required'
+  }
+  if (/(rate.?limit|quota\s+exceeded|\b429\b)/i.test(output)) return 'rate_limited'
+  if (/(model\s+(?:not\s+found|unavailable|does\s+not\s+exist)|unknown\s+model)/i.test(output)) {
+    return 'model_unavailable'
+  }
+  if (/(unknown option|unrecognized option|invalid option|unknown flag)/i.test(output)) return 'unsupported_flag'
+  if (/(invalid request|bad request|\b400\b)/i.test(output)) return 'invalid_request'
+  return 'execution_failed'
+}
+
 async function runAttempt(
-  provider: Provider,
+  context: ToolContext,
+  invocation: InvocationPaths,
+  provider: DelegationProvider,
   prompt: string,
-  outputFormat: OutputFormat,
+  outputFormat: DelegationOutputFormat,
   timeoutMs: number,
   resumeToken: string | null,
-  model: string | null,
+  modelAlias: string | null,
+  unsafeFlag: string | null,
+  runId: string,
+  attemptNumber: number,
+  maxOutputBytes: number,
+  executionDirectory = invocation.directory,
 ): Promise<ProviderAttempt> {
-  const binary = commandExists(provider)
-  if (!binary.available) {
-    return {
-      provider,
-      success: false,
-      category: 'missing_binary',
-      message: `${provider} CLI not found in PATH`,
-      exit_code: null,
-      duration_ms: 0,
-      timed_out: false,
-      response_text: null,
-      response_json: null,
-      raw_stdout: '',
-      raw_stderr: '',
-      warnings: [],
-      resume_token: null,
-    }
-  }
-
-  // Gemini does not support session-ID-based resume
-  const effectiveResumeToken = provider === 'gemini' ? null : resumeToken
+  const binary = resolveExecutable(provider)
   const warnings: string[] = []
+  if (!binary) {
+    return failedAttempt(
+      provider,
+      'missing_binary',
+      `${provider} CLI not found in PATH`,
+      null,
+      warnings,
+      emptyAttemptOutput(),
+      modelAlias,
+    )
+  }
 
+  const effectiveResumeToken = provider === 'claude' ? resumeToken : null
   if (provider === 'gemini' && resumeToken) {
-    warnings.push('Gemini CLI does not support session-based resume; falling back to stateless mode.')
+    warnings.push('Gemini CLI does not support session-based resume; using stateless mode.')
   }
 
-  const args = getProviderArgs(provider, prompt, outputFormat, effectiveResumeToken, model)
-  const result = await execCommand(provider, args, timeoutMs)
+  await requestExternalExecution(context, provider, executionDirectory, unsafeFlag)
+  const outputFiles = createAttemptOutputFiles(context, runId, attemptNumber, provider)
+  const args = getProviderArgs(
+    provider,
+    prompt,
+    outputFormat,
+    effectiveResumeToken,
+    modelAlias,
+    unsafeFlag,
+  )
+  const result = await execCommand(binary, args, {
+    timeoutMs,
+    signal: context.abort,
+    cwd: executionDirectory,
+    outputFiles,
+    maxOutputBytes,
+  })
+  throwIfAborted(context)
 
-  const combined = `${result.stdout}\n${result.stderr}`.trim()
-
+  const output = outputFromResult(outputFiles, result)
   if (result.timed_out) {
-    return {
-      provider,
-      success: false,
-      category: 'timeout',
-      message: `${provider} timed out after ${timeoutMs}ms`,
-      exit_code: result.exit_code,
-      duration_ms: result.duration_ms,
-      timed_out: true,
-      response_text: null,
-      response_json: null,
-      raw_stdout: truncate(result.stdout, 4000),
-      raw_stderr: truncate(result.stderr, 4000),
-      warnings,
-      resume_token: null,
-    }
+    return failedAttempt(provider, 'timeout', `${provider} timed out after ${timeoutMs}ms`, result, warnings, output, modelAlias)
   }
-
+  if (result.storage_error) {
+    return failedAttempt(provider, 'storage_failed', `${provider} output could not be persisted: ${result.storage_error}`, result, warnings, output, modelAlias)
+  }
   if (result.spawn_error) {
-    return {
-      provider,
-      success: false,
-      category: 'execution_failed',
-      message: `${provider} execution error: ${result.spawn_error}`,
-      exit_code: result.exit_code,
-      duration_ms: result.duration_ms,
-      timed_out: false,
-      response_text: null,
-      response_json: null,
-      raw_stdout: truncate(result.stdout, 4000),
-      raw_stderr: truncate(result.stderr, 4000),
-      warnings,
-      resume_token: null,
-    }
+    return failedAttempt(provider, 'execution_failed', `${provider} execution error: ${result.spawn_error}`, result, warnings, output, modelAlias)
   }
-
   if (result.exit_code !== 0) {
-    let category = 'execution_failed'
-    if (/(not\s+logged\s+in|login\s+required|sign\s+in|unauth|authentication\s+required|401|403)/i.test(combined)) {
-      category = 'auth_required'
-    } else if (/(unknown option|unrecognized option|invalid option)/i.test(combined)) {
-      category = 'unsupported_flag'
-    }
-
-    return {
-      provider,
-      success: false,
-      category,
-      message: `${provider} failed (${category}): exit ${result.exit_code}`,
-      exit_code: result.exit_code,
-      duration_ms: result.duration_ms,
-      timed_out: false,
-      response_text: null,
-      response_json: null,
-      raw_stdout: truncate(result.stdout, 4000),
-      raw_stderr: truncate(result.stderr, 4000),
-      warnings,
-      resume_token: null,
-    }
+    const category = classifyExitFailure(`${result.stdout}\n${result.stderr}`)
+    return failedAttempt(provider, category, `${provider} failed (${category}): exit ${result.exit_code}`, result, warnings, output, modelAlias)
   }
 
-  const rawText = (result.stdout || result.stderr || '').trim()
+  const rawText = (result.stdout || result.stderr).trim()
   if (!rawText) {
-    return {
-      provider,
-      success: false,
-      category: 'empty_output',
-      message: `${provider} returned empty output`,
-      exit_code: result.exit_code,
-      duration_ms: result.duration_ms,
-      timed_out: false,
-      response_text: null,
-      response_json: null,
-      raw_stdout: truncate(result.stdout, 4000),
-      raw_stderr: truncate(result.stderr, 4000),
-      warnings,
-      resume_token: null,
-    }
+    return failedAttempt(provider, 'empty_output', `${provider} returned empty output`, result, warnings, output, modelAlias)
   }
 
-  // Claude always returns JSON (we request --output-format json).
-  // Gemini returns JSON only when explicitly requested.
   const shouldParseJson = provider === 'claude' || outputFormat === 'json'
-  let parsed: unknown | null = null
-  if (shouldParseJson) {
-    parsed = parseJsonLoose(rawText)
-    if (!parsed && provider === 'claude') {
-      warnings.push('Claude returned non-JSON output unexpectedly; using raw text.')
-    } else if (!parsed && outputFormat === 'json') {
-      warnings.push(`${provider} returned non-JSON output while JSON was requested; falling back to text.`)
-    }
+  const wasTruncated = result.stdout_truncated || (!result.stdout && result.stderr_truncated)
+  const parsed = shouldParseJson && !wasTruncated ? parseJsonLoose(rawText) : null
+  if (shouldParseJson && !parsed) {
+    warnings.push(wasTruncated
+      ? `${provider} JSON exceeded the in-memory cap; the structured response was omitted.`
+      : `${provider} returned non-JSON output; using text.`)
   }
 
   const responseText = extractResponseText(parsed, rawText)
-
-  // Claude: is_error flag in JSON means the request failed even with exit 0
-  if (provider === 'claude' && parsed && typeof parsed === 'object') {
-    const obj = parsed as Record<string, unknown>
-    if (obj.is_error === true) {
-      return {
-        provider,
-        success: false,
-        category: 'provider_error',
-        message: `Claude reported error: ${typeof obj.result === 'string' ? obj.result.slice(0, 200) : 'unknown'}`,
-        exit_code: result.exit_code,
-        duration_ms: result.duration_ms,
-        timed_out: false,
-        response_text: responseText,
-        response_json: parsed,
-        raw_stdout: truncate(result.stdout, 4000),
-        raw_stderr: truncate(result.stderr, 4000),
-        warnings,
-        resume_token: null,
-      }
-    }
+  if (provider === 'claude' && isRecord(parsed) && parsed.is_error === true) {
+    const detail = typeof parsed.result === 'string' ? truncate(parsed.result, 200) : 'unknown'
+    const attempt = failedAttempt(provider, 'provider_error', `Claude reported error: ${detail}`, result, warnings, output, modelAlias)
+    attempt.response_text = responseText
+    attempt.response_json = parsed
+    return attempt
   }
 
   return {
@@ -695,30 +1050,17 @@ async function runAttempt(
     timed_out: false,
     response_text: responseText,
     response_json: parsed,
-    raw_stdout: truncate(result.stdout, 20_000),
-    raw_stderr: truncate(result.stderr, 4_000),
+    raw_stdout: result.stdout,
+    raw_stderr: result.stderr,
     warnings,
-    resume_token: extractResumeToken(parsed),
+    resume_token: provider === 'claude' ? extractResumeToken(parsed) : null,
+    output,
+    model_alias: modelAlias,
   }
 }
 
-function buildStatelessFollowupPrompt(previous: DelegationRunRecord, followup: string): string {
-  return [
-    'You are continuing a previous delegated conversation in stateless mode.',
-    '',
-    'Previous prompt (preview):',
-    previous.prompt_preview,
-    '',
-    'Previous response (excerpt):',
-    truncate(previous.response_text, MAX_FOLLOWUP_CONTEXT),
-    '',
-    'Follow-up request:',
-    followup,
-  ].join('\n')
-}
-
-function toAttemptsSummary(attempts: ProviderAttempt[]): DelegationRunRecord['attempts'] {
-  return attempts.map((attempt) => ({
+function toAttemptsSummary(attempts: ProviderAttempt[]): AttemptSummary[] {
+  return attempts.map(attempt => ({
     provider: attempt.provider,
     success: attempt.success,
     category: attempt.category,
@@ -726,205 +1068,40 @@ function toAttemptsSummary(attempts: ProviderAttempt[]): DelegationRunRecord['at
     exit_code: attempt.exit_code,
     duration_ms: attempt.duration_ms,
     timed_out: attempt.timed_out,
+    stdout_file: attempt.output.stdout_file,
+    stderr_file: attempt.output.stderr_file,
+    stdout_bytes: attempt.output.stdout_bytes,
+    stderr_bytes: attempt.output.stderr_bytes,
+    stdout_truncated: attempt.output.stdout_truncated,
+    stderr_truncated: attempt.output.stderr_truncated,
+    model_alias: attempt.model_alias,
   }))
 }
 
-function splitArgs(input: string): string[] {
-  const tokens: string[] = []
-  if (!input || !input.trim()) return tokens
-
-  const re = /"([^"]*)"|'([^']*)'|`([^`]*)`|(\S+)/g
-  let match: RegExpExecArray | null
-  while ((match = re.exec(input)) !== null) {
-    tokens.push(match[1] ?? match[2] ?? match[3] ?? match[4])
-  }
-  return tokens
-}
-
-async function executeDelegateCommand(rawInput: string): Promise<Record<string, unknown>> {
-  const input = (rawInput || '').trim()
-  const cleaned = input.startsWith('/delegate ') ? input.slice('/delegate '.length).trim() : input
-  const tokens = splitArgs(cleaned)
-    .map(token => token.trim())
-    .filter(Boolean)
-    .filter(token => !/^\$\d+$/.test(token) && token !== '$ARGUMENTS')
-
-  if (tokens.length === 0) {
-    return {
-      success: false,
-      error: 'Missing subcommand',
-      usage: [
-        '/delegate status [provider] [--auth]',
-        '/delegate ask <provider|auto> <prompt>',
-        '/delegate followup <run-id> <prompt>',
-        '/delegate runs [limit]',
-        '/delegate show <run-id>',
-      ],
-    }
-  }
-
-  const subcommand = tokens[0].toLowerCase()
-
-  if (subcommand === 'status') {
-    const hasAuthFlag = tokens.includes('--auth')
-    const providerToken = tokens.find(t => t === 'claude' || t === 'gemini') as Provider | undefined
-    const providers = providerToken ? [providerToken] : ['claude', 'gemini']
-
-    const checks = await Promise.all(
-      providers.map(provider => preflightProvider(provider, {
-        checkAuth: hasAuthFlag,
-        versionTimeoutMs: 3000,
-        authTimeoutMs: 2500,
-      })),
-    )
-
-    const warnings = checks.flatMap((check) => {
-      const list = (check as Record<string, unknown>).warnings
-      return Array.isArray(list) ? (list as string[]) : []
-    })
-
-    return {
-      success: true,
-      command: 'status',
-      checkAuth: hasAuthFlag,
-      providers: checks,
-      warnings,
-    }
-  }
-
-  if (subcommand === 'ask') {
-    // Extract --model flag if present
-    let model: string | null = null
-    const modelIdx = tokens.indexOf('--model')
-    const filteredTokens = [...tokens]
-    if (modelIdx !== -1 && modelIdx + 1 < filteredTokens.length) {
-      model = filteredTokens[modelIdx + 1]
-      filteredTokens.splice(modelIdx, 2)
-    }
-
-    const maybeProvider = filteredTokens[1]
-    const provider: Provider | 'auto' = maybeProvider === 'claude' || maybeProvider === 'gemini' || maybeProvider === 'auto'
-      ? maybeProvider
-      : 'auto'
-
-    const promptStart = provider === 'auto' && maybeProvider !== 'auto' && maybeProvider !== 'claude' && maybeProvider !== 'gemini'
-      ? 1
-      : 2
-    const prompt = filteredTokens.slice(promptStart).join(' ').trim()
-
-    const result = await executeDelegation({ provider, prompt, model })
-    return {
-      command: 'ask',
-      ...result.payload,
-    }
-  }
-
-  if (subcommand === 'followup') {
-    const runId = tokens[1]
-    const prompt = tokens.slice(2).join(' ').trim()
-    if (!runId || !prompt) {
-      return {
-        success: false,
-        error: 'followup requires <run-id> and <prompt>',
-        usage: '/delegate followup <run-id> <prompt>',
-      }
-    }
-
-    const previous = loadRun(runId)
-    if (!previous) {
-      return { success: false, error: `Run not found: ${runId}` }
-    }
-
-    const useNative = Boolean(previous.resume_token)
-    const composedPrompt = useNative
-      ? prompt
-      : buildStatelessFollowupPrompt(previous, prompt)
-
-    const result = await executeDelegation({
-      provider: previous.provider,
-      prompt: composedPrompt,
-      outputFormat: previous.output_format,
-      timeoutMs: 120000,
-      allowFallback: false,
-      resumeToken: useNative ? previous.resume_token : null,
-      parentRunId: previous.id,
-      workflowId: previous.workflow_id || undefined,
-    })
-
-    return {
-      command: 'followup',
-      followup_of: previous.id,
-      used_native_resume: useNative,
-      ...result.payload,
-    }
-  }
-
-  if (subcommand === 'runs') {
-    const limitToken = tokens[1]
-    const parsed = Number.parseInt(limitToken || '20', 10)
-    const limit = Number.isFinite(parsed) ? parsed : 20
-    const runs = listRuns(limit)
-    return {
-      success: true,
-      command: 'runs',
-      count: runs.length,
-      runs: runs.map(run => ({
-        id: run.id,
-        provider: run.provider,
-        created_at: run.created_at,
-        status: run.status,
-        workflow_id: run.workflow_id,
-        prompt_preview: run.prompt_preview,
-      })),
-    }
-  }
-
-  if (subcommand === 'show') {
-    const runId = tokens[1]
-    if (!runId) {
-      return { success: false, error: 'show requires <run-id>', usage: '/delegate show <run-id>' }
-    }
-    const run = loadRun(runId)
-    if (!run) return { success: false, error: `Run not found: ${runId}` }
-    return { success: true, command: 'show', run }
-  }
-
+function attemptPayload(attempt: ProviderAttempt): Record<string, unknown> {
   return {
-    success: false,
-    error: `Unknown subcommand: ${subcommand}`,
-    usage: [
-      '/delegate status [provider] [--auth]',
-      '/delegate ask <provider|auto> <prompt>',
-      '/delegate followup <run-id> <prompt>',
-      '/delegate runs [limit]',
-      '/delegate show <run-id>',
-    ],
+    provider: attempt.provider,
+    success: attempt.success,
+    category: attempt.category,
+    message: attempt.message,
+    exit_code: attempt.exit_code,
+    duration_ms: attempt.duration_ms,
   }
 }
 
-interface ExecuteDelegationArgs {
-  provider: Provider | 'auto' | string | null | undefined
-  prompt: string | null | undefined
-  outputFormat?: OutputFormat
-  timeoutMs?: number
-  workflowId?: string
-  allowFallback?: boolean
-  fallbackOrder?: Array<Provider | string>
-  resumeToken?: string | null
-  parentRunId?: string | null
-  model?: string | null
-}
-
-async function executeDelegation(args: ExecuteDelegationArgs): Promise<{ ok: boolean; payload: Record<string, unknown> }> {
+async function executeDelegationInDirectory(
+  args: ExecuteDelegationArgs,
+  context: ToolContext,
+  executionDirectory?: string,
+): Promise<{ ok: boolean; payload: Record<string, unknown> }> {
+  const invocation = resolveInvocationPaths(context)
+  const runDirectory = await resolveExecutionDirectory(context, invocation, executionDirectory)
   const config = loadDelegationConfig()
   const inputWarnings: string[] = []
-
   const rawProvider = args.provider
-  const normalizedProvider: Provider | 'auto' =
-    rawProvider === 'claude' || rawProvider === 'gemini' || rawProvider === 'auto'
-      ? rawProvider
-      : 'auto'
-
+  const normalizedProvider: DelegationProvider | 'auto' = isProvider(rawProvider) || rawProvider === 'auto'
+    ? rawProvider
+    : 'auto'
   if (normalizedProvider !== rawProvider) {
     inputWarnings.push(`Invalid or missing provider '${String(rawProvider)}'; defaulted to 'auto'.`)
   }
@@ -944,51 +1121,86 @@ async function executeDelegation(args: ExecuteDelegationArgs): Promise<{ ok: boo
     }
   }
 
-  const outputFormat: OutputFormat = args.outputFormat === 'json' ? 'json' : 'text'
-  const defaultTimeout = Math.max(5000, Math.min(args.timeoutMs || 120000, 600000))
-  const allowFallback = args.allowFallback !== false
-
   const fallbackOrder = Array.isArray(args.fallbackOrder)
-    ? args.fallbackOrder.filter((p): p is Provider => p === 'claude' || p === 'gemini')
+    ? args.fallbackOrder.filter(isProvider)
     : (config.fallback_order ?? [])
-
   if (Array.isArray(args.fallbackOrder) && fallbackOrder.length !== args.fallbackOrder.length) {
     inputWarnings.push('Some invalid fallback providers were ignored.')
   }
 
-  const providers: Provider[] = normalizedProvider === 'auto'
-    ? (fallbackOrder.length > 0 ? fallbackOrder : ['claude', 'gemini'])
-    : [normalizedProvider]
-
+  const outputFormat: DelegationOutputFormat = args.outputFormat === 'json' ? 'json' : 'text'
+  const defaultTimeout = clampTimeout(args.timeoutMs, DEFAULT_TIMEOUT_MS)
+  const providers = buildProviderOrder(
+    normalizedProvider,
+    args.allowFallback !== false,
+    fallbackOrder,
+    config.default_provider,
+  )
+  const explicitModelAlias = normalizeModelAlias(args.model)
+  const resumeToken = normalizeResumeToken(args.resumeToken)
+  const runId = makeRunId()
   const attempts: ProviderAttempt[] = []
   let winner: ProviderAttempt | null = null
 
-  for (let i = 0; i < providers.length; i++) {
-    const provider = providers[i]
-    // Resolve model: explicit arg > config per-provider > null (use CLI default)
+  for (const provider of providers) {
+    throwIfAborted(context)
     const providerConfig = config[provider]
-    const model = (args.model ? args.model : providerConfig?.model) || null
-    const timeoutMs = providerConfig?.timeout_ms
-      ? Math.max(5000, Math.min(providerConfig.timeout_ms, 600000))
-      : defaultTimeout
+    const warnings: string[] = []
+    const unsafeFlag = configuredUnsafeFlag(provider, providerConfig, warnings)
+    const modelAlias = explicitModelAlias ?? normalizeModelAlias(providerConfig?.model)
+    const timeoutMs = clampTimeout(providerConfig?.timeout_ms, defaultTimeout)
     const attempt = await runAttempt(
+      context,
+      invocation,
       provider,
       prompt,
       outputFormat,
       timeoutMs,
-      args.resumeToken || null,
-      model,
+      resumeToken,
+      modelAlias,
+      unsafeFlag,
+      runId,
+      attempts.length + 1,
+      config.max_output_bytes ?? DEFAULT_MAX_OUTPUT_BYTES,
+      runDirectory,
     )
+    attempt.warnings.unshift(...warnings)
     attempts.push(attempt)
-
     if (attempt.success) {
       winner = attempt
       break
     }
-
-    const isLast = i === providers.length - 1
-    if (!allowFallback || isLast) break
+    if (args.allowFallback === false) break
   }
+
+  const timestamp = nowIso()
+  const warnings = [...inputWarnings, ...attempts.flatMap(attempt => attempt.warnings)]
+  const hasStatelessParent = Boolean(args.parentRunId && !resumeToken)
+  const record: DelegationRunRecord = {
+    version: 2,
+    id: runId,
+    provider: winner?.provider ?? attempts.at(-1)?.provider ?? null,
+    session_id: context.sessionID,
+    directory: runDirectory,
+    worktree: executionDirectory ? runDirectory : invocation.worktree,
+    created_at: timestamp,
+    updated_at: timestamp,
+    status: winner ? 'success' : 'failed',
+    workflow_id: args.workflowId ?? null,
+    parent_run_id: args.parentRunId ?? null,
+    used_native_resume: Boolean(resumeToken && winner?.provider === 'claude'),
+    stateless_followup: hasStatelessParent,
+    output_format: outputFormat,
+    prompt_hash: hashText(prompt),
+    prompt_preview: truncate(prompt, MAX_PREVIEW),
+    response_text: winner?.response_text ?? '',
+    response_json: winner?.response_json ?? null,
+    warnings,
+    attempt_count: attempts.length,
+    attempts: toAttemptsSummary(attempts),
+    resume_token: winner?.resume_token ?? null,
+  }
+  saveRun(context, record)
 
   if (!winner) {
     return {
@@ -996,47 +1208,13 @@ async function executeDelegation(args: ExecuteDelegationArgs): Promise<{ ok: boo
       payload: {
         success: false,
         provider: null,
-        run_id: null,
+        run_id: runId,
         error: 'All provider attempts failed',
-        attempts: attempts.map(a => ({
-          provider: a.provider,
-          category: a.category,
-          message: a.message,
-          exit_code: a.exit_code,
-          duration_ms: a.duration_ms,
-        })),
-        warnings: [...inputWarnings, ...attempts.flatMap(a => a.warnings)],
+        attempts: attempts.map(attemptPayload),
+        warnings,
       },
     }
   }
-
-  const runId = makeRunId()
-  const now = nowIso()
-  const warnings = [...inputWarnings, ...attempts.flatMap(a => a.warnings)]
-  const hasStatelessParent = Boolean(args.parentRunId && !args.resumeToken)
-
-  const record: DelegationRunRecord = {
-    id: runId,
-    provider: winner.provider,
-    created_at: now,
-    updated_at: now,
-    status: 'success',
-    workflow_id: args.workflowId || null,
-    parent_run_id: args.parentRunId || null,
-    used_native_resume: Boolean(args.resumeToken),
-    stateless_followup: hasStatelessParent,
-    output_format: outputFormat,
-    prompt_hash: hashText(prompt),
-    prompt_preview: truncate(prompt, MAX_PREVIEW),
-    response_text: truncate(winner.response_text || '', MAX_STORE_TEXT),
-    response_json: winner.response_json,
-    warnings,
-    attempt_count: attempts.length,
-    attempts: toAttemptsSummary(attempts),
-    resume_token: winner.resume_token,
-  }
-
-  saveRun(record)
 
   return {
     ok: true,
@@ -1045,211 +1223,540 @@ async function executeDelegation(args: ExecuteDelegationArgs): Promise<{ ok: boo
       provider: winner.provider,
       run_id: runId,
       response: winner.response_text,
-      response_json: winner.response_json,
       warnings: [
         ...warnings,
         ...(hasStatelessParent ? ['Stateless follow-up mode was used for this run.'] : []),
       ],
-      attempts: attempts.map(a => ({
-        provider: a.provider,
-        success: a.success,
-        category: a.category,
-        message: a.message,
-        duration_ms: a.duration_ms,
-      })),
+      attempts: attempts.map(attemptPayload),
     },
   }
 }
 
+export async function executeDelegation(
+  args: ExecuteDelegationArgs,
+  context: ToolContext,
+): Promise<{ ok: boolean; payload: Record<string, unknown> }> {
+  return executeDelegationInDirectory(args, context)
+}
+
+function detectAuthState(
+  text: string,
+  provider: DelegationProvider,
+): 'authenticated' | 'unauthenticated' | 'unknown' {
+  if (provider === 'claude') {
+    const parsed = parseJsonLoose(text)
+    if (isRecord(parsed) && typeof parsed.loggedIn === 'boolean') {
+      return parsed.loggedIn ? 'authenticated' : 'unauthenticated'
+    }
+  }
+
+  if (/(not\s+logged\s+in|loggedin["']?\s*:\s*false|login\s+required|sign\s+in|unauth|authentication\s+required)/i.test(text)) {
+    return 'unauthenticated'
+  }
+  if (/(logged\s*in|loggedin["']?\s*:\s*true|authenticated|active\s+account|subscription|account\s*:\s*|auth\s*:\s*ok)/i.test(text)) {
+    return 'authenticated'
+  }
+  return 'unknown'
+}
+
+async function preflightProvider(
+  provider: DelegationProvider,
+  context: ToolContext,
+  options: PreflightOptions = {},
+): Promise<PreflightResult> {
+  const invocation = resolveInvocationPaths(context)
+  const binary = resolveExecutable(provider)
+  const warnings: string[] = []
+  if (!binary) {
+    return {
+      provider,
+      installed: false,
+      binary_path: null,
+      version: null,
+      auth_state: 'unknown',
+      warnings: [`${provider} CLI not found in PATH`],
+      ready: false,
+    }
+  }
+
+  await requestExternalExecution(context, provider, invocation.directory, null)
+  const versionTimeoutMs = clampTimeout(options.versionTimeoutMs, MIN_TIMEOUT_MS)
+  const versionResult = await execCommand(binary, ['--version'], {
+    timeoutMs: versionTimeoutMs,
+    signal: context.abort,
+    cwd: invocation.directory,
+  })
+  throwIfAborted(context)
+  if (versionResult.timed_out) warnings.push(`${provider} --version timed out after ${versionTimeoutMs}ms.`)
+  const version = (versionResult.stdout || versionResult.stderr)
+    .split('\n')
+    .map(line => line.trim())
+    .find(Boolean) ?? null
+
+  let authState: PreflightResult['auth_state'] = 'unknown'
+  if (options.checkAuth !== false) {
+    const authArgs = provider === 'claude'
+      ? ['auth', 'status']
+      : ['--prompt', 'ping', '--output-format', 'text']
+    const authTimeoutMs = clampTimeout(options.authTimeoutMs, MIN_TIMEOUT_MS)
+    const authResult = await execCommand(binary, authArgs, {
+      timeoutMs: authTimeoutMs,
+      signal: context.abort,
+      cwd: invocation.directory,
+    })
+    throwIfAborted(context)
+    if (authResult.timed_out) {
+      warnings.push(`${provider} auth probe timed out after ${authTimeoutMs}ms.`)
+    } else {
+      const output = `${authResult.stdout}\n${authResult.stderr}`.trim()
+      authState = detectAuthState(output, provider)
+      if (provider === 'gemini' && authState === 'unknown' && authResult.exit_code === 0 && output) {
+        authState = 'authenticated'
+      }
+    }
+  } else {
+    warnings.push(`Skipped ${provider} auth probe (checkAuth=false).`)
+  }
+
+  if (authState === 'unknown') {
+    warnings.push(`Could not confidently determine ${provider} auth state. Run '${provider}' interactively if needed.`)
+  } else if (authState === 'unauthenticated') {
+    warnings.push(`${provider} appears unauthenticated. Run '${provider}' interactively to complete login.`)
+  }
+
+  return {
+    provider,
+    installed: true,
+    binary_path: binary,
+    version,
+    auth_state: authState,
+    warnings,
+    ready: authState !== 'unauthenticated',
+  }
+}
+
+function buildStatelessFollowupPrompt(previous: DelegationRunRecord, followup: string): string {
+  return [
+    'You are continuing a previous delegated conversation in stateless mode.',
+    '',
+    'Previous prompt (preview):',
+    previous.prompt_preview,
+    '',
+    'Previous response (excerpt):',
+    truncate(previous.response_text, MAX_FOLLOWUP_CONTEXT),
+    '',
+    'Follow-up request:',
+    followup,
+  ].join('\n')
+}
+
+interface FollowupArgs {
+  runId: string
+  prompt: string
+  outputFormat?: DelegationOutputFormat
+  timeoutMs?: number
+  preferNativeResume?: boolean
+}
+
+async function executeFollowup(args: FollowupArgs, context: ToolContext): Promise<Record<string, unknown>> {
+  const previous = await loadRun(context, args.runId)
+  if (!previous) return { success: false, error: `Run not found: ${args.runId}` }
+  if (previous.status !== 'success' || !previous.provider) {
+    return { success: false, error: `Run cannot be continued: ${args.runId}` }
+  }
+
+  const useNative = args.preferNativeResume !== false
+    && previous.provider === 'claude'
+    && Boolean(previous.resume_token)
+  const warnings: string[] = []
+  const prompt = useNative
+    ? args.prompt
+    : buildStatelessFollowupPrompt(previous, args.prompt)
+  if (!useNative) warnings.push('Stateless follow-up fallback used (no provider resume token available).')
+
+  const result = await executeDelegationInDirectory({
+    provider: previous.provider,
+    prompt,
+    outputFormat: args.outputFormat ?? previous.output_format,
+    timeoutMs: args.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+    workflowId: previous.workflow_id ?? undefined,
+    allowFallback: false,
+    resumeToken: useNative ? previous.resume_token : null,
+    parentRunId: previous.id,
+  }, context, previous.directory)
+
+  if (!result.ok) {
+    return {
+      success: false,
+      error: 'Follow-up delegation failed',
+      used_native_resume: useNative,
+      warnings,
+      provider: previous.provider,
+      details: result.payload,
+    }
+  }
+
+  return {
+    ...result.payload,
+    followup_of: previous.id,
+    used_native_resume: useNative,
+    warnings: [
+      ...warnings,
+      ...(Array.isArray(result.payload.warnings)
+        ? result.payload.warnings.filter(item => typeof item === 'string')
+        : []),
+    ],
+  }
+}
+
+export function splitDelegateArgs(input: string): string[] {
+  const tokens: string[] = []
+  const pattern = /"([^"]*)"|'([^']*)'|`([^`]*)`|(\S+)/g
+  let match: RegExpExecArray | null
+  while ((match = pattern.exec(input)) !== null) {
+    tokens.push(match[1] ?? match[2] ?? match[3] ?? match[4])
+  }
+  return tokens
+}
+
+const COMMAND_USAGE = [
+  '/delegate status [provider] [--auth]',
+  '/delegate ask <provider|auto> <prompt>',
+  '/delegate followup <run-id> <prompt>',
+  '/delegate runs [limit]',
+  '/delegate show <run-id>',
+  '/delegate exec-worktree <provider> --task-id <id> --branch <branch> [--model <model>] <prompt>',
+]
+
+function takeFlag(tokens: string[], flag: string): string | null {
+  const index = tokens.indexOf(flag)
+  if (index === -1 || index + 1 >= tokens.length) return null
+  const value = tokens[index + 1]
+  tokens.splice(index, 2)
+  return value
+}
+
+function assertSafeGitRef(value: string): void {
+  if (!value || value.startsWith('-') || /[\s~^:?*[\\\x00-\x1f\x7f]/.test(value)
+    || value.includes('..') || value.includes('@{') || value.endsWith('/') || value.endsWith('.')) {
+    throw new Error('branch must be a safe git ref')
+  }
+}
+
+async function executeWorktreeCommand(tokens: string[], context: ToolContext): Promise<Record<string, unknown>> {
+  const filteredTokens = [...tokens]
+  const taskId = takeFlag(filteredTokens, '--task-id')
+  const branch = takeFlag(filteredTokens, '--branch')
+  const model = takeFlag(filteredTokens, '--model')
+  const workflowId = takeFlag(filteredTokens, '--workflow-id')
+  if (!taskId || !branch) {
+    return {
+      success: false,
+      error: 'exec-worktree requires --task-id and --branch',
+      usage: COMMAND_USAGE.at(-1),
+    }
+  }
+  if (!SAFE_SLUG.test(taskId) || (workflowId && !SAFE_SLUG.test(workflowId))) {
+    return { success: false, error: 'task ID and workflow ID must be safe slugs' }
+  }
+  assertSafeGitRef(branch)
+
+  const providerToken = filteredTokens[1]
+  const provider: DelegationProvider = isProvider(providerToken) ? providerToken : 'claude'
+  const prompt = filteredTokens.slice(2).join(' ').trim()
+  if (!prompt) return { success: false, error: 'exec-worktree requires a prompt' }
+
+  const invocation = resolveInvocationPaths(context)
+  const effectiveWorkflowId = workflowId ?? `session-${hashIdentifier(context.sessionID)}`
+  const worktreeName = getDelegationWorktreeName(effectiveWorkflowId, taskId)
+  const worktreesDirectory = getWorktreeDir(invocation.worktree)
+  const worktreePath = path.join(worktreesDirectory, worktreeName)
+  const branchName = `delegate/${effectiveWorkflowId}/${taskId}`
+  if (!isPathInside(worktreesDirectory, worktreePath)) {
+    return { success: false, error: 'Derived worktree path is outside the managed directory' }
+  }
+
+  const git = resolveExecutable('git')
+  if (!git) return { success: false, error: 'git CLI not found in PATH' }
+  const gitPattern = 'external:git-worktree-add'
+  await context.ask({
+    permission: EXTERNAL_PERMISSION,
+    patterns: [gitPattern],
+    always: [gitPattern],
+    metadata: { cwd: invocation.worktree, worktreePath, branchName },
+  })
+  throwIfAborted(context)
+  ensurePrivateDirectory(worktreesDirectory)
+  const gitResult = await execCommand(git, ['worktree', 'add', '-b', branchName, worktreePath, branch], {
+    timeoutMs: 15_000,
+    signal: context.abort,
+    cwd: invocation.worktree,
+  })
+  throwIfAborted(context)
+  if (gitResult.exit_code !== 0 || gitResult.spawn_error) {
+    const detail = gitResult.spawn_error ?? (gitResult.stderr.trim() || `exit ${gitResult.exit_code}`)
+    return {
+      success: false,
+      error: `Failed to create worktree: ${detail}`,
+    }
+  }
+
+  const result = await executeDelegationInDirectory({
+    provider,
+    prompt,
+    model,
+    timeoutMs: 300_000,
+    workflowId: effectiveWorkflowId,
+  }, context, fs.realpathSync(worktreePath))
+  return {
+    command: 'exec-worktree',
+    task_id: taskId,
+    workflow_id: effectiveWorkflowId,
+    worktree_path: worktreePath,
+    branch_name: branchName,
+    ...result.payload,
+  }
+}
+
+export async function executeDelegateCommand(
+  rawInput: string,
+  context: ToolContext,
+): Promise<Record<string, unknown>> {
+  throwIfAborted(context)
+  const input = rawInput.trim()
+  const cleaned = input === '/delegate'
+    ? ''
+    : input.startsWith('/delegate ')
+      ? input.slice('/delegate '.length).trim()
+      : input
+  const tokens = splitDelegateArgs(cleaned)
+    .map(token => token.trim())
+    .filter(Boolean)
+    .filter(token => !/^\$\d+$/.test(token) && token !== '$ARGUMENTS')
+  if (tokens.length === 0) return { success: false, error: 'Missing subcommand', usage: COMMAND_USAGE }
+
+  const subcommand = tokens[0].toLowerCase()
+  if (subcommand === 'status') {
+    const providerToken = tokens.find(isProvider)
+    const providers: DelegationProvider[] = providerToken ? [providerToken] : ['claude', 'gemini']
+    const checks: PreflightResult[] = []
+    for (const provider of providers) {
+      checks.push(await preflightProvider(provider, context, {
+        checkAuth: tokens.includes('--auth'),
+        versionTimeoutMs: 3_000,
+        authTimeoutMs: 2_500,
+      }))
+    }
+    return {
+      success: true,
+      command: 'status',
+      checkAuth: tokens.includes('--auth'),
+      providers: checks.map(({ binary_path: _binaryPath, ...check }) => check),
+      warnings: checks.flatMap(check => check.warnings),
+    }
+  }
+
+  if (subcommand === 'ask') {
+    const filteredTokens = [...tokens]
+    const model = takeFlag(filteredTokens, '--model')
+    const providerToken = filteredTokens[1]
+    const provider: DelegationProvider | 'auto' = isProvider(providerToken) || providerToken === 'auto'
+      ? providerToken
+      : 'auto'
+    const promptStart = provider === 'auto' && providerToken !== 'auto' ? 1 : 2
+    const result = await executeDelegation({
+      provider,
+      prompt: filteredTokens.slice(promptStart).join(' ').trim(),
+      model,
+    }, context)
+    return { command: 'ask', ...result.payload }
+  }
+
+  if (subcommand === 'followup') {
+    const runId = tokens[1]
+    const prompt = tokens.slice(2).join(' ').trim()
+    if (!runId || !prompt) {
+      return {
+        success: false,
+        error: 'followup requires <run-id> and <prompt>',
+        usage: '/delegate followup <run-id> <prompt>',
+      }
+    }
+    return {
+      command: 'followup',
+      ...(await executeFollowup({ runId, prompt }, context)),
+    }
+  }
+
+  if (subcommand === 'runs') {
+    const parsedLimit = Number.parseInt(tokens[1] ?? '20', 10)
+    const runs = listRuns(context, Number.isFinite(parsedLimit) ? parsedLimit : 20)
+    return {
+      success: true,
+      command: 'runs',
+      count: runs.length,
+      runs: runs.map(run => ({
+        id: run.id,
+        provider: run.provider,
+        created_at: run.created_at,
+        status: run.status,
+        workflow_id: run.workflow_id,
+        prompt_preview: run.prompt_preview,
+      })),
+    }
+  }
+
+  if (subcommand === 'show') {
+    const runId = tokens[1]
+    if (!runId) return { success: false, error: 'show requires <run-id>', usage: '/delegate show <run-id>' }
+    const run = await loadRun(context, runId)
+    return run
+      ? { success: true, command: 'show', run: publicRunRecord(run) }
+      : { success: false, error: `Run not found: ${runId}` }
+  }
+
+  if (subcommand === 'exec-worktree') return executeWorktreeCommand(tokens, context)
+  return { success: false, error: `Unknown subcommand: ${subcommand}`, usage: COMMAND_USAGE }
+}
+
 export const ExternalCliDelegation: Plugin = async () => {
-  // Get zod schema builder. Bun's require() resolves from the OpenCode config
-  // node_modules even for symlinked plugins (unlike ESM static import).
-  const { tool: pluginTool } = require('@opencode-ai/plugin')
+  const { tool: pluginTool } = await import('@opencode-ai/plugin')
   const z = pluginTool.schema
 
   return {
     tool: {
-      delegate_command: {
-        description: 'Execute a /delegate subcommand. Pass the full command string in "input" (e.g. "status claude --auth", "ask auto Summarize this repo").',
+      delegate_command: pluginTool({
+        description: 'Execute a /delegate subcommand. Pass the full command string in "input".',
         args: {
-          input: z.string().default('').describe('Raw arguments string, e.g. "status claude --auth" or "ask claude Explain the auth flow"'),
+          input: z.string().default('').describe('Raw arguments, for example "status claude --auth" or "ask claude Explain this flow"'),
         },
-        async execute(args: { input?: string }) {
+        async execute(args: { input: string }, context: ToolContext) {
           try {
-            const input = (args?.input || '').trim()
-            const result = await executeDelegateCommand(input)
-            return JSON.stringify(result, null, 2)
-          } catch (err: unknown) {
-            const message = err instanceof Error ? err.message : String(err)
+            return JSON.stringify(await executeDelegateCommand(args.input.trim(), context), null, 2)
+          } catch (error) {
+            if (context.abort.aborted) throw error
+            const message = error instanceof Error ? error.message : String(error)
             return JSON.stringify({ success: false, error: `delegate_command crashed: ${message}` })
           }
         },
-      },
+      }),
 
-      delegate_preflight: {
+      delegate_preflight: pluginTool({
         description: 'Check external CLI delegation readiness for Claude and Gemini CLIs.',
         args: {
           providers: z.string().optional().describe('Comma-separated providers to check (claude,gemini). Defaults to both.'),
           checkAuth: z.boolean().optional().describe('Whether to probe provider auth state'),
         },
-        async execute(args) {
-          const requestedProviders = (args.providers || '').split(',').map(s => s.trim()).filter(Boolean)
-          const providers = requestedProviders
-            .filter((provider): provider is Provider => provider === 'claude' || provider === 'gemini')
-
-          const finalProviders: string[] = providers.length > 0 ? providers : ['claude', 'gemini']
-          const warningsFromInput: string[] = []
-
-          if (requestedProviders.length > 0 && providers.length !== requestedProviders.length) {
-            warningsFromInput.push('Some invalid providers were ignored. Valid values: claude, gemini.')
-          }
-
-          const checks = await Promise.all(
-            finalProviders.map(provider => preflightProvider(provider as Provider, {
+        async execute(args: { providers?: string; checkAuth?: boolean }, context: ToolContext) {
+          const requested = (args.providers ?? '').split(',').map(provider => provider.trim()).filter(Boolean)
+          const providers = requested.filter(isProvider)
+          const selected: DelegationProvider[] = providers.length > 0 ? providers : ['claude', 'gemini']
+          const inputWarnings = requested.length > providers.length
+            ? ['Some invalid providers were ignored. Valid values: claude, gemini.']
+            : []
+          const checks: PreflightResult[] = []
+          for (const provider of selected) {
+            checks.push(await preflightProvider(provider, context, {
               checkAuth: args.checkAuth !== false,
-              versionTimeoutMs: 3000,
-              authTimeoutMs: 2500,
-            })),
-          )
-
-          const warnings = checks.flatMap((check) => {
-            const list = (check as Record<string, unknown>).warnings
-            return Array.isArray(list) ? (list as string[]) : []
-          })
-
+              versionTimeoutMs: 3_000,
+              authTimeoutMs: 2_500,
+            }))
+          }
           return JSON.stringify({
             success: true,
             checked_at: nowIso(),
-            providers: checks,
-            warnings: [...warningsFromInput, ...warnings],
+            providers: checks.map(({ binary_path: _binaryPath, ...check }) => check),
+            warnings: [...inputWarnings, ...checks.flatMap(check => check.warnings)],
           }, null, 2)
         },
-      },
+      }),
 
-      delegate_run: {
-        description: 'Run a prompt through Claude CLI, Gemini CLI, or auto-fallback and persist metadata.',
+      delegate_run: pluginTool({
+        description: 'Run a prompt through Claude CLI, Gemini CLI, or provider fallback and persist a session-scoped record.',
         args: {
           provider: z.string().describe('Target provider: claude, gemini, or auto'),
-          prompt: z.string().describe('Prompt to send to provider CLI'),
+          prompt: z.string().describe('Prompt to send to the provider CLI'),
           outputFormat: z.string().optional().describe('Output format: text or json'),
           timeoutMs: z.number().optional().describe('Process timeout in milliseconds'),
           workflowId: z.string().optional().describe('Optional workflow ID for traceability'),
-          allowFallback: z.boolean().optional().describe('Allow fallback to next provider on failure'),
+          allowFallback: z.boolean().optional().describe('Allow fallback to the next external provider'),
           resumeToken: z.string().optional().describe('Optional provider-native session token for resume'),
           parentRunId: z.string().optional().describe('Optional run ID that this invocation follows'),
-          model: z.string().optional().describe('Model override for the provider CLI (e.g. "sonnet", "gemini-2.5-pro")'),
+          model: z.string().optional().describe('External provider CLI model alias, not an OpenCode provider/model ID'),
         },
-        async execute(args) {
+        async execute(args: {
+          provider: string
+          prompt: string
+          outputFormat?: string
+          timeoutMs?: number
+          workflowId?: string
+          allowFallback?: boolean
+          resumeToken?: string
+          parentRunId?: string
+          model?: string
+        }, context: ToolContext) {
           const result = await executeDelegation({
-            provider: args.provider as Provider | 'auto',
+            provider: args.provider,
             prompt: args.prompt,
-            outputFormat: args.outputFormat as OutputFormat | undefined,
+            outputFormat: args.outputFormat === 'json' ? 'json' : 'text',
             timeoutMs: args.timeoutMs,
             workflowId: args.workflowId,
             allowFallback: args.allowFallback,
-            resumeToken: args.resumeToken || null,
-            parentRunId: args.parentRunId || null,
-            model: args.model || null,
-          })
-
+            resumeToken: args.resumeToken ?? null,
+            parentRunId: args.parentRunId ?? null,
+            model: args.model ?? null,
+          }, context)
           return JSON.stringify(result.payload, null, 2)
         },
-      },
+      }),
 
-      delegate_followup: {
-        description: 'Send a follow-up prompt based on a previous delegation run.',
+      delegate_followup: pluginTool({
+        description: 'Send a follow-up prompt based on a session-scoped delegation run.',
         args: {
           runId: z.string().describe('Previous run ID to continue from'),
           prompt: z.string().describe('Follow-up prompt'),
           outputFormat: z.string().optional().describe('Output format: text or json'),
           timeoutMs: z.number().optional().describe('Process timeout in milliseconds'),
-          preferNativeResume: z.boolean().optional().describe('Try provider-native resume first if token exists'),
+          preferNativeResume: z.boolean().optional().describe('Try provider-native resume first if a token exists'),
         },
-        async execute(args) {
-          const previous = loadRun(args.runId)
-          if (!previous) {
-            return JSON.stringify({ success: false, error: `Run not found: ${args.runId}` }, null, 2)
-          }
-
-          const preferNative = args.preferNativeResume !== false
-          let useNative = false
-          let composedPrompt = args.prompt
-          let resumeToken: string | null = null
-          const warnings: string[] = []
-
-          if (preferNative && previous.resume_token) {
-            useNative = true
-            resumeToken = previous.resume_token
-          } else {
-            composedPrompt = buildStatelessFollowupPrompt(previous, args.prompt)
-            warnings.push('Stateless follow-up fallback used (no provider resume token available).')
-          }
-
-          const result = await executeDelegation({
-            provider: previous.provider,
-            prompt: composedPrompt,
-            outputFormat: (args.outputFormat as OutputFormat) || previous.output_format,
-            timeoutMs: args.timeoutMs || 120000,
-            workflowId: previous.workflow_id || undefined,
-            allowFallback: false,
-            resumeToken,
-            parentRunId: previous.id,
-          })
-
-          if (!result.ok) {
-            return JSON.stringify({
-              success: false,
-              error: 'Follow-up delegation failed',
-              used_native_resume: useNative,
-              warnings,
-              provider: previous.provider,
-              details: result.payload,
-            }, null, 2)
-          }
-
-          const parsed = result.payload
-
-          const mergedWarnings = [
-            ...warnings,
-            ...((Array.isArray(parsed.warnings) ? parsed.warnings : []) as string[]),
-          ]
-
-          return JSON.stringify({
-            ...parsed,
-            followup_of: previous.id,
-            used_native_resume: useNative,
-            warnings: mergedWarnings,
-          }, null, 2)
+        async execute(args: {
+          runId: string
+          prompt: string
+          outputFormat?: string
+          timeoutMs?: number
+          preferNativeResume?: boolean
+        }, context: ToolContext) {
+          const result = await executeFollowup({
+            runId: args.runId,
+            prompt: args.prompt,
+            outputFormat: args.outputFormat === 'json' ? 'json' : args.outputFormat === 'text' ? 'text' : undefined,
+            timeoutMs: args.timeoutMs,
+            preferNativeResume: args.preferNativeResume,
+          }, context)
+          return JSON.stringify(result, null, 2)
         },
-      },
+      }),
 
-      delegate_get_run: {
-        description: 'Get a stored delegation run record by ID.',
+      delegate_get_run: pluginTool({
+        description: 'Get a session-scoped delegation run record by ID.',
         args: {
           runId: z.string().describe('Delegation run ID'),
         },
-        async execute(args) {
-          const run = loadRun(args.runId)
-          if (!run) {
-            return JSON.stringify({ success: false, error: `Run not found: ${args.runId}` }, null, 2)
-          }
-
-          return JSON.stringify({
-            success: true,
-            run,
-          }, null, 2)
+        async execute(args: { runId: string }, context: ToolContext) {
+          const run = await loadRun(context, args.runId)
+          return JSON.stringify(run
+            ? { success: true, run: publicRunRecord(run) }
+            : { success: false, error: `Run not found: ${args.runId}` }, null, 2)
         },
-      },
+      }),
 
-      delegate_list_runs: {
-        description: 'List recent delegation runs.',
+      delegate_list_runs: pluginTool({
+        description: 'List recent delegation runs for the current session.',
         args: {
           limit: z.number().optional().describe('Maximum records to return (1-100)'),
         },
-        async execute(args) {
-          const limit = args?.limit || 20
-          const runs = listRuns(limit)
-
+        async execute(args: { limit?: number }, context: ToolContext) {
+          const runs = listRuns(context, args.limit ?? 20)
           return JSON.stringify({
             success: true,
             count: runs.length,
@@ -1265,7 +1772,7 @@ export const ExternalCliDelegation: Plugin = async () => {
             })),
           }, null, 2)
         },
-      },
+      }),
     },
   }
 }

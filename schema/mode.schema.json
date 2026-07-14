@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://opencode-workflows.example/schema/mode.schema.json",
+  "title": "OpenCode Workflow Mode",
+  "type": "object",
+  "properties": {
+    "name": { "type": "string", "minLength": 1 },
+    "description": { "type": "string", "minLength": 1 },
+    "agent_routing": {
+      "type": "object",
+      "additionalProperties": { "type": "string", "minLength": 1 }
+    },
+    "model_tiers": {
+      "type": "object",
+      "properties": {
+        "forbidden": {
+          "type": "array",
+          "items": { "enum": ["low", "mid", "high"] },
+          "uniqueItems": true
+        }
+      },
+      "required": ["forbidden"],
+      "additionalProperties": false
+    },
+    "settings": {
+      "type": "object",
+      "properties": {
+        "max_review_iterations": { "type": "integer", "minimum": 0 },
+        "max_security_iterations": { "type": "integer", "minimum": 0 },
+        "max_quality_gate_iterations": { "type": "integer", "minimum": 0 },
+        "max_completion_guard_iterations": { "type": "integer", "minimum": 0 },
+        "parallel_execution": { "type": "boolean" },
+        "test_required": { "type": "boolean" },
+        "escalation": { "type": "object" },
+        "swarm": { "type": "object" }
+      },
+      "required": [
+        "max_review_iterations",
+        "max_security_iterations",
+        "max_quality_gate_iterations",
+        "max_completion_guard_iterations",
+        "parallel_execution",
+        "test_required"
+      ],
+      "additionalProperties": false
+    },
+    "escalation": {
+      "type": "object",
+      "properties": {
+        "review_after": { "type": "integer", "minimum": 1 },
+        "review_escalate_to": { "type": "string", "minLength": 1 },
+        "security_after": { "type": "integer", "minimum": 1 },
+        "security_escalate_to": { "type": "string", "minLength": 1 }
+      },
+      "required": ["review_after", "review_escalate_to", "security_after", "security_escalate_to"],
+      "additionalProperties": false
+    },
+    "swarm": {
+      "type": "object",
+      "properties": {
+        "max_parallel_executors": { "type": "integer", "minimum": 1 },
+        "max_parallel_reviewers": { "type": "integer", "minimum": 1 },
+        "max_parallel_security": { "type": "integer", "minimum": 1 },
+        "validation_architects": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "delegation": {
+      "type": "object",
+      "properties": {
+        "max_parallel_worktrees": { "type": "integer", "minimum": 1 },
+        "review_after_each": { "type": "boolean" },
+        "merge_strategy": { "type": "string", "minLength": 1 },
+        "auto_init_files": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "required": ["name", "description", "agent_routing", "model_tiers", "settings"],
+  "additionalProperties": false
+}

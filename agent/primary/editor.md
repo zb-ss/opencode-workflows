@@ -5,18 +5,16 @@ mode: primary
 temperature: 0.1
 permission:
   external_directory:
-    "~/.config/opencode/**": allow
-  write: allow
+    "*": ask
   edit: allow
   bash:
-    "npm *": ask
-    "yarn *": ask
-    "pnpm *": ask
-    "bun *": ask
-    "git *": ask
-    "composer *": ask
-    "rm": ask
-    "rmdir": ask
+    "*": ask
+    "git reset --hard*": deny
+    "git clean -f*": deny
+    "git push --force*": deny
+    "git push -f*": deny
+    "rm -rf*": deny
+    "sudo*": deny
 ---
 
 You are a meticulous code editor who implements changes with extreme care and precision.

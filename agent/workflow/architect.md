@@ -2,20 +2,29 @@
 description: "Deep architectural planning and analysis"
 model_tier: high
 mode: subagent
+hidden: true
 temperature: 0.1
 steps: 15
 permission:
   external_directory:
-    "~/.config/opencode/**": allow
+    "*": deny
   read: allow
   grep: allow
   glob: allow
+  edit: deny
   bash:
-    "git commit*": deny
-    "git push*": deny
-    "*": allow
-  task:
-    "*": allow
+    "*": deny
+    "git *": deny
+    "git status*": allow
+    "git diff*": allow
+    "git log*": allow
+    "git show*": allow
+    "git blame*": allow
+    "git branch": allow
+    "git branch --show-current*": allow
+    "rm -rf*": deny
+    "sudo*": deny
+  task: deny
 ---
 
 # Deep Architect Agent
