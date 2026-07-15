@@ -22,9 +22,10 @@
 
   "default_mode": "standard",
 
-  "_comment_automation": "Automatic workflow driving is opt-in. Limits are optional and should be configured before enabling automation.",
+  "_comment_automation": "Automatic workflow driving is opt-in. Autonomy configures automatic-stage permission handling only and does not enable automation. Limits are optional and should be configured before enabling automation.",
   "automation": {
-    "enabled": false
+    "enabled": false,
+    "autonomy": "interactive"
   },
 
   "_comment_capabilities": "Capability values are disabled, auto, or required. Auto uses a capability when runtime support is detected. Required also stops automatic workflow start or resume when support is unavailable. These settings are never copied as unknown opencode.json keys.",

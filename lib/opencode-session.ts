@@ -1,4 +1,12 @@
-import type { Message, Part, Session, SessionStatus } from '@opencode-ai/sdk'
+import type { Message, OpencodeClient, Part, Session, SessionStatus } from '@opencode-ai/sdk'
+import type { Agent as V2Agent, OpencodeClient as V2OpencodeClient } from '@opencode-ai/sdk/v2'
+import {
+  evaluatePermissionRules,
+  parsePermissionRules,
+  resolveBoundedPermissionRules,
+  type AutonomyProfile,
+  type PermissionRule,
+} from './autonomy-policy.ts'
 
 export interface ModelSelection {
   model: string
@@ -8,6 +16,11 @@ export interface ModelSelection {
 export interface SessionPromptOptions {
   agent?: string
   model?: ModelSelection
+}
+
+export interface SessionCreateOptions {
+  agent?: string
+  autonomy?: AutonomyProfile
 }
 
 type SdkEnvelope<T> = {
@@ -54,18 +67,81 @@ function parseModel(selection: ModelSelection): { providerID: string; modelID: s
 }
 
 export class OpenCodeSessionAdapter {
+  private effectiveAgentRules?: Map<string, PermissionRule[]>
+
   constructor(
-    private readonly client: any,
+    private readonly client: OpencodeClient,
     private readonly directory: string,
+    private readonly autonomyClient?: V2OpencodeClient,
   ) {}
 
-  async create(title: string, parentID?: string): Promise<Session> {
+  async create(title: string, parentID?: string, options: SessionCreateOptions = {}): Promise<Pick<Session, 'id'>> {
+    if (options.autonomy === 'bounded') return this.createBounded(title, parentID, options.agent)
+
     const result = await this.client.session.create({
       body: { title, ...(parentID ? { parentID } : {}) },
       query: { directory: this.directory },
       throwOnError: true,
     })
     return unwrapSdkResult<Session>(result, 'session.create')
+  }
+
+  private async createBounded(
+    title: string,
+    parentID: string | undefined,
+    agent: string | undefined,
+  ): Promise<Pick<Session, 'id'>> {
+    if (!agent) throw new Error('bounded session creation requires an agent')
+    if (!this.autonomyClient) throw new Error('bounded session creation requires the OpenCode v2 client')
+    const permission = resolveBoundedPermissionRules(await this.agentRules(agent))
+    const result = await this.autonomyClient.session.create({
+      directory: this.directory,
+      title,
+      ...(parentID ? { parentID } : {}),
+      agent,
+      permission,
+    }, { throwOnError: true })
+    return unwrapSdkResult<Pick<Session, 'id'>>(result, 'session.create')
+  }
+
+  async assertPermissionAllowed(agent: string, permission: string, patterns: string[]): Promise<void> {
+    const rules = await this.agentRules(agent)
+    for (const pattern of patterns) {
+      const action = evaluatePermissionRules(rules, permission, pattern)
+      if (action !== 'allow') {
+        throw new Error(
+          `bounded autonomy requires ${agent} to silently allow ${permission} permission for ${pattern}; resolved action is ${action}`,
+        )
+      }
+    }
+  }
+
+  private async agentRules(agent: string): Promise<PermissionRule[]> {
+    const rules = (await this.loadEffectiveAgentRules()).get(agent)
+    if (!rules) throw new Error(`bounded session agent not found: ${agent}`)
+    return rules.map((rule) => ({ ...rule }))
+  }
+
+  private async loadEffectiveAgentRules(): Promise<Map<string, PermissionRule[]>> {
+    if (this.effectiveAgentRules) return this.effectiveAgentRules
+    if (!this.autonomyClient) throw new Error('bounded session creation requires the OpenCode v2 client')
+
+    const result = await this.autonomyClient.app.agents({ directory: this.directory }, { throwOnError: true })
+    const agents = unwrapSdkResult<V2Agent[]>(result, 'app.agents')
+
+    const effectiveAgentRules = new Map<string, PermissionRule[]>()
+    for (const [index, candidate] of agents.entries()) {
+      if (typeof candidate !== 'object' || candidate === null || Array.isArray(candidate)) {
+        throw new Error(`app.agents returned malformed agent ${index}`)
+      }
+      const { name, permission } = candidate as { name?: unknown; permission?: unknown }
+      if (typeof name !== 'string' || name === '' || effectiveAgentRules.has(name)) {
+        throw new Error(`app.agents returned malformed agent ${index}`)
+      }
+      effectiveAgentRules.set(name, parsePermissionRules(permission))
+    }
+    this.effectiveAgentRules = effectiveAgentRules
+    return effectiveAgentRules
   }
 
   async promptAsync(sessionID: string, prompt: string, options: SessionPromptOptions = {}): Promise<void> {

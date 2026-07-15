@@ -13,6 +13,7 @@
     "directory",
     "worktree",
     "mode",
+    "autonomy",
     "task",
     "status",
     "pause_reason",
@@ -30,6 +31,7 @@
     "directory": { "type": "string", "minLength": 1 },
     "worktree": { "type": "string", "minLength": 1 },
     "mode": { "type": "string", "minLength": 1 },
+    "autonomy": { "type": "string", "enum": ["interactive", "bounded"] },
     "task": { "type": "string", "minLength": 1 },
     "status": {
       "type": "string",
@@ -90,6 +92,8 @@
             "max_wall_time_ms",
             "max_input_tokens",
             "max_output_tokens",
+            "max_bounded_read_bytes",
+            "max_bounded_write_bytes",
             "max_cost_usd"
           ],
           "properties": {
@@ -99,19 +103,32 @@
             "max_wall_time_ms": { "type": "integer", "minimum": 1 },
             "max_input_tokens": { "type": "integer", "minimum": 0 },
             "max_output_tokens": { "type": "integer", "minimum": 0 },
+            "max_bounded_read_bytes": { "type": "integer", "minimum": 0, "maximum": 16777216 },
+            "max_bounded_write_bytes": { "type": "integer", "minimum": 0, "maximum": 16777216 },
             "max_cost_usd": { "type": ["number", "null"], "minimum": 0 }
           }
         },
         "usage": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["sessions", "attempts", "input_tokens", "output_tokens", "cost_usd", "messages"],
+          "required": [
+            "sessions",
+            "attempts",
+            "input_tokens",
+            "output_tokens",
+            "cost_usd",
+            "bounded_read_bytes",
+            "bounded_write_bytes",
+            "messages"
+          ],
           "properties": {
             "sessions": { "type": "integer", "minimum": 0 },
             "attempts": { "type": "integer", "minimum": 0 },
             "input_tokens": { "type": "integer", "minimum": 0 },
             "output_tokens": { "type": "integer", "minimum": 0 },
             "cost_usd": { "type": "number", "minimum": 0 },
+            "bounded_read_bytes": { "type": "integer", "minimum": 0 },
+            "bounded_write_bytes": { "type": "integer", "minimum": 0 },
             "messages": {
               "type": "object",
               "additionalProperties": {

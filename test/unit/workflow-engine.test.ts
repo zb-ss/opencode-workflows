@@ -31,11 +31,16 @@ class FakeAdapter implements WorkflowSessionAdapter {
   readonly messagesBySession = new Map<string, any[]>()
   readonly statusBySession: Record<string, any> = {}
   statusError: Error | null = null
+  abortError: Error | null = null
   private sequence = 0
 
-  async create(title: string, _parentID?: string): Promise<any> {
+  async create(
+    title: string,
+    _parentID?: string,
+    options?: { agent?: string; autonomy?: 'interactive' | 'bounded' },
+  ): Promise<any> {
     const id = `child-${++this.sequence}`
-    this.calls.push({ name: 'create', sessionId: id, title })
+    this.calls.push({ name: 'create', sessionId: id, title, options })
     this.statusBySession[id] = { type: 'busy' }
     return { id }
   }
@@ -46,6 +51,7 @@ class FakeAdapter implements WorkflowSessionAdapter {
 
   async abort(sessionId: string): Promise<void> {
     this.calls.push({ name: 'abort', sessionId })
+    if (this.abortError) throw this.abortError
     delete this.statusBySession[sessionId]
   }
 
@@ -100,6 +106,8 @@ function limits(overrides: Partial<AutomationLimits> = {}): AutomationLimits {
     max_wall_time_ms: 60_000,
     max_input_tokens: 10_000,
     max_output_tokens: 10_000,
+    max_bounded_read_bytes: 10_000,
+    max_bounded_write_bytes: 10_000,
     max_cost_usd: 10,
     ...overrides,
   }
@@ -134,6 +142,7 @@ function createEngine(
     state?: ReturnType<typeof loadAutomaticWorkflowState>
     schedulingEnabled?: boolean
     candidates?: Array<{ model: string; variant?: string }>
+    autonomy?: 'interactive' | 'bounded'
   } = {},
 ): { engine: WorkflowEngine; statePath: string; definitionPath: string } {
   const directory = options.directory ?? fs.mkdtempSync(path.join(os.tmpdir(), 'workflow-engine-'))
@@ -151,6 +160,7 @@ function createEngine(
     limits: limits(options.budget),
     state: options.state,
     schedulingEnabled: options.schedulingEnabled,
+    autonomy: options.autonomy,
     now: options.now,
   })
   engines.push(engine)
@@ -212,6 +222,37 @@ describe('declarative workflow validation', () => {
     assert.throws(() => parseStageResult('VERDICT: PASS'), /not valid JSON/)
     assert.throws(() => parseStageResult('{"status":"passed","summary":"ok","extra":true}'), /unsupported properties/)
     assert.throws(() => parseStageResult('{"status":"passed","summary":""}'), /non-empty string/)
+    assert.deepEqual(parseStageResult(JSON.stringify({
+      status: 'blocked',
+      summary: 'Approval is unavailable',
+      blocker_code: 'approval_required',
+      required_action: 'Grant deployment approval',
+    })), {
+      status: 'blocked',
+      summary: 'Approval is unavailable',
+      blocker_code: 'approval_required',
+      required_action: 'Grant deployment approval',
+    })
+    assert.throws(
+      () => parseStageResult('{"status":"blocked","summary":"waiting"}'),
+      /required_action must be provided/,
+    )
+    assert.throws(
+      () => parseStageResult('{"status":"blocked","summary":"waiting","blocker_code":"NOT SAFE","required_action":"approve"}'),
+      /safe identifier/,
+    )
+    assert.throws(
+      () => parseStageResult('{"status":"passed","summary":"ok","retryable":true}'),
+      /passed stage result must not define retryable/,
+    )
+    assert.throws(
+      () => parseStageResult('{"status":"failed","summary":"no","required_action":"approve"}'),
+      /failed stage result must not define blocker fields/,
+    )
+    assert.throws(
+      () => parseStageResult('{"status":"blocked","summary":"waiting","required_action":"approve","retryable":false}'),
+      /blocked stage result must not define retryable/,
+    )
   })
 
   it('compiles all public JSON schemas in draft 2020-12 mode', () => {
@@ -226,6 +267,36 @@ describe('declarative workflow validation', () => {
     ajv.addSchema(stageResult)
     assert.doesNotThrow(() => ajv.compile(definitionSchema))
     assert.doesNotThrow(() => ajv.compile(stateSchema))
+  })
+
+  it('validates blocked results through the public stage-result schema', () => {
+    const AjvConstructor = Ajv2020 as unknown as new (options: object) => {
+      compile(schema: object): (input: unknown) => boolean
+    }
+    const ajv = new AjvConstructor({ strict: true })
+    const schema = JSON.parse(fs.readFileSync(path.resolve('schema/stage-result.schema.json'), 'utf8'))
+    const validate = ajv.compile(schema)
+    assert.equal(validate({
+      status: 'blocked',
+      summary: 'Credentials unavailable',
+      blocker_code: 'credentials_required',
+      required_action: 'Provide a scoped credential',
+    }), true)
+    assert.equal(validate({ status: 'blocked', summary: 'Credentials unavailable' }), false)
+    assert.equal(validate({ status: 'passed', summary: 'Done', retryable: true }), false)
+    assert.equal(validate({ status: 'failed', summary: 'No', required_action: 'Approve' }), false)
+    assert.equal(validate({
+      status: 'blocked',
+      summary: 'Credentials unavailable',
+      required_action: 'Provide a scoped credential',
+      retryable: false,
+    }), false)
+    assert.equal(validate({
+      status: 'blocked',
+      summary: 'Credentials unavailable',
+      required_action: 'Provide a scoped credential',
+      unexpected: true,
+    }), false)
   })
 
   it('routes every installed definition stage in every automatic mode', () => {
@@ -290,6 +361,209 @@ describe('WorkflowEngine scheduling and events', () => {
     assert.equal(engine.snapshot().status, 'failed')
   })
 
+  it('pauses on a blocked result, preserves blocker details, and blocks descendants without retrying', async () => {
+    const adapter = new FakeAdapter()
+    const { engine } = createEngine(definition([
+      { id: 'source' },
+      { id: 'dependent', depends_on: ['source'] },
+      { id: 'grandchild', depends_on: ['dependent'] },
+    ]), adapter)
+    await start(engine)
+    await complete(engine, adapter, 'source', {
+      status: 'blocked',
+      summary: 'Production access is unavailable',
+      details: ['The current identity is read-only'],
+      blocker_code: 'access_required',
+      required_action: 'Grant scoped production access',
+    })
+
+    const state = engine.snapshot()
+    assert.equal(state.status, 'paused')
+    assert.match(state.pause_reason!, /access_required/)
+    assert.equal(state.stages.source.status, 'blocked')
+    assert.deepEqual(state.stages.source.result, {
+      status: 'blocked',
+      summary: 'Production access is unavailable',
+      details: ['The current identity is read-only'],
+      blocker_code: 'access_required',
+      required_action: 'Grant scoped production access',
+    })
+    assert.equal(state.stages.source.attempt, 1)
+    assert.equal(state.stages.dependent.status, 'blocked')
+    assert.equal(state.stages.grandchild.status, 'blocked')
+    assert.equal(adapter.calls.filter((call) => call.name === 'create').length, 1)
+  })
+
+  it('aborts parallel siblings when one stage blocks', async () => {
+    const adapter = new FakeAdapter()
+    const { engine } = createEngine(definition([{ id: 'source' }, { id: 'sibling' }]), adapter)
+    await start(engine)
+    const sourceSession = engine.snapshot().stages.source.session_id!
+    const siblingSession = engine.snapshot().stages.sibling.session_id!
+    adapter.setResult(sourceSession, {
+      status: 'blocked',
+      summary: 'Approval unavailable',
+      required_action: 'A trusted operator decision',
+    })
+
+    await engine.handleEvent({ type: 'session.idle', properties: { sessionID: sourceSession } })
+
+    const state = engine.snapshot()
+    assert.equal(state.status, 'paused')
+    assert.equal(state.stages.source.status, 'blocked')
+    assert.equal(state.stages.sibling.status, 'pending')
+    assert.equal(state.stages.sibling.session_id, null)
+    assert.equal(adapter.calls.some((call) => call.name === 'abort' && call.sessionId === siblingSession), true)
+  })
+
+  it('retains ownership after an abort failure and restores paused wall-time enforcement', async () => {
+    let now = 0
+    const adapter = new FakeAdapter()
+    adapter.abortError = new Error('abort endpoint unavailable')
+    const workflowDefinition = definition([{ id: 'source' }, { id: 'sibling' }])
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'workflow-engine-abort-failure-'))
+    temporaryDirectories.push(directory)
+    const original = createEngine(workflowDefinition, adapter, {
+      directory,
+      budget: { max_wall_time_ms: 20 },
+      now: () => now,
+    })
+    await start(original.engine)
+    const sourceSession = original.engine.snapshot().stages.source.session_id!
+    const siblingSession = original.engine.snapshot().stages.sibling.session_id!
+    adapter.setResult(sourceSession, {
+      status: 'blocked',
+      summary: 'Approval unavailable',
+      required_action: 'A trusted operator decision',
+    })
+
+    await original.engine.handleEvent({ type: 'session.idle', properties: { sessionID: sourceSession } })
+    const paused = original.engine.snapshot()
+    assert.equal(paused.status, 'paused')
+    assert.equal(paused.stages.sibling.status, 'running')
+    assert.equal(paused.stages.sibling.session_id, siblingSession)
+    assert.match(paused.stages.sibling.error!, /abort failed/)
+    assert.equal(original.engine.ownsSession(siblingSession), true)
+    original.engine.dispose()
+
+    adapter.abortError = null
+    now = 21
+    const restored = createEngine(workflowDefinition, adapter, {
+      directory,
+      budget: { max_wall_time_ms: 20 },
+      now: () => now,
+      state: loadAutomaticWorkflowState(original.statePath),
+      schedulingEnabled: false,
+    })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+
+    const expired = restored.engine.snapshot()
+    assert.equal(expired.status, 'paused')
+    assert.match(expired.pause_reason!, /wall-time budget exhausted/i)
+    assert.equal(expired.stages.sibling.status, 'pending')
+    assert.equal(expired.stages.sibling.session_id, null)
+    assert.equal(adapter.calls.filter((call) => call.name === 'abort' && call.sessionId === siblingSession).length, 2)
+  })
+
+  it('resets a direct blocker and dependency-blocked descendants on resume but preserves failures', async () => {
+    const adapter = new FakeAdapter()
+    const { engine } = createEngine(definition([
+      { id: 'blocked_source' },
+      { id: 'dependent', depends_on: ['blocked_source'] },
+      { id: 'grandchild', depends_on: ['dependent'] },
+      { id: 'terminal_failure' },
+    ]), adapter)
+    await start(engine)
+    await complete(engine, adapter, 'terminal_failure', {
+      status: 'failed',
+      summary: 'A terminal check failed',
+      retryable: false,
+    })
+    await complete(engine, adapter, 'blocked_source', {
+      status: 'blocked',
+      summary: 'Approval is unavailable',
+      required_action: 'Approve the operation',
+    })
+
+    assert.equal(engine.snapshot().stages.terminal_failure.status, 'failed')
+    await engine.resume()
+    const resumed = engine.snapshot()
+    assert.equal(resumed.status, 'running')
+    assert.equal(resumed.stages.blocked_source.status, 'running')
+    assert.equal(resumed.stages.blocked_source.attempt, 2)
+    assert.equal(resumed.stages.blocked_source.result, null)
+    assert.equal(resumed.stages.dependent.status, 'pending')
+    assert.equal(resumed.stages.grandchild.status, 'pending')
+    assert.equal(resumed.stages.terminal_failure.status, 'failed')
+  })
+
+  it('forbids questions in stage prompts and passes agent plus autonomy to session creation', async () => {
+    const interactiveAdapter = new FakeAdapter()
+    const { engine: interactiveEngine } = createEngine(definition([{ id: 'inspect' }]), interactiveAdapter)
+    await start(interactiveEngine)
+    assert.deepEqual(interactiveAdapter.calls.find((call) => call.name === 'create')?.options, {
+      agent: 'wf-inspect-agent',
+      autonomy: 'interactive',
+    })
+    const prompt = interactiveAdapter.calls.find((call) => call.name === 'prompt')?.prompt ?? ''
+    assert.match(prompt, /Do not ask questions/)
+    assert.match(prompt, /required information, access, credentials, approval, or authority is unavailable/)
+    assert.match(prompt, /Return status "blocked"/)
+    assert.doesNotMatch(prompt, /passed\|failed\|blocked/)
+    assert.match(prompt, /\{"status":"passed"/)
+    assert.match(prompt, /\{"status":"failed"/)
+    assert.match(prompt, /\{"status":"blocked"/)
+
+    const boundedAdapter = new FakeAdapter()
+    const { engine: boundedEngine } = createEngine(definition([{ id: 'inspect' }]), boundedAdapter, {
+      autonomy: 'bounded',
+    })
+    await start(boundedEngine)
+    assert.deepEqual(boundedAdapter.calls.find((call) => call.name === 'create')?.options, {
+      agent: 'wf-inspect-agent',
+      autonomy: 'bounded',
+    })
+    assert.match(boundedAdapter.calls.find((call) => call.name === 'prompt')?.prompt ?? '', /workflow_bounded_write/)
+    assert.equal(boundedEngine.snapshot().autonomy, 'bounded')
+  })
+
+  it('persists autonomy and rejects a restored profile mismatch', async () => {
+    const adapter = new FakeAdapter()
+    const workflowDefinition = definition([{ id: 'inspect' }])
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'workflow-engine-autonomy-'))
+    temporaryDirectories.push(directory)
+    const original = createEngine(workflowDefinition, adapter, { directory, autonomy: 'bounded' })
+    await start(original.engine)
+    original.engine.dispose()
+    const saved = loadAutomaticWorkflowState(original.statePath)
+    assert.equal(saved.autonomy, 'bounded')
+
+    const legacyPath = path.join(directory, 'legacy-state.json')
+    const legacy = structuredClone(saved) as unknown as Record<string, unknown>
+    delete legacy.autonomy
+    const legacyBudget = legacy.budget as { usage: Record<string, unknown> }
+    const legacyLimits = (legacy.budget as { limits: Record<string, unknown> }).limits
+    delete legacyLimits.max_bounded_read_bytes
+    delete legacyLimits.max_bounded_write_bytes
+    delete legacyBudget.usage.bounded_read_bytes
+    delete legacyBudget.usage.bounded_write_bytes
+    fs.writeFileSync(legacyPath, `${JSON.stringify(legacy, null, 2)}\n`)
+    const normalizedLegacy = loadAutomaticWorkflowState(legacyPath)
+    assert.equal(normalizedLegacy.autonomy, 'interactive')
+    assert.equal(normalizedLegacy.budget.usage.bounded_read_bytes, 0)
+    assert.equal(normalizedLegacy.budget.usage.bounded_write_bytes, 0)
+    assert.equal(normalizedLegacy.budget.limits.max_bounded_read_bytes, 0)
+    assert.equal(normalizedLegacy.budget.limits.max_bounded_write_bytes, 0)
+
+    assert.throws(
+      () => createEngine(workflowDefinition, adapter, { directory, state: saved, autonomy: 'interactive' }),
+      /saved workflow autonomy does not match/,
+    )
+    const restored = createEngine(workflowDefinition, adapter, { directory, state: saved })
+    assert.equal(restored.engine.snapshot().autonomy, 'bounded')
+    assert.equal(restored.engine.usesBoundedAutonomy(), true)
+  })
+
   it('ignores duplicate terminal events and never releases two scheduling slots', async () => {
     const adapter = new FakeAdapter()
     const { engine } = createEngine(definition([
@@ -326,6 +600,36 @@ describe('WorkflowEngine scheduling and events', () => {
 })
 
 describe('WorkflowEngine budgets and persistence', () => {
+  it('atomically reserves cumulative bounded read and write bytes', async () => {
+    const adapter = new FakeAdapter()
+    const { engine } = createEngine(definition([{ id: 'io' }]), adapter, {
+      budget: { max_bounded_read_bytes: 5, max_bounded_write_bytes: 5 },
+      autonomy: 'bounded',
+    })
+    await start(engine)
+
+    const reads = await Promise.allSettled([
+      engine.reserveBoundedIo('read', 4),
+      engine.reserveBoundedIo('read', 4),
+    ])
+    assert.equal(reads.filter((result) => result.status === 'fulfilled').length, 1)
+    assert.equal(reads.filter((result) => result.status === 'rejected').length, 1)
+    const readReservation = reads.find((result) => result.status === 'fulfilled')!.value
+    await readReservation.commit()
+    const writeReservation = await engine.reserveBoundedIo('write', 5)
+    await assert.rejects(engine.reserveBoundedIo('write', 1), /byte budget exhausted/)
+    await writeReservation.adjust(3)
+    await writeReservation.cancel()
+    await assert.doesNotReject(writeReservation.cancel())
+    const finalWrite = await engine.reserveBoundedIo('write', 5)
+    await finalWrite.commit()
+    await assert.rejects(finalWrite.adjust(4), /reservation is closed/)
+    const ordered = await engine.reserveBoundedIo('read', 1)
+    await Promise.all([ordered.cancel(), ordered.commit()])
+    assert.equal(engine.snapshot().budget.usage.bounded_read_bytes, 4)
+    assert.equal(engine.snapshot().budget.usage.bounded_write_bytes, 5)
+  })
+
   it('pauses instead of false-completing when session or attempt budgets are exhausted', async () => {
     const sessionAdapter = new FakeAdapter()
     const { engine: sessionEngine } = createEngine(definition([
@@ -477,6 +781,8 @@ describe('AutoWorkflow production plugin integration', () => {
         max_wall_time_ms: 60_000,
         max_input_tokens: 1_000,
         max_output_tokens: 1_000,
+        max_bounded_read_bytes: 1_000,
+        max_bounded_write_bytes: 1_000,
         max_cost_usd: 1,
       },
     }))
@@ -515,7 +821,7 @@ describe('AutoWorkflow production plugin integration', () => {
       },
     }
     try {
-      const hooks = await AutoWorkflow({ client, directory: '/project/app' } as any)
+      const hooks = await AutoWorkflow({ client, directory: '/project/app', serverUrl: new URL('http://localhost') } as any)
       const permissionRequests: any[] = []
       const context: ToolContext = {
         sessionID: 'plugin-root',
@@ -542,6 +848,7 @@ describe('AutoWorkflow production plugin integration', () => {
       const status = JSON.parse(await hooks.tool!.workflow_auto_status.execute({}, context) as string)
       assert.equal(status.active, true)
       assert.equal(status.workflow.status, 'running')
+      assert.equal(status.workflow.autonomy, 'interactive')
       for (const toolName of ['task', 'delegate_run', 'delegation_execute_batch', 'swarm_spawn_batch', 'workflow_auto_start']) {
         await assert.rejects(
           hooks['tool.execute.before']!({ tool: toolName, sessionID: 'plugin-child', callID: `call-${toolName}` }, { args: {} }),
@@ -553,7 +860,11 @@ describe('AutoWorkflow production plugin integration', () => {
       )
       await hooks.dispose?.()
 
-      const foreignHooks = await AutoWorkflow({ client, directory: '/other-project' } as any)
+      const foreignHooks = await AutoWorkflow({
+        client,
+        directory: '/other-project',
+        serverUrl: new URL('http://localhost'),
+      } as any)
       const foreignContext = { ...context, directory: '/other-project', worktree: '/other-project' }
       const foreignStatus = JSON.parse(
         await foreignHooks.tool!.workflow_auto_status.execute({}, foreignContext) as string,

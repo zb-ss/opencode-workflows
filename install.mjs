@@ -15,6 +15,8 @@ const MIN_OPENCODE_VERSION = '1.17.20'
 const ENV_FILE_NAME = 'opencode-workflows.env'
 const MODEL_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*\/\S+$/
 const VARIANT_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
+const AUTONOMY_PROFILES = new Set(['interactive', 'bounded'])
+export const MAX_BOUNDED_IO_BYTES = 16 * 1024 * 1024
 const CAPABILITY_ENVIRONMENT = {
   background_subagents: 'OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS',
   native_workspaces: 'OPENCODE_EXPERIMENTAL_WORKSPACES',
@@ -154,10 +156,10 @@ function legacyBackupPath(configDir, target) {
   return nextBackupPath(path.join(configDir, '.opencode-workflows-backups', relative))
 }
 
-function writeFileNoFollow(target, content, mode = 0o600) {
+function writeFileNoFollow(target, content, mode = 0o600, exclusive = false) {
   const flags = fs.constants.O_WRONLY
     | fs.constants.O_CREAT
-    | fs.constants.O_TRUNC
+    | (exclusive ? fs.constants.O_EXCL : fs.constants.O_TRUNC)
     | (fs.constants.O_NOFOLLOW ?? 0)
   const fd = fs.openSync(target, flags, mode)
   try {
@@ -955,27 +957,96 @@ export function migrateWorkflowConfig(dryRun = false) {
     }
   }
 
+  if (config.automation?.enabled === true && typeof config.automation === 'object' && !Array.isArray(config.automation)) {
+    for (const target of ['max_bounded_read_bytes', 'max_bounded_write_bytes']) {
+      if (config.automation[target] === undefined) {
+        config.automation[target] = 0
+        changed = true
+      }
+    }
+  }
+
+  // Loading supplies this default without rewriting user configuration. A migration
+  // persists it only when another normalization has already made a write necessary.
+  if (changed && config.automation && typeof config.automation === 'object'
+    && !Array.isArray(config.automation) && config.automation.autonomy === undefined) {
+    config.automation.autonomy = 'interactive'
+  }
+
   if (!changed) {
     console.log('workflows.json is already current; no migration needed.')
     return
   }
   if (dryRun) {
-    console.log('Migration would normalize workflow candidates, capability flags, and delegation settings.')
+    console.log('Migration would normalize workflow candidates, capability flags, bounded byte budgets, and delegation settings.')
     return
   }
 
-  const backupPath = nextBackupPath(filePath)
-  assertSafeManagedParent(configDir, filePath)
-  assertSafeManagedParent(configDir, backupPath)
-  fs.copyFileSync(filePath, backupPath)
-  const temporaryPath = `${filePath}.tmp-${process.pid}`
   const originalMode = fs.statSync(filePath).mode & 0o777
-  writeFileNoFollow(temporaryPath, `${JSON.stringify(config, null, 2)}\n`, originalMode)
-  fs.renameSync(temporaryPath, filePath)
-  try { fs.chmodSync(filePath, originalMode) } catch {}
+  const backupPath = writeJsonConfigWithBackup(configDir, filePath, config, originalMode)
   console.log(`Migrated ${filePath}`)
   console.log(`Original preserved at ${backupPath}`)
   console.log('Restart OpenCode to load the migrated workflow configuration.')
+}
+
+function writeJsonConfigWithBackup(configDir, filePath, value, mode = 0o600) {
+  const backupPath = nextBackupPath(filePath)
+  const temporaryPath = `${filePath}.tmp-${crypto.randomUUID()}`
+  assertSafeManagedParent(configDir, filePath)
+  assertSafeManagedParent(configDir, backupPath)
+  writeFileNoFollow(backupPath, fs.readFileSync(filePath), 0o600, true)
+  try {
+    writeFileNoFollow(temporaryPath, `${JSON.stringify(value, null, 2)}\n`, mode, true)
+    fs.renameSync(temporaryPath, filePath)
+    try { fs.chmodSync(filePath, mode) } catch {}
+  } finally {
+    if (pathExists(temporaryPath)) fs.unlinkSync(temporaryPath)
+  }
+  return backupPath
+}
+
+export function configureAutonomy(profile, dryRun = false) {
+  if (!AUTONOMY_PROFILES.has(profile)) {
+    throw new Error(`Invalid autonomy profile: ${profile}. Expected interactive or bounded.`)
+  }
+
+  const configDir = getConfigDir()
+  const filePath = path.join(configDir, 'workflows.json')
+  if (!pathExists(filePath)) throw new Error(`No workflows.json found in ${configDir}.`)
+  const stat = fs.lstatSync(filePath)
+  if (stat.isSymbolicLink() || !stat.isFile()) {
+    throw new Error(`workflows.json must be a regular file: ${filePath}`)
+  }
+
+  let config
+  try {
+    config = JSON.parse(fs.readFileSync(filePath, 'utf8'))
+  } catch (error) {
+    throw new Error(`Cannot parse workflows.json: ${error instanceof Error ? error.message : String(error)}`)
+  }
+  if (!config || typeof config !== 'object' || Array.isArray(config)) {
+    throw new Error('workflows.json must contain a JSON object.')
+  }
+  if (!config.automation || typeof config.automation !== 'object' || Array.isArray(config.automation)) {
+    throw new Error('workflows.json automation must be an object; no settings were changed.')
+  }
+  if (config.automation.autonomy === profile) {
+    console.log(`Autonomy is already ${profile}; no changes needed.`)
+    return
+  }
+
+  config.automation.autonomy = profile
+  if (dryRun) {
+    console.log(`[dry-run] Would set automation.autonomy to ${profile} in ${filePath}.`)
+    console.log('Autonomy configures automatic-stage permission handling only; automation and budgets are unchanged.')
+    return
+  }
+
+  const backupPath = writeJsonConfigWithBackup(configDir, filePath, config)
+  console.log(`Set automation.autonomy to ${profile} in ${filePath}.`)
+  console.log(`Original preserved at ${backupPath}`)
+  console.log('Autonomy configures automatic-stage permission handling only; automation and budgets are unchanged.')
+  console.log('Restart OpenCode to load the updated workflow configuration.')
 }
 
 export function uninstall(dryRun = false) {
@@ -1041,8 +1112,11 @@ Options:
   --module <name>        Install core or translation module
   --doctor               Validate version, config, manifest, and managed files
   --migrate              Migrate model candidates, capability flags, and delegation settings
+  --autonomy <profile>   Set automatic-stage permission handling to interactive or
+                         bounded only; does not
+                         enable automation or create/change automation budgets
   --uninstall            Safely remove owned installed files; preserve user configs
-  --dry-run              Preview install, migration, or uninstall actions
+  --dry-run              Preview install, autonomy, migration, or uninstall actions
   --help                 Show this help
 
 Runtime model inheritance is the default. Candidate availability and variants are
@@ -1057,8 +1131,8 @@ function parseCli(args) {
   ])
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index]
-    if (arg === '--module') {
-      if (!args[index + 1]) throw new Error('--module requires a name.')
+    if (arg === '--module' || arg === '--autonomy') {
+      if (!args[index + 1] || args[index + 1].startsWith('--')) throw new Error(`${arg} requires a value.`)
       index += 1
       continue
     }
@@ -1070,10 +1144,19 @@ export function main(args = process.argv.slice(2)) {
   parseCli(args)
   if (args.includes('--help') || args.includes('-h')) return printHelp()
   const dryRun = args.includes('--dry-run')
-  const actions = ['--doctor', '--migrate', '--uninstall'].filter((flag) => args.includes(flag))
+  const actions = ['--doctor', '--migrate', '--autonomy', '--uninstall'].filter((flag) => args.includes(flag))
   if (actions.length > 1) throw new Error(`${actions.join(', ')} cannot be combined.`)
   if (args.includes('--doctor')) return doctor()
   if (args.includes('--migrate')) return migrateWorkflowConfig(dryRun)
+  if (args.includes('--autonomy')) {
+    const autonomyIndex = args.indexOf('--autonomy')
+    const allowedIndexes = new Set([autonomyIndex, autonomyIndex + 1])
+    const unsupported = args.filter((arg, index) => arg !== '--dry-run' && !allowedIndexes.has(index))
+    if (unsupported.length > 0 || args.lastIndexOf('--autonomy') !== autonomyIndex) {
+      throw new Error('--autonomy can only be combined with --dry-run.')
+    }
+    return configureAutonomy(args[autonomyIndex + 1], dryRun)
+  }
   if (args.includes('--uninstall')) return uninstall(dryRun)
 
   const modules = ['core']

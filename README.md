@@ -76,6 +76,8 @@ node install.mjs --module translate      # Add translation to the core install
 node install.mjs --materialize-models    # Bake configured model candidates into frontmatter
 node install.mjs --doctor                # Check version, schema, manifest, ownership, and capabilities
 node install.mjs --migrate               # Normalize legacy workflows.json data
+node install.mjs --autonomy bounded      # Select bounded automatic-stage permissions
+node install.mjs --autonomy interactive  # Restore attended permission handling
 node install.mjs --uninstall             # Remove only verified installer-owned files
 node install.mjs --migrate --dry-run     # Preview a migration
 node install.mjs --uninstall --dry-run   # Preview an uninstall
@@ -136,17 +138,30 @@ Manual enforcement tracks and checks state; it does not autonomously run the nex
 
 Automatic workflow driving is disabled by default. It supports only the installed `development` and `e2e` JSON DAGs:
 
+```bash
+node install.mjs --autonomy bounded --dry-run
+node install.mjs --autonomy bounded
+```
+
+These commands update only `automation.autonomy` in an existing `workflows.json`. Configure `automation.enabled: true` and every required budget separately, then restart OpenCode and start the workflow:
+
 ```text
 /workflow-auto development Implement the requested change --mode=standard
 /workflow-auto e2e Verify the checkout flow --mode=thorough
 /workflow-auto-resume
 ```
 
-Before enabling automation, configure every required budget in `workflows.json`: child sessions, parallel sessions, attempts per stage, wall time, input tokens, output tokens, and cost. `max_cost_usd` may be `null`; the field is still required.
+Before enabling automation, configure child-session, parallel-session, attempt, wall-time, input-token, output-token, bounded-read-byte, bounded-write-byte, and cost budgets in `workflows.json`. `max_cost_usd` may be `null`; the field is still required. Bounded file I/O atomically reserves complete serialized read/list responses against `max_bounded_read_bytes` and written UTF-8 content against `max_bounded_write_bytes`, independently of normal model-token accounting. Each bounded byte limit is capped at 16 MiB.
 
-The engine validates a fixed JSON schema, rejects dependency cycles and unsupported fields, routes stage roles through the selected mode, and accepts only structured stage results. It does not generate or execute arbitrary workflow code. Stage agents can edit the project only through their own OpenCode permissions, and session- or process-spawning tools are blocked so every child session remains budgeted and cancellable.
+`node install.mjs --migrate` initializes missing bounded byte budgets to `0`; it never infers byte authority from token limits. Choose explicit nonzero values before using bounded file tools.
 
-State is written atomically below the selected config directory. After a plugin or OpenCode restart, saved workflows are restored without launching new stages. `/workflow-auto-resume` explicitly reauthorizes agents, reconciles child sessions, refreshes budgets, and resumes scheduling. Runtime tools also expose status, capability reporting, and cancellation for the workflow owned by the current session.
+`automation.autonomy` accepts `interactive` or `bounded`; `interactive` is the default. Interactive mode retains each child agent's effective permission rules. Bounded mode preflights routed Task permissions so they cannot prompt, then builds child rules over a wildcard deny. Only explicit `allow` rules can enable plugin-owned filtered-list, exact-file read, direct-write, or todo tools; `ask` and `deny` remain denied. Built-in glob/list/read/edit/write/apply-patch, grep, LSP, Bash, network fetch, external-directory access, global skills, questions, nested Task calls, unsafe delegation, and unreviewed runtime tools are denied. Listing and reads use approved source/document types and credential protections; direct writes atomically replace targets without invoking OpenCode formatters and reject hidden paths and listed host-executed controls. Content scanning is defense in depth, so do not expose worktrees containing credentials or sensitive data. A stage must return `blocked` when required information or authority is unavailable; parallel siblings are aborted and resume does not bypass the missing authority. Treat child-provided blocker text as untrusted and never supply secrets or weaken safeguards because it requested them.
+
+The engine validates a fixed JSON schema, rejects dependency cycles and unsupported fields, routes stage roles through the selected mode, and accepts only structured stage results. It does not generate or execute arbitrary workflow code. Session- or process-spawning tools are blocked so every child session remains budgeted and cancellable.
+
+Bounded mode is an OpenCode permission profile, not an OS sandbox. It currently executes no shell commands, so validation that requires an executable must remain blocked or be performed through an attended path until a typed validation broker is available. This Phase 1 capability is not full unattended software delivery. See [Autonomous Workflows](./docs/autonomous-workflows.md) for blocked-state handling and the secure delivery roadmap.
+
+State is written atomically below the selected config directory, including the autonomy profile selected at start. That profile is immutable for the workflow lifetime; changing `workflows.json` affects only new workflows. Older version-1 states without a profile are normalized to `interactive`. After a plugin or OpenCode restart, saved workflows are restored without launching new stages. `/workflow-auto-resume` reauthorizes agents under the persisted profile, reconciles child sessions, refreshes budgets, and retries eligible blocked paths while retaining accumulated usage and attempts. Runtime tools also expose status, capability reporting, and cancellation for the workflow owned by the current session.
 
 ## Models
 
@@ -178,6 +193,7 @@ Plugin v2 availability is detected from the loaded plugin runtime rather than an
 - Delegated worktree operations request `worktree` and edit permission before creating or merging changes.
 - Translation paths outside the current worktree request `external_directory` plus read or edit permission.
 - Automatic workflows are owned by the starting session and exact directory/worktree context.
+- Bounded autonomy removes child permission prompts but does not grant denied authority; blocked is an expected safe outcome.
 - Swarm sessions share their configured working directory; use only independent tasks unless worktrees are managed separately.
 - Delegated merges require successful execution, a recorded passing review, the authorized feature branch, and a clean target worktree. Task changes are checkpointed in the isolated worktree and merged with a non-fast-forward merge. Failed merges are aborted, and normal cleanup retains dirty or unmerged worktrees.
 
@@ -186,6 +202,7 @@ Review permission requests before allowing them. The supplied `opencode.jsonc.te
 ## Documentation
 
 - [Workflow System](./WORKFLOWS.md)
+- [Autonomous Workflows](./docs/autonomous-workflows.md)
 - [Agent Reference](./docs/agents.md)
 - [Coding Conventions](./docs/conventions.md)
 - [Model Compatibility](./docs/model-compatibility.md)

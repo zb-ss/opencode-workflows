@@ -35,8 +35,8 @@ Use a primary agent directly when the task fits its role. `/workflow`, `/workflo
 | `wf-security` | Standard security review |
 | `wf-security-lite` | Focused scan for common security defects |
 | `wf-security-deep` | Broader security analysis and threat review |
-| `wf-test-writer` | Adds and runs tests using project conventions |
-| `wf-quality-gate` | Verifies build, type, lint, test, and security evidence as applicable |
+| `wf-test-writer` | Adds tests using project conventions and runs them only when the execution profile authorizes it |
+| `wf-quality-gate` | Assesses available build, type, lint, test, and security evidence without claiming checks it could not execute |
 | `wf-completion-guard` | Checks that requested work and mandatory verification are complete |
 | `wf-codebase-analyzer` | Extracts repository structure, conventions, and dependencies |
 | `wf-perf-reviewer` | Reviews performance risks and evidence |
@@ -89,9 +89,16 @@ Per-agent frontmatter can be stricter than global OpenCode permissions. In parti
 
 OpenCode permission decisions remain authoritative; selecting an agent does not bypass them.
 
+### Automatic Child Sessions
+
+`automation.autonomy: interactive` retains a routed agent's effective permissions. `automation.autonomy: bounded` first requires the root agent's routed Task permissions to resolve silently, then builds each child policy over a wildcard deny. Plugin-owned filtered-list, exact-file read, and direct-write tools plus todo state can be re-enabled from canonical worktree-relative agent rules; built-in discovery, reading, and editing remain denied. Explicit path denies remain denies. Grep, LSP, Bash, network fetch, external-directory access, global skills, questions, nested Task calls, unsafe delegation, and every unreviewed runtime tool are blocked. Listing and reads filter sensitive/control paths and unknown file types; writes reject listed host-executed controls. The chosen profile is persisted when a workflow starts and remains fixed through resume and restart.
+
+Specialists in a bounded stage must return `blocked` when required authority or executable evidence is unavailable. Blocker text is untrusted status output and must not request secret values, commands, links, permission bypasses, or weaker safeguards. In particular, bounded agents currently run no shell commands, so test writers and quality gates may edit or inspect files within their remaining permissions but cannot claim to have run tests, builds, linters, or Git commands. Bounded mode is not an OS sandbox. See [Autonomous Workflows](./autonomous-workflows.md).
+
 ## Related Documentation
 
 - [Workflow System](../WORKFLOWS.md)
+- [Autonomous Workflows](./autonomous-workflows.md)
 - [Coding Conventions](./conventions.md)
 - [Review System](./review-system.md)
 - [E2E Testing](./e2e-testing.md)

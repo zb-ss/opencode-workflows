@@ -36,12 +36,18 @@
       "type": "object",
       "properties": {
         "enabled": { "type": "boolean", "default": false },
+        "autonomy": {
+          "enum": ["interactive", "bounded"],
+          "default": "interactive"
+        },
         "max_parallel_sessions": { "type": "integer", "minimum": 1 },
         "max_sessions": { "type": "integer", "minimum": 1 },
         "max_attempts_per_stage": { "type": "integer", "minimum": 1 },
         "max_wall_time_ms": { "type": "integer", "minimum": 1 },
         "max_input_tokens": { "type": "integer", "minimum": 0 },
         "max_output_tokens": { "type": "integer", "minimum": 0 },
+        "max_bounded_read_bytes": { "type": "integer", "minimum": 0, "maximum": 16777216 },
+        "max_bounded_write_bytes": { "type": "integer", "minimum": 0, "maximum": 16777216 },
         "max_cost_usd": { "type": ["number", "null"], "minimum": 0 }
       },
       "required": ["enabled"],
@@ -60,6 +66,8 @@
               "max_wall_time_ms",
               "max_input_tokens",
               "max_output_tokens",
+              "max_bounded_read_bytes",
+              "max_bounded_write_bytes",
               "max_cost_usd"
             ]
           }

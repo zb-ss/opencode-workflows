@@ -11,6 +11,7 @@ import { getConfigDir } from './paths.ts'
 
 const MODEL_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*\/\S+$/
 const VARIANT_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
+export const MAX_BOUNDED_IO_BYTES = 16 * 1024 * 1024
 
 export const ModelCandidateSchema = z.union([
   z.string().regex(MODEL_ID_PATTERN),
@@ -39,12 +40,15 @@ export const WorkflowConfigSchema = z.object({
   swarm_config: z.record(z.string(), z.unknown()).default({}),
   automation: z.object({
     enabled: z.boolean().default(false),
+    autonomy: z.enum(['interactive', 'bounded']).default('interactive'),
     max_parallel_sessions: z.number().int().positive().optional(),
     max_sessions: z.number().int().positive().optional(),
     max_attempts_per_stage: z.number().int().positive().optional(),
     max_wall_time_ms: z.number().int().positive().optional(),
     max_input_tokens: z.number().int().nonnegative().optional(),
     max_output_tokens: z.number().int().nonnegative().optional(),
+    max_bounded_read_bytes: z.number().int().nonnegative().max(MAX_BOUNDED_IO_BYTES).optional(),
+    max_bounded_write_bytes: z.number().int().nonnegative().max(MAX_BOUNDED_IO_BYTES).optional(),
     max_cost_usd: z.number().nonnegative().nullable().optional(),
   }).superRefine((automation, context) => {
     if (!automation.enabled) return
@@ -55,6 +59,8 @@ export const WorkflowConfigSchema = z.object({
       'max_wall_time_ms',
       'max_input_tokens',
       'max_output_tokens',
+      'max_bounded_read_bytes',
+      'max_bounded_write_bytes',
       'max_cost_usd',
     ] as const) {
       if (automation[field] === undefined) {
@@ -65,7 +71,7 @@ export const WorkflowConfigSchema = z.object({
         })
       }
     }
-  }).default({ enabled: false }),
+  }).default({ enabled: false, autonomy: 'interactive' }),
   experimental_capabilities: z.object({
     background_subagents: CapabilityModeSchema.default('disabled'),
     native_workspaces: CapabilityModeSchema.default('disabled'),
