@@ -1,6 +1,7 @@
 import type { ToolContext } from '@opencode-ai/plugin'
 import path from 'node:path'
 
+import { MAX_JSON_ESCAPE_BYTES_PER_INPUT_BYTE } from './bounded-json.ts'
 import {
   listBoundedDirectory,
   readBoundedFile,
@@ -9,8 +10,8 @@ import {
 import type { BoundedIoReservation } from './bounded-io-ledger.ts'
 import { isBoundedVisiblePath, resolveBoundedToolPaths } from './bounded-tool-policy.ts'
 import type { AutomaticWorkflowState } from './workflow-engine.ts'
+import { acquireProjectMutationLease } from './project-mutation-lease.ts'
 
-const MAX_JSON_ESCAPE_BYTES_PER_INPUT_BYTE = 6
 const MAX_BOUNDED_LIST_ENTRIES = 1000
 
 interface ReadArguments {
@@ -89,8 +90,13 @@ export class BoundedFileService {
     const authorized = await this.authorize(context, 'workflow_bounded_write', args)
     const bytes = Buffer.byteLength(args.content, 'utf8')
     return this.withExactWriteReservation(authorized.owner, bytes, () => {
-      writeBoundedFile(authorized.target, args.content, authorized.state.worktree)
-      return JSON.stringify({ written: true, path: authorized.permissionPath })
+      const release = acquireProjectMutationLease(authorized.state.worktree)
+      try {
+        writeBoundedFile(authorized.target, args.content, authorized.state.worktree)
+        return JSON.stringify({ written: true, path: authorized.permissionPath })
+      } finally {
+        release()
+      }
     })
   }
 

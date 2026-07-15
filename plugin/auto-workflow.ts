@@ -19,7 +19,14 @@ import {
   type AutomaticWorkflowState,
   type WorkflowDefinition,
 } from '../lib/workflow-engine.ts'
-import { loadWorkflowConfig, modelCandidatesForAgent, type WorkflowConfig } from '../lib/workflow-config.ts'
+import {
+  loadWorkflowConfig,
+  enabledValidationBroker,
+  MAX_SAFE_IDENTIFIER_LENGTH,
+  modelCandidatesForAgent,
+  type WorkflowConfig,
+} from '../lib/workflow-config.ts'
+import { ValidationBroker } from '../lib/validation-broker.ts'
 
 const STATE_FILE = 'workflow-auto.state.json'
 const DEFINITION_FILE = 'workflow-auto.definition.json'
@@ -41,7 +48,10 @@ function automaticPaths(rootSessionId: string): { directory: string; statePath: 
   }
 }
 
-function limits(config: WorkflowConfig): AutomationLimits {
+function limits(
+  config: WorkflowConfig,
+  validationBroker: WorkflowConfig['validation_broker'] = config.validation_broker,
+): AutomationLimits {
   return {
     max_sessions: config.automation.max_sessions!,
     max_parallel_sessions: config.automation.max_parallel_sessions!,
@@ -51,6 +61,9 @@ function limits(config: WorkflowConfig): AutomationLimits {
     max_output_tokens: config.automation.max_output_tokens!,
     max_bounded_read_bytes: config.automation.max_bounded_read_bytes!,
     max_bounded_write_bytes: config.automation.max_bounded_write_bytes!,
+    max_validation_runs: validationBroker.enabled
+      ? enabledValidationBroker(validationBroker).max_runs_per_workflow
+      : 0,
     max_cost_usd: config.automation.max_cost_usd!,
   }
 }
@@ -177,6 +190,8 @@ export const AutoWorkflow: Plugin = async ({ client, directory, serverUrl }) => 
   }
 
   const boundedFiles = new BoundedFileService(ownerForSession)
+  const validationBrokerConfig = loadWorkflowConfig().validation_broker
+  const validationBroker = new ValidationBroker(validationBrokerConfig, ownerForSession)
 
   function buildEngine(
     state: AutomaticWorkflowState,
@@ -193,7 +208,7 @@ export const AutoWorkflow: Plugin = async ({ client, directory, serverUrl }) => 
       definitionPath: state.definition_path,
       modeRouting: loadModeRouting(state.mode),
       modelCandidates: (agent, tier) => modelCandidatesForAgent(config, agent, tier),
-      limits: limits(config),
+      limits: limits(config, validationBrokerConfig),
       autonomy: state.autonomy,
       schedulingEnabled,
     })
@@ -302,6 +317,14 @@ export const AutoWorkflow: Plugin = async ({ client, directory, serverUrl }) => 
         execute: (args, context) => boundedFiles.write(args, context),
       }),
 
+      workflow_validation_run: tool({
+        description: 'Run one named, configured validation operation with fixed argv, worktree containment, cancellation, output limits, timeout enforcement, and a private audit record. Available only to owned interactive automatic workflow stages because repository code is not OS-sandboxed.',
+        args: {
+          operation: tool.schema.string().min(1).max(MAX_SAFE_IDENTIFIER_LENGTH).describe('Configured validation operation name'),
+        },
+        execute: (args, context) => validationBroker.run(args.operation, context),
+      }),
+
       workflow_auto_start: tool({
         description: 'Start an explicitly requested, validated declarative automatic workflow for the current session.',
         args: {
@@ -341,7 +364,7 @@ export const AutoWorkflow: Plugin = async ({ client, directory, serverUrl }) => 
             definitionPath: paths.definitionPath,
             modeRouting: routing,
             modelCandidates: (agent, tier) => modelCandidatesForAgent(config, agent, tier),
-            limits: limits(config),
+            limits: limits(config, validationBrokerConfig),
             autonomy: config.automation.autonomy,
           })
           engines.set(context.sessionID, engine)
@@ -387,7 +410,7 @@ export const AutoWorkflow: Plugin = async ({ client, directory, serverUrl }) => 
             before.autonomy,
             sessionAdapter(context.directory),
           )
-          const state = await engine.resume(limits(config))
+          const state = await engine.resume(limits(config, validationBrokerConfig))
           return JSON.stringify({ resumed: true, workflow: stateSummary(state) })
         },
       }),

@@ -58,6 +58,7 @@ describe('OpenCodeSessionAdapter', () => {
     assert.equal(calls[1].input.body.content, undefined)
     assert.equal(calls[2].name, 'abort')
     assert.equal(await adapter.lastAssistantText(session.id), 'hello\nworld')
+    await assert.rejects(adapter.lastAssistantText(session.id, 5), /exceeds configured result bytes/)
   })
 
   it('keeps interactive creation identical even when interactive options are supplied', async () => {
@@ -141,6 +142,40 @@ describe('OpenCodeSessionAdapter', () => {
     assert.equal(createInputs[0].parentID, 'parent-1')
     assert.equal(createInputs[0].permission.some((rule: any) => rule.action === 'ask'), false)
     assert.equal(createInputs[1].parentID, undefined)
+  })
+
+  it('creates explicitly restricted sessions without inheriting the agent permission profile', async () => {
+    let createInput: any
+    const adapter = new OpenCodeSessionAdapter(
+      legacyClient({}),
+      '/project',
+      autonomyClient({
+        session: {
+          create: async (input: any) => {
+            createInput = input
+            return { data: { id: 'restricted-session' } }
+          },
+        },
+      }),
+    )
+    const permission = [
+      { permission: '*', pattern: '*', action: 'deny' as const },
+      { permission: 'read', pattern: '*', action: 'allow' as const },
+    ]
+
+    await adapter.create('Restricted', 'parent-1', { agent: 'wf-executor', permission })
+
+    assert.deepEqual(createInput, {
+      directory: '/project',
+      title: 'Restricted',
+      parentID: 'parent-1',
+      agent: 'wf-executor',
+      permission,
+    })
+    await assert.rejects(
+      adapter.create('Invalid', undefined, { agent: 'wf-executor', autonomy: 'bounded', permission }),
+      /cannot combine/,
+    )
   })
 
   it('fails closed when bounded session prerequisites are unavailable or malformed', async (context) => {

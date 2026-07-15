@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://opencode-workflows.example/schema/review-correction-result.schema.json",
+  "title": "Fixed-Point Correction Result",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "status": { "type": "string", "const": "corrected" },
+        "summary": { "type": "string", "minLength": 1, "maxLength": 4000, "pattern": "^(?=.*\\S)[^\\0]+$" },
+        "resolved_issue_ids": {
+          "minItems": 1,
+          "maxItems": 100,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 129,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}:[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+          },
+          "uniqueItems": true
+        },
+        "edits": {
+          "minItems": 1,
+          "maxItems": 500,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "path": { "type": "string", "minLength": 1, "maxLength": 1000, "pattern": "^(?=.*\\S)[^\\0]+$" },
+              "content": { "type": "string", "pattern": "^[^\\0]*$" }
+            },
+            "required": ["path", "content"],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": ["status", "summary", "resolved_issue_ids", "edits"],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "status": { "type": "string", "const": "blocked" },
+        "summary": { "type": "string", "minLength": 1, "maxLength": 4000, "pattern": "^(?=.*\\S)[^\\0]+$" },
+        "required_action": { "type": "string", "minLength": 1, "maxLength": 4000, "pattern": "^(?=.*\\S)[^\\0]+$" }
+      },
+      "required": ["status", "summary", "required_action"],
+      "additionalProperties": false
+    }
+  ]
+}

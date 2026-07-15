@@ -18,13 +18,14 @@ afterEach(() => {
 describe('bounded tool policy', () => {
   it('allows only reviewed side-effect-free and direct-write tools', () => {
     for (const toolName of [
-      'workflow_bounded_list', 'workflow_bounded_read', 'workflow_bounded_write', 'todoread', 'todowrite',
+      'workflow_bounded_list', 'workflow_bounded_read', 'workflow_bounded_write',
+      'todoread', 'todowrite',
     ]) {
       assert.equal(isBoundedStageTool(toolName), true)
     }
     for (const toolName of [
       'glob', 'list', 'read', 'apply_patch', 'edit', 'write', 'grep', 'lsp', 'skill', 'patch', 'bash', 'webfetch', 'question', 'task',
-      'deploy', 'database_query', 'delegate_run',
+      'deploy', 'database_query', 'delegate_run', 'workflow_validation_run',
     ]) {
       assert.equal(isBoundedStageTool(toolName), false)
     }

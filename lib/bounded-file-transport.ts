@@ -1,26 +1,14 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 
+import { BoundedAccessError } from './bounded-access-error.ts'
 import { lstatIfPresent } from './fs-safe.ts'
 import { isPathInside } from './paths.ts'
+import { containsSensitiveContent } from './sensitive-content.ts'
 
 const SENSITIVE_SCAN_OVERLAP_BYTES = 1024
 const MAX_BOUNDED_DIRECTORY_SCAN = 10_000
-
-const SECRET_PATTERNS = [
-  /-----BEGIN [A-Z ]*PRIVATE KEY-----/,
-  /\bAKIA[0-9A-Z]{16}\b/,
-  /\bgithub_pat_[A-Za-z0-9_]{20,}\b/,
-  /\bgh[pousr]_[A-Za-z0-9]{20,}\b/,
-  /\bnpm_[A-Za-z0-9]{20,}\b/,
-  /\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}\b/,
-  /\bxox[baprs]-[A-Za-z0-9-]{16,}\b/,
-  /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/,
-  /\bBearer\s+[A-Za-z0-9._~+/-]{16,}=*/i,
-  /\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis):\/\/[^\s:@/]+:[^\s@/]+@/i,
-  /\b(?:api[_-]?key|access[_-]?token|auth[_-]?token|password|passwd|secret)\s*[:=]\s*["']?[^\s"'\r\n]{8,}/i,
-]
 
 function ensureBoundedParent(root: string, filePath: string): void {
   const relative = path.relative(root, path.dirname(filePath))
@@ -40,7 +28,7 @@ function ensureBoundedParent(root: string, filePath: string): void {
   }
 }
 
-function descriptorPath(descriptor: number): string {
+export function descriptorPath(descriptor: number): string {
   const candidate = ['/proc/self/fd', '/dev/fd']
     .map((root) => path.join(root, String(descriptor)))
     .find((entry) => fs.existsSync(entry))
@@ -80,7 +68,7 @@ function anchoredPath(filePath: string, worktree: string): { parent: number; pat
   }
 }
 
-function openAnchoredDirectory(directoryPath: string, worktree: string): number {
+export function openAnchoredDirectory(directoryPath: string, worktree: string): number {
   const descriptor = fs.openSync(
     directoryPath,
     fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW,
@@ -129,22 +117,28 @@ function incompleteUtf8SuffixLength(buffer: Buffer): number {
   return isValidFirstContinuation(lead, firstContinuation) && hasOnlyContinuations ? suffixLength : 0
 }
 
-function shannonEntropy(value: string): number {
-  const frequencies = new Map<string, number>()
-  for (const character of value) frequencies.set(character, (frequencies.get(character) ?? 0) + 1)
-  return [...frequencies.values()].reduce((entropy, count) => {
-    const probability = count / value.length
-    return entropy - (probability * Math.log2(probability))
-  }, 0)
+function readCompleteBytes(descriptor: number, size: number): Buffer {
+  const buffer = Buffer.alloc(size)
+  let offset = 0
+  while (offset < size) {
+    const bytesRead = fs.readSync(descriptor, buffer, offset, size - offset, offset)
+    if (bytesRead === 0) break
+    offset += bytesRead
+  }
+  if (offset !== size) throw new Error('bounded file changed while reading expected content')
+  return buffer
 }
 
-function hasHighEntropyToken(value: string): boolean {
-  return (value.match(/[A-Za-z0-9+/_=-]{40,}/g) ?? []).some((candidate) => (
-    /[a-z]/.test(candidate)
-    && /[A-Z]/.test(candidate)
-    && /\d/.test(candidate)
-    && shannonEntropy(candidate) >= 4.5
-  ))
+function decodeCompleteUtf8(buffer: Buffer): string {
+  try {
+    return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(buffer)
+  } catch {
+    throw new BoundedAccessError('invalid_utf8', 'bounded file target is not valid UTF-8')
+  }
+}
+
+function readCompleteUtf8(descriptor: number, size: number): string {
+  return decodeCompleteUtf8(readCompleteBytes(descriptor, size))
 }
 
 function assertNoSensitiveContent(descriptor: number, offset: number, length: number, size: number): void {
@@ -157,8 +151,8 @@ function assertNoSensitiveContent(descriptor: number, offset: number, length: nu
     const bytesRead = fs.readSync(descriptor, buffer, 0, Math.min(buffer.length, scanEnd - position), position)
     if (bytesRead === 0) break
     const text = carry + buffer.subarray(0, bytesRead).toString('utf8')
-    if (SECRET_PATTERNS.some((pattern) => pattern.test(text)) || hasHighEntropyToken(text)) {
-      throw new Error('bounded read rejected credential-like file content')
+    if (containsSensitiveContent(text)) {
+      throw new BoundedAccessError('credential_content', 'bounded read rejected credential-like file content')
     }
     carry = text.slice(-512)
     position += bytesRead
@@ -176,7 +170,7 @@ export function readBoundedFile(filePath: string, offset: number, length: number
     descriptor = fs.openSync(anchored.path, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW)
     const stat = fs.fstatSync(descriptor)
     if (!stat.isFile()) throw new Error('bounded read target is not a regular file')
-    if (stat.nlink > 1) throw new Error('bounded read rejects hard-linked targets')
+    if (stat.nlink > 1) throw new BoundedAccessError('hard_link', 'bounded read rejects hard-linked targets')
     assertNoSensitiveContent(descriptor, offset, length, stat.size)
     if (offset > stat.size) throw new Error('bounded read offset is beyond end of file')
     if (offset > 0 && offset < stat.size) {
@@ -190,9 +184,9 @@ export function readBoundedFile(filePath: string, offset: number, length: number
     const decodedLength = bytesRead - incompleteUtf8SuffixLength(buffer.subarray(0, bytesRead))
     let content: string
     try {
-      content = new TextDecoder('utf-8', { fatal: true }).decode(buffer.subarray(0, decodedLength))
+      content = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(buffer.subarray(0, decodedLength))
     } catch {
-      throw new Error('bounded read target is not valid UTF-8')
+      throw new BoundedAccessError('invalid_utf8', 'bounded read target is not valid UTF-8')
     }
     if (bytesRead > 0 && decodedLength === 0) {
       throw new Error('bounded read length is too small for the next UTF-8 character')
@@ -208,6 +202,111 @@ export function readBoundedFile(filePath: string, offset: number, length: number
 export interface BoundedDirectoryEntry {
   name: string
   type: 'directory' | 'file'
+}
+
+export interface BoundedFileIdentity {
+  kind: 'file' | 'missing'
+  mode?: number
+  sha256?: string
+  size?: number
+}
+
+export interface BoundedFileSnapshot {
+  content: string
+  identity: BoundedFileIdentity
+}
+
+function assertStableIdentity(before: fs.BigIntStats, after: fs.BigIntStats): void {
+  if (before.dev !== after.dev
+    || before.ino !== after.ino
+    || before.mode !== after.mode
+    || before.size !== after.size
+    || before.mtimeNs !== after.mtimeNs
+    || before.ctimeNs !== after.ctimeNs) {
+    throw new Error('bounded file identity changed during snapshot')
+  }
+}
+
+function boundedStatSize(stat: fs.BigIntStats): number {
+  const size = Number(stat.size)
+  if (!Number.isSafeInteger(size)) throw new Error('bounded file size exceeds the safe integer range')
+  return size
+}
+
+export function boundedFileIdentity(filePath: string, worktree: string): BoundedFileIdentity {
+  const anchored = anchoredPath(filePath, worktree)
+  let descriptor: number | null = null
+  try {
+    try {
+      descriptor = fs.openSync(anchored.path, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { kind: 'missing' }
+      throw error
+    }
+    const stat = fs.fstatSync(descriptor, { bigint: true })
+    if (!stat.isFile()) throw new Error('bounded identity target is not a regular file')
+    if (stat.nlink > 1n) throw new BoundedAccessError('hard_link', 'bounded identity rejects hard-linked targets')
+    const size = boundedStatSize(stat)
+    const hash = createHash('sha256')
+    const buffer = Buffer.alloc(64 * 1024)
+    let position = 0
+    while (position < size) {
+      const bytesRead = fs.readSync(descriptor, buffer, 0, Math.min(buffer.length, size - position), position)
+      if (bytesRead === 0) throw new Error('bounded identity target changed while hashing')
+      hash.update(buffer.subarray(0, bytesRead))
+      position += bytesRead
+    }
+    assertStableIdentity(stat, fs.fstatSync(descriptor, { bigint: true }))
+    return {
+      kind: 'file',
+      mode: Number(stat.mode & 0o777n),
+      sha256: hash.digest('hex'),
+      size,
+    }
+  } finally {
+    if (descriptor !== null) fs.closeSync(descriptor)
+    fs.closeSync(anchored.parent)
+  }
+}
+
+export function boundedFileSnapshot(
+  filePath: string,
+  worktree: string,
+  maximumBytes: number,
+): BoundedFileSnapshot {
+  if (!Number.isSafeInteger(maximumBytes) || maximumBytes < 0) {
+    throw new Error('bounded snapshot byte limit must be a non-negative safe integer')
+  }
+  const anchored = anchoredPath(filePath, worktree)
+  let descriptor: number | null = null
+  try {
+    descriptor = fs.openSync(anchored.path, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW)
+    const before = fs.fstatSync(descriptor, { bigint: true })
+    if (!before.isFile()) throw new Error('bounded snapshot target is not a regular file')
+    if (before.nlink > 1n) throw new BoundedAccessError('hard_link', 'bounded snapshot rejects hard-linked targets')
+    const size = boundedStatSize(before)
+    if (size > maximumBytes) {
+      throw new BoundedAccessError('too_large', 'bounded snapshot target exceeds the configured byte limit')
+    }
+    const bytes = readCompleteBytes(descriptor, size)
+    const content = decodeCompleteUtf8(bytes)
+    assertStableIdentity(before, fs.fstatSync(descriptor, { bigint: true }))
+    if (containsSensitiveContent(content)) {
+      throw new BoundedAccessError('credential_content', 'bounded snapshot rejected credential-like file content')
+    }
+    return {
+      content,
+      identity: {
+        kind: 'file',
+        mode: Number(before.mode & 0o777n),
+        sha256: createHash('sha256').update(bytes).digest('hex'),
+        size,
+      },
+    }
+  } finally {
+    if (descriptor !== null) fs.closeSync(descriptor)
+    fs.closeSync(anchored.parent)
+  }
 }
 
 export function listBoundedDirectory(
@@ -249,14 +348,30 @@ export function listBoundedDirectory(
   }
 }
 
-export function writeBoundedFile(filePath: string, content: string, worktree: string): void {
+export function writeBoundedFile(
+  filePath: string,
+  content: string,
+  worktree: string,
+  expectedContent?: string,
+): void {
   const root = path.resolve(worktree)
   ensureBoundedParent(root, filePath)
   const anchored = anchoredPath(filePath, root)
   const temporary = `${anchored.path}.bounded-${randomUUID()}`
   let descriptor: number | null = null
+  let expectedDescriptor: number | null = null
   try {
     const existing = lstatIfPresent(anchored.path)
+    if (expectedContent !== undefined) {
+      expectedDescriptor = fs.openSync(anchored.path, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW)
+      const expectedStat = fs.fstatSync(expectedDescriptor)
+      if (!expectedStat.isFile() || expectedStat.nlink > 1) {
+        throw new Error('bounded write expected target is not one regular unlinked file')
+      }
+      if (readCompleteUtf8(expectedDescriptor, expectedStat.size) !== expectedContent) {
+        throw new Error('bounded write target changed before replacement')
+      }
+    }
     const mode = existing?.mode === undefined ? 0o666 : existing.mode & 0o777
     descriptor = fs.openSync(
       temporary,
@@ -268,6 +383,16 @@ export function writeBoundedFile(filePath: string, content: string, worktree: st
     fs.fsyncSync(descriptor)
     fs.closeSync(descriptor)
     descriptor = null
+    if (expectedDescriptor !== null) {
+      const expectedStat = fs.fstatSync(expectedDescriptor)
+      const currentStat = fs.lstatSync(anchored.path)
+      if (currentStat.isSymbolicLink()
+        || currentStat.dev !== expectedStat.dev
+        || currentStat.ino !== expectedStat.ino
+        || readCompleteUtf8(expectedDescriptor, expectedStat.size) !== expectedContent) {
+        throw new Error('bounded write target changed before atomic replacement')
+      }
+    }
     fs.renameSync(temporary, anchored.path)
     try { fs.fsyncSync(anchored.parent) } catch {}
   } catch (error) {
@@ -275,6 +400,7 @@ export function writeBoundedFile(filePath: string, content: string, worktree: st
     try { fs.unlinkSync(temporary) } catch {}
     throw error
   } finally {
+    if (expectedDescriptor !== null) fs.closeSync(expectedDescriptor)
     fs.closeSync(anchored.parent)
   }
 }

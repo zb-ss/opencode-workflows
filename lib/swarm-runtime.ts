@@ -1,5 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
+import type { OpencodeClient as V2OpencodeClient } from '@opencode-ai/sdk/v2'
 
 import { DrainingQueue } from './draining-queue.ts'
 import { log } from './logger.ts'
@@ -91,6 +92,7 @@ export interface CollectBatchResult {
 export interface CancelTaskResult {
   task_id: string
   cancelled: boolean
+  terminal: boolean
   reason?: string
   error?: string
 }
@@ -101,6 +103,7 @@ export interface RestoredBatchAuthorization {
 }
 
 export interface SwarmRuntimeOptions {
+  autonomyClient?: V2OpencodeClient
   env?: NodeJS.ProcessEnv
   now?: () => number
   restore?: boolean
@@ -150,10 +153,23 @@ function batchKey(callerSessionId: string, batchId: string): string {
   return `${callerSessionId}\u0000${batchId}`
 }
 
-function abortError(): Error {
-  const error = new Error('The operation was aborted')
+function abortError(reason?: unknown): Error {
+  const error = new Error(
+    reason instanceof Error ? reason.message : 'The operation was aborted',
+    { cause: reason },
+  )
   error.name = 'AbortError'
   return error
+}
+
+async function abortable<T>(operation: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return operation
+  if (signal.aborted) throw abortError(signal.reason)
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(abortError(signal.reason))
+    signal.addEventListener('abort', onAbort, { once: true })
+    operation.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort))
+  })
 }
 
 export class SwarmRuntime {
@@ -166,6 +182,7 @@ export class SwarmRuntime {
   private readonly reconciled = new Set<string>()
   private readonly adapters = new Map<string, OpenCodeSessionAdapter>()
   private readonly env: NodeJS.ProcessEnv
+  private readonly autonomyClient?: V2OpencodeClient
   private readonly now: () => number
   private readonly queue: DrainingQueue<QueueItem, void>
   private readonly staleTimeoutMs: number
@@ -179,6 +196,7 @@ export class SwarmRuntime {
     options: SwarmRuntimeOptions = {},
   ) {
     this.env = options.env ?? process.env
+    this.autonomyClient = options.autonomyClient
     this.now = options.now ?? Date.now
     this.scopeDirectory = options.scopeDirectory ? path.resolve(options.scopeDirectory) : null
     const globalLimit = positiveInteger(config.default_concurrency, DEFAULT_CONCURRENCY)
@@ -255,12 +273,13 @@ export class SwarmRuntime {
     const key = batchKey(callerSessionId, requestedBatchId)
     const batch = this.batches.get(key)
     if (!batch) throw new Error(`Batch ${requestedBatchId} not found`)
-    if (signal?.aborted) throw abortError()
+    if (signal?.aborted) throw abortError(signal.reason)
 
     if (!this.reconciled.has(key)) {
       this.reconciled.add(key)
-      await this.reconcile(batch, key)
+      await abortable(this.reconcile(batch, key), signal)
     }
+    if (signal?.aborted) throw abortError(signal.reason)
     if (this.isBatchComplete(batch)) return this.completedResult(batch)
 
     return new Promise<AwaitBatchResult>((resolve, reject) => {
@@ -275,7 +294,7 @@ export class SwarmRuntime {
       if (signal) {
         waiter.onAbort = () => {
           this.removeWaiter(key, waiter)
-          reject(abortError())
+          reject(abortError(signal.reason))
         }
         signal.addEventListener('abort', waiter.onAbort, { once: true })
       }
@@ -300,6 +319,7 @@ export class SwarmRuntime {
         agent: task.agent,
         prompt: task.prompt,
         ...(task.model ? { model: task.model } : {}),
+        ...(task.permission ? { permission: task.permission.map((rule) => ({ ...rule })) } : {}),
       })),
     }
   }
@@ -317,7 +337,12 @@ export class SwarmRuntime {
     return true
   }
 
-  async collectResults(callerSessionId: string, requestedBatchId: string): Promise<CollectBatchResult> {
+  async collectResults(
+    callerSessionId: string,
+    requestedBatchId: string,
+    maximumResultBytes = Number.MAX_SAFE_INTEGER,
+    signal?: AbortSignal,
+  ): Promise<CollectBatchResult> {
     this.assertActive()
     const batch = this.batches.get(batchKey(callerSessionId, requestedBatchId))
     if (!batch) throw new Error(`Batch ${requestedBatchId} not found`)
@@ -325,15 +350,17 @@ export class SwarmRuntime {
     const results: Record<string, string> = {}
 
     for (const task of batch.tasks) {
+      if (signal?.aborted) throw abortError(signal.reason)
       if (!task.sessionId) {
         results[task.id] = task.error ?? (task.status === 'cancelled' ? 'Cancelled before spawn' : 'Failed to spawn')
         continue
       }
       try {
-        const output = await adapter.lastAssistantText(task.sessionId)
+        const output = await abortable(adapter.lastAssistantText(task.sessionId, maximumResultBytes), signal)
         task.result = output || 'No output'
         results[task.id] = task.result
       } catch (error) {
+        if (signal?.aborted) throw abortError(signal.reason)
         results[task.id] = `Error retrieving: ${errorText(error)}`
       }
     }
@@ -341,7 +368,12 @@ export class SwarmRuntime {
     return { batchId: requestedBatchId, results }
   }
 
-  async cancelTask(callerSessionId: string, requestedBatchId: string, taskId: string): Promise<CancelTaskResult> {
+  async cancelTask(
+    callerSessionId: string,
+    requestedBatchId: string,
+    taskId: string,
+    confirmationTimeoutMs = DEFAULT_AWAIT_TIMEOUT_MS,
+  ): Promise<CancelTaskResult> {
     this.assertActive()
     const key = batchKey(callerSessionId, requestedBatchId)
     const batch = this.batches.get(key)
@@ -349,17 +381,39 @@ export class SwarmRuntime {
     const task = batch.tasks.find((candidate) => candidate.id === taskId)
     if (!task) throw new Error(`Task ${taskId} not found in batch ${requestedBatchId}`)
     if (terminal(task.status)) {
-      return { task_id: taskId, cancelled: false, reason: `Task is already in terminal state: ${task.status}` }
+      return { task_id: taskId, cancelled: false, terminal: true, reason: `Task is already in terminal state: ${task.status}` }
     }
 
     if (task.sessionId) {
+      const adapter = this.adapter(batch.directory)
       try {
-        await this.adapter(batch.directory).abort(task.sessionId)
+        await adapter.abort(task.sessionId)
       } catch (error) {
-        return { task_id: taskId, cancelled: false, error: errorText(error) }
+        return { task_id: taskId, cancelled: false, terminal: false, error: errorText(error) }
       }
       if (terminal(task.status)) {
-        return { task_id: taskId, cancelled: false, reason: `Task reached terminal state: ${task.status}` }
+        return { task_id: taskId, cancelled: false, terminal: true, reason: `Task reached terminal state: ${task.status}` }
+      }
+      let status: Awaited<ReturnType<OpenCodeSessionAdapter['statuses']>>[string]
+      try {
+        status = (await adapter.statuses())[task.sessionId]
+      } catch (error) {
+        return { task_id: taskId, cancelled: false, terminal: false, error: `termination status unavailable: ${errorText(error)}` }
+      }
+      if (status?.type === 'busy' || status?.type === 'retry') {
+        const control = this.control(taskKey(key, task.id))
+        const observed = await new Promise<boolean>((resolve) => {
+          const timer = setTimeout(() => resolve(false), positiveInteger(confirmationTimeoutMs, DEFAULT_AWAIT_TIMEOUT_MS))
+          timer.unref?.()
+          control.promise.then(() => {
+            clearTimeout(timer)
+            resolve(true)
+          })
+        })
+        if (!observed || !terminal(task.status)) {
+          return { task_id: taskId, cancelled: false, terminal: false, error: 'session termination was not observed' }
+        }
+        return { task_id: taskId, cancelled: false, terminal: true, reason: `Task reached terminal state: ${task.status}` }
       }
     }
 
@@ -367,6 +421,7 @@ export class SwarmRuntime {
     return {
       task_id: taskId,
       cancelled: true,
+      terminal: true,
       ...(task.sessionId ? {} : { reason: 'No session ID; marked cancelled' }),
     }
   }
@@ -468,7 +523,10 @@ export class SwarmRuntime {
         task.lastProgressAt = task.startedAt
         this.persistCaller(batch.callerSessionId)
 
-        const session = await adapter.create(`[${batch.batchId}] ${task.agent}: ${task.id}`, batch.callerSessionId)
+        const session = await adapter.create(`[${batch.batchId}] ${task.agent}: ${task.id}`, batch.callerSessionId, {
+          agent: task.agent,
+          ...(task.permission ? { permission: task.permission } : {}),
+        })
         task.sessionId = session.id
         this.sessionTasks.set(session.id, { batchKey: key, taskId: task.id })
         this.persistCaller(batch.callerSessionId)
@@ -632,7 +690,7 @@ export class SwarmRuntime {
   private adapter(directory: string): OpenCodeSessionAdapter {
     const existing = this.adapters.get(directory)
     if (existing) return existing
-    const adapter = new OpenCodeSessionAdapter(this.client, directory)
+    const adapter = new OpenCodeSessionAdapter(this.client, directory, this.autonomyClient)
     this.adapters.set(directory, adapter)
     return adapter
   }

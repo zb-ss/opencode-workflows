@@ -1,6 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 
+import { BoundedAccessError } from './bounded-access-error.ts'
 import { lstatIfPresent } from './fs-safe.ts'
 import { isPathInside } from './paths.ts'
 
@@ -228,20 +229,22 @@ function assertBoundedPath(
   if (candidate.includes('\0')) throw new Error('bounded file path contains a null byte')
   const root = path.resolve(worktree)
   const target = path.resolve(directory, candidate)
-  if (!isPathInside(root, target)) throw new Error(`bounded file path is outside the worktree: ${candidate}`)
+  if (!isPathInside(root, target)) {
+    throw new BoundedAccessError('outside_worktree', `bounded file path is outside the worktree: ${candidate}`)
+  }
 
   const relative = path.relative(root, target)
   if (access === 'read' && isSensitivePath(relative)) {
-    throw new Error(`bounded file path targets a sensitive file: ${candidate}`)
+    throw new BoundedAccessError('sensitive_path', `bounded file path targets a sensitive file: ${candidate}`)
   }
   if (access === 'read' && !isReadableSourcePath(relative)) {
-    throw new Error(`bounded read target is not an approved source or documentation file: ${candidate}`)
+    throw new BoundedAccessError('unsupported_read', `bounded read target is not an approved source or documentation file: ${candidate}`)
   }
   if (access === 'list' && (isSensitivePath(relative) || isProtectedWritePath(relative))) {
     throw new Error(`bounded list targets a protected directory: ${candidate}`)
   }
   if (access === 'write' && isProtectedWritePath(relative)) {
-    throw new Error(`bounded write targets a protected control or sensitive file: ${candidate}`)
+    throw new BoundedAccessError('protected_write', `bounded write targets a protected control or sensitive file: ${candidate}`)
   }
 
   const realRoot = fs.realpathSync(root)
@@ -252,24 +255,30 @@ function assertBoundedPath(
     current = path.join(current, segment)
     const stat = lstatIfPresent(current)
     if (!stat) continue
-    if (stat.isSymbolicLink()) throw new Error(`bounded file path traverses a symbolic link: ${candidate}`)
+    if (stat.isSymbolicLink()) {
+      throw new BoundedAccessError('symlink_path', `bounded file path traverses a symbolic link: ${candidate}`)
+    }
     lastExisting = current
     if (current === target) targetStat = stat
   }
   const realExisting = fs.realpathSync(lastExisting)
-  if (!isPathInside(realRoot, realExisting)) throw new Error(`bounded file path resolves outside the worktree: ${candidate}`)
+  if (!isPathInside(realRoot, realExisting)) {
+    throw new BoundedAccessError('outside_worktree', `bounded file path resolves outside the worktree: ${candidate}`)
+  }
   const realRelative = path.relative(realRoot, realExisting)
   if (access === 'read' && isSensitivePath(realRelative)) {
-    throw new Error(`bounded file path resolves to a sensitive file: ${candidate}`)
+    throw new BoundedAccessError('sensitive_path', `bounded file path resolves to a sensitive file: ${candidate}`)
   }
   if (access === 'write' && isProtectedWritePath(realRelative)) {
-    throw new Error(`bounded write resolves to a protected control or sensitive file: ${candidate}`)
+    throw new BoundedAccessError('protected_write', `bounded write resolves to a protected control or sensitive file: ${candidate}`)
   }
   if (access === 'read') {
     if (!targetStat || !targetStat.isFile()) {
-      throw new Error(`bounded ${candidate} read must target one existing regular file`)
+      throw new BoundedAccessError('missing_file', `bounded ${candidate} read must target one existing regular file`)
     }
-    if (targetStat.nlink > 1) throw new Error(`bounded file read rejects hard-linked targets: ${candidate}`)
+    if (targetStat.nlink > 1) {
+      throw new BoundedAccessError('hard_link', `bounded file read rejects hard-linked targets: ${candidate}`)
+    }
   }
   if (access === 'write' && targetStat && !targetStat.isFile()) {
     throw new Error(`bounded write target is not a regular file: ${candidate}`)

@@ -1,10 +1,17 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, it } from 'node:test'
 
-import { listBoundedDirectory, readBoundedFile, writeBoundedFile } from '../../lib/bounded-file-transport.ts'
+import {
+  boundedFileIdentity,
+  boundedFileSnapshot,
+  listBoundedDirectory,
+  readBoundedFile,
+  writeBoundedFile,
+} from '../../lib/bounded-file-transport.ts'
 
 const temporaryDirectories: string[] = []
 
@@ -30,6 +37,17 @@ describe('bounded file transport', () => {
     writeBoundedFile(source, 'export const value = false\n', worktree)
     assert.equal(fs.readFileSync(source, 'utf8'), 'export const value = false\n')
     assert.equal(fs.statSync(source).mode & 0o777, 0o755)
+    assert.throws(
+      () => writeBoundedFile(source, 'export const value = stale\n', worktree, 'export const value = true\n'),
+      /changed before replacement/,
+    )
+    writeBoundedFile(
+      source,
+      'export const value = expected\n',
+      worktree,
+      'export const value = false\n',
+    )
+    assert.equal(fs.readFileSync(source, 'utf8'), 'export const value = expected\n')
 
     const nested = path.join(directory, 'new-module', 'nested', 'index.ts')
     writeBoundedFile(nested, 'export const nested = true\n', worktree)
@@ -94,6 +112,30 @@ describe('bounded file transport', () => {
     writeBoundedFile(hardLink, 'safe replacement\n', worktree)
     assert.equal(fs.readFileSync(externalFile, 'utf8'), 'external secret\n')
     assert.equal(fs.readFileSync(hardLink, 'utf8'), 'safe replacement\n')
+  })
+
+  it('binds bounded snapshot content to the identity used for acceptance', () => {
+    const { worktree, directory } = fixture()
+    const source = path.join(directory, 'source.ts')
+    const content = 'export const reviewed = true\n'
+    fs.writeFileSync(source, content)
+
+    const snapshot = boundedFileSnapshot(source, worktree, Buffer.byteLength(content, 'utf8'))
+
+    assert.equal(snapshot.content, content)
+    assert.deepEqual(snapshot.identity, {
+      kind: 'file',
+      mode: fs.statSync(source).mode & 0o777,
+      sha256: createHash('sha256').update(Buffer.from(snapshot.content, 'utf8')).digest('hex'),
+      size: Buffer.byteLength(content, 'utf8'),
+    })
+    assert.throws(() => boundedFileSnapshot(source, worktree, content.length - 1), /configured byte limit/)
+
+    const bomContent = '\uFEFFexport const reviewed = true\n'
+    fs.writeFileSync(source, bomContent)
+    const bomSnapshot = boundedFileSnapshot(source, worktree, Buffer.byteLength(bomContent, 'utf8'))
+    assert.equal(bomSnapshot.content, bomContent)
+    assert.deepEqual(bomSnapshot.identity, boundedFileIdentity(source, worktree))
   })
 
   it('lists through the opened target descriptor and caps enumeration', () => {

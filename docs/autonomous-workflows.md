@@ -1,6 +1,6 @@
 # Autonomous Workflows
 
-Phase 1 adds bounded, session-owned execution to the existing declarative `development` and `e2e` DAGs. It provides deterministic scheduling, explicit budgets, structured stage results, persistence, cancellation, and a non-interactive child-permission profile. It does not provide full unattended software delivery.
+Phase 1 adds bounded, session-owned execution to the existing declarative `development` and `e2e` DAGs. Phase 2 adds configured validation operations for attended interactive stages and structured fixed-point swarm review. Together they provide deterministic scheduling, explicit budgets, structured results, persistence, cancellation, and bounded review/correction cycles. They do not provide full unattended software delivery.
 
 ## Autonomy Profiles
 
@@ -18,14 +18,14 @@ Before start or resume, bounded mode verifies that the current root agent's effe
 Bounded mode derives a child-specific rule set from the routed agent's effective OpenCode permissions:
 
 1. A wildcard deny provides the baseline for every built-in, plugin, and MCP permission.
-2. Only plugin-owned `workflow_bounded_list`, `workflow_bounded_read`, and `workflow_bounded_write`, plus todo state, can be re-enabled from explicit `allow` rules in the routed agent's effective policy. `ask` and `deny` both become deny, and a deny takes precedence when `glob` and `list` map to the same filtered-list authority. List, read, and write authority derive from canonical worktree-relative `glob`/`list`, `read`, and `edit` rules. Built-in discovery, read, edit, write, and apply-patch remain denied because their broader behavior or formatter hooks are outside the bounded contract. Built-in grep, LSP, and global or external skills remain denied.
+2. Only plugin-owned `workflow_bounded_list`, `workflow_bounded_read`, `workflow_bounded_write`, and todo state can be re-enabled from explicit `allow` rules in the routed agent's effective policy. `ask` and `deny` both become deny, and a deny takes precedence when `glob` and `list` map to the same filtered-list authority. List, read, and write authority derive from canonical worktree-relative `glob`/`list`, `read`, and `edit` rules. Built-in discovery, read, edit, write, and apply-patch remain denied because their broader behavior or formatter hooks are outside the bounded contract. Built-in grep, LSP, and global or external skills remain denied.
 3. Unknown and custom permissions remain denied even when the routed agent explicitly allowed them, leaving no unresolved child asks.
 4. Bash, network fetch (`webfetch` and `websearch`), external-directory access, questions, recovery prompts, plan transitions, nested Task calls, unsafe delegation, and environment-file reads are hard-denied. OpenCode's external-directory gate keeps file tools inside the project worktree.
-5. The automatic-workflow plugin independently rejects every stage tool outside a reviewed file-oriented runtime allowlist. File tools authorize only after resolving the same canonical worktree-relative path used by native OpenCode permissions. Descriptor-anchored filtered listing hides dotfiles, credential paths, control surfaces, and non-approved file types; each response returns at most 1,000 entries and reports truncation. Reads permit an explicit source/document extension allowlist, scan the returned region plus boundary overlap for common token formats and high-entropy values, and reject external, symbolic, or hard-linked targets. Writes reject hidden paths and listed host-executed control surfaces, create verified parent components, preserve existing mode bits, and atomically replace the target directory entry without invoking OpenCode formatters or shell commands. Reads return boundary-safe UTF-8 chunks. Built-in glob, list, and content search are unavailable.
+5. The automatic-workflow plugin independently rejects every stage tool outside a reviewed bounded runtime allowlist. File tools authorize only after resolving the same canonical worktree-relative path used by native OpenCode permissions. Descriptor-anchored filtered listing hides dotfiles, credential paths, control surfaces, and non-approved file types; each response returns at most 1,000 entries and reports truncation. Reads permit an explicit source/document extension allowlist, scan the returned region plus boundary overlap for common credential content, and reject external, symbolic, or hard-linked targets. Writes reject hidden paths and listed host-executed control surfaces, create verified parent components, preserve existing mode bits, and atomically replace the target directory entry without invoking OpenCode formatters or shell commands. Built-in glob, list, content search, executable validation, and shell remain unavailable.
 
 Malformed or unavailable effective agent permissions fail closed before the child session is created. Agent discovery and bounded child creation use the typed OpenCode v2 SDK client connected to the plugin's current server.
 
-This is an OpenCode permission policy, not an OS sandbox. It does not isolate the process with a container, virtual machine, separate user, or operating-system policy. Final file access is anchored through an opened parent-directory descriptor and fails closed when the platform exposes neither `/proc/self/fd` nor usable `/dev/fd` access. Bounded mode currently executes no shell commands. Tests, builds, linters, Git commands, and other executable checks therefore cannot be claimed as run by a bounded stage.
+This is an OpenCode permission policy, not an OS sandbox. It does not isolate the process with a container, virtual machine, separate user, or operating-system policy. Final file access is anchored through an opened parent-directory descriptor and fails closed when the platform exposes neither `/proc/self/fd` nor usable `/dev/fd` access. Bounded mode provides no general shell or executable validation. A stage must remain blocked when executable evidence is required.
 
 ## Setup
 
@@ -58,6 +58,8 @@ Bounded file I/O is cumulatively and atomically accounted in workflow state. Com
 
 Installer migration initializes missing bounded byte limits to `0` rather than deriving bytes from unrelated token budgets. Operators must select explicit nonzero values before bounded file tools can return or write content.
 
+To enable executable checks for attended workflows, keep `automation.autonomy` set to `interactive`, configure `validation_broker.enabled`, `max_runs_per_workflow`, and at least one complete named operation, then restart OpenCode. Validation-run usage is persisted with the workflow budget and is not reset by resume. Bounded workflows reject this tool because configured checks execute repository code without an OS sandbox. See [Validation And Fixed-Point Review](./validation-and-fixed-point-review.md).
+
 ## Blocked And Resume
 
 Automatic stage output supports `passed`, `failed`, and `blocked`. `retryable` is valid only for failed results; `blocker_code` and `required_action` are valid only for blocked results. A stage must use `blocked` when it lacks required information, access, credentials, approval, or authority, and must state the missing capability or operator decision in `required_action`. The engine then:
@@ -73,14 +75,12 @@ Resume reauthorizes routed agents under the workflow's persisted autonomy profil
 
 ## Current Delivery Boundary
 
-Phase 1 can coordinate bounded file-oriented stages and preserve a reliable record of what passed, failed, or lacked authority. Protected control files and credential-bearing paths require an attended path. Content scanning is defense in depth, not a guarantee that every secret or personal-data format will be recognized; do not enable bounded reads for a worktree that stores untracked credentials, data dumps, or other sensitive material. Ordinary source edits can still contain malicious behavior, so review them before any attended build, test, or execution. Because bounded mode cannot execute shell commands, it cannot independently prove builds, tests, migrations, deployment, or publication. Use attended workflows for those operations and keep unsupported automatic stages blocked rather than substituting unverified claims.
+Phases 1 and 2 can coordinate bounded edits, run explicitly configured validation in interactive workflows, and drive structured review/correction cycles. Correction models are tool-denied proposal generators that receive only bounded source snapshots; only status-confirmed source and documentation replacements with explicit edit authority pass through the bounded writer. Protected control files and credential-bearing paths still require an attended path. Content scanning is defense in depth, not a guarantee that every secret or personal-data format will be recognized; do not enable bounded reads for a worktree that stores untracked credentials, data dumps, or other sensitive material. Validation commands execute repository code, so configure them deliberately. The validation broker currently requires POSIX process-group semantics and is unavailable to bounded autonomy. Publication, deployment, arbitrary shell work, and unsupported checks remain outside the boundary.
 
 ## Secure Delivery Roadmap
 
-The following items are planned directions, not current capabilities:
+The delivery plan has five phases. Bounded autonomy and the validation/fixed-point review phase are complete. The remaining directions are not current capabilities:
 
-1. **Trusted validation broker** — typed, allowlisted validation operations with validated arguments, worktree containment, output and time limits, cancellation, and audit records; no general shell escape.
-2. **Dynamic swarm and fixed-point review** — budgeted review fan-out selected from observed risk, followed by bounded correction and review cycles until acceptance criteria stabilize or a configured limit stops the run.
 3. **Guarded publication and scrub** — explicit publication gates, secret and internal-information scanning, protected-target checks, previewable artifacts, and separate approval for external side effects.
 4. **Epic worktrees** — isolated worktrees for coordinated work items, dependency-aware integration, provenance, conflict handling, and guarded merges.
 5. **Durable queue autopilot** — restart-safe queued workflows with leases, idempotent reconciliation, ownership transfer, rate and budget controls, and explicit pause, cancel, and recovery operations.
@@ -92,3 +92,4 @@ OpenUltraCode may be consulted as an optional source of workflow ideas. It is no
 - [Workflow System](../WORKFLOWS.md)
 - [Agent Reference](./agents.md)
 - [Review System](./review-system.md)
+- [Validation And Fixed-Point Review](./validation-and-fixed-point-review.md)

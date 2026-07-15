@@ -220,15 +220,15 @@ Each stage runs in a child OpenCode session with a routed `wf-*` agent. Native T
 Before creating a bounded child session, the adapter uses the typed OpenCode v2 SDK client to load the routed agent's effective permissions and produces a rule set containing no `ask` actions:
 
 - A wildcard deny covers every built-in, plugin, and MCP permission by default.
-- Only plugin-owned `workflow_bounded_list`, `workflow_bounded_read`, and `workflow_bounded_write`, plus todo state, can be re-enabled from effective agent rules. List, read, and write authority derive from canonical worktree-relative `glob`/`list`, `read`, and `edit` rules. Built-in discovery, read, edit, write, and apply-patch remain denied because their broader behavior or formatter hooks are outside the bounded contract. Built-in grep, LSP, and global or external skills remain denied.
+- Only plugin-owned `workflow_bounded_list`, `workflow_bounded_read`, `workflow_bounded_write`, and todo state can be re-enabled from effective agent rules. List, read, and write authority derive from canonical worktree-relative `glob`/`list`, `read`, and `edit` rules. Built-in discovery, read, edit, write, and apply-patch remain denied because their broader behavior or formatter hooks are outside the bounded contract. Built-in grep, LSP, and global or external skills remain denied.
 - Existing denies in those categories remain denied. Only explicit allows remain allowed; asks become deny.
 - Unknown and custom permissions remain denied even when the agent explicitly allowed them.
 - Bash, `webfetch`, `websearch`, external-directory access, questions, recovery prompts, plan transitions, nested Task calls, unsafe delegation, and environment-file reads are hard-denied.
-- The automatic-workflow plugin independently rejects every unreviewed tool inside bounded stages, including built-in discovery/reading/editing, content search, LSP, process, network, custom, Skill, Task, swarm, delegation, and nested automatic-workflow tools. Only explicit source-policy allows can enable a plugin-owned tool; `ask` and `deny` remain denied. Plugin-owned file tools authorize only the resolved canonical worktree-relative target. Descriptor-anchored filtered listing hides dotfiles, credential paths, control surfaces, and non-approved file types, returns at most 1,000 entries, and reports truncation. Reads use an explicit source/document extension allowlist, scan returned content and boundary overlap for common token formats and high-entropy values, and reject external, symbolic, or hard-linked targets. Writes reject hidden paths and listed host-executed controls, create verified parent components, preserve existing mode bits, and atomically replace the directory entry without invoking OpenCode formatters or shell commands.
+- The automatic-workflow plugin independently rejects every unreviewed tool inside bounded stages, including built-in discovery/reading/editing, content search, LSP, validation or general processes, network, custom, Skill, Task, swarm, delegation, and nested automatic-workflow tools. Only explicit source-policy allows can enable a plugin-owned tool; `ask` and `deny` remain denied. Plugin-owned file tools authorize only the resolved canonical worktree-relative target. Descriptor-anchored filtered listing hides dotfiles, credential paths, control surfaces, and non-approved file types, returns at most 1,000 entries, and reports truncation. Reads use an explicit source/document extension allowlist, scan returned content and boundary overlap for common token formats and high-entropy values, and reject external, symbolic, or hard-linked targets. Writes reject hidden paths and listed host-executed controls, create verified parent components, preserve existing mode bits, and atomically replace the directory entry without invoking OpenCode formatters or shell commands.
 
 Before start and resume, the adapter also evaluates the current root agent's effective Task rules for every routed `wf-*` agent. If any resolves to `ask` or `deny`, the operation fails before creating artifacts or invoking OpenCode's authoritative permission check. The installed supervisor's `wf-*` allow means that check proceeds silently.
 
-This policy prevents an unattended child from waiting on a permission prompt. It is not an OS, container, or process sandbox. Final file access is anchored through an opened parent-directory descriptor and fails closed when neither `/proc/self/fd` nor usable `/dev/fd` access is available. Bounded stages currently execute no shell commands, including test, build, lint, or Git commands. Executable validation requires an attended path today and is planned for a typed, allowlisted validation broker.
+This policy prevents an unattended child from waiting on a permission prompt. It is not an OS, container, or process sandbox. Final file access is anchored through an opened parent-directory descriptor and fails closed when neither `/proc/self/fd` nor usable `/dev/fd` access is available. Bounded stages execute no general shell commands or validation processes. Named validation operations remain available only to attended interactive workflows because repository-controlled checks are executable authority.
 
 Bounded read and write bytes are atomically reserved and persisted per workflow so concurrent children cannot each consume the same remaining allowance. Complete serialized read and filtered-list responses use `max_bounded_read_bytes`; written UTF-8 content uses `max_bounded_write_bytes`. Each configured byte limit is capped at 16 MiB. These limits are independent of normal model-token counters.
 
@@ -251,8 +251,11 @@ The engine tracks:
 - Output and reasoning tokens
 - Reported message cost
 - Wall time from original workflow creation
+- Configured validation operations consumed
 
 Before a launch, exhausted limits pause scheduling. If usage crosses a limit while stages are running, those sessions are aborted and returned to pending before the workflow pauses. Attempt exhaustion also pauses for explicit intervention.
+
+The validation broker consumes its persisted run count before process creation. A failed, timed-out, cancelled, or redacted run still consumes one run. See [Validation And Fixed-Point Review](./docs/validation-and-fixed-point-review.md).
 
 Increase or otherwise change budgets in `workflows.json`, restart OpenCode, and use `/workflow-auto-resume` to apply them. A resume refreshes saved limits but does not reset accumulated usage or original wall-clock age.
 
@@ -324,10 +327,11 @@ The main tools are:
 - `swarm_collect_results`: retrieve final assistant text after completion
 - `swarm_cancel_task`: abort one task and release its queue slot
 - `swarm_spawn_validation`: create functional, security, and quality review tasks
+- `swarm_review_fixed_point`: bind changed files to worktree status, collect tool-denied scoped correction proposals, and run strict re-review rounds
 
 Global and per-provider concurrency come from `swarm_config`. Provider slots are derived from an explicitly supplied task model's provider prefix; tasks without one use the general queue. Queue state is persisted per caller session and restored paused after restart. The next `swarm_await_batch` call reauthorizes agents and the working directory before resuming queued work and reconciling running sessions; lifecycle events and staleness timers then drive completion.
 
-Swarm tasks normally share a working directory. Parallelize only work that can safely share that directory, or use a separate worktree mechanism. See [Swarm Mode](./docs/swarm-mode.md).
+Swarm tasks normally share a working directory. Parallelize only work that can safely share that directory, or use a separate worktree mechanism. Fixed-point reviewers run concurrently, but their single tool-denied correction-proposal task starts only after the review batch completes; the coordinator supplies bounded source snapshots, requests per-file edit authority, and applies validated scoped replacements before re-review. See [Swarm Mode](./docs/swarm-mode.md) and [Validation And Fixed-Point Review](./docs/validation-and-fixed-point-review.md).
 
 ## External CLI Delegation
 

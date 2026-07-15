@@ -108,6 +108,7 @@ function limits(overrides: Partial<AutomationLimits> = {}): AutomationLimits {
     max_output_tokens: 10_000,
     max_bounded_read_bytes: 10_000,
     max_bounded_write_bytes: 10_000,
+    max_validation_runs: 10,
     max_cost_usd: 10,
     ...overrides,
   }
@@ -264,9 +265,13 @@ describe('declarative workflow validation', () => {
     const stageResult = JSON.parse(fs.readFileSync(path.resolve('schema/stage-result.schema.json'), 'utf8'))
     const definitionSchema = JSON.parse(fs.readFileSync(path.resolve('schema/workflow-definition.schema.json'), 'utf8'))
     const stateSchema = JSON.parse(fs.readFileSync(path.resolve('schema/workflow-state.schema.json'), 'utf8'))
+    const reviewSchema = JSON.parse(fs.readFileSync(path.resolve('schema/structured-review-result.schema.json'), 'utf8'))
+    const correctionSchema = JSON.parse(fs.readFileSync(path.resolve('schema/review-correction-result.schema.json'), 'utf8'))
     ajv.addSchema(stageResult)
     assert.doesNotThrow(() => ajv.compile(definitionSchema))
     assert.doesNotThrow(() => ajv.compile(stateSchema))
+    assert.doesNotThrow(() => ajv.compile(reviewSchema))
+    assert.doesNotThrow(() => ajv.compile(correctionSchema))
   })
 
   it('validates blocked results through the public stage-result schema', () => {
@@ -545,8 +550,10 @@ describe('WorkflowEngine scheduling and events', () => {
     const legacyLimits = (legacy.budget as { limits: Record<string, unknown> }).limits
     delete legacyLimits.max_bounded_read_bytes
     delete legacyLimits.max_bounded_write_bytes
+    delete legacyLimits.max_validation_runs
     delete legacyBudget.usage.bounded_read_bytes
     delete legacyBudget.usage.bounded_write_bytes
+    delete legacyBudget.usage.validation_runs
     fs.writeFileSync(legacyPath, `${JSON.stringify(legacy, null, 2)}\n`)
     const normalizedLegacy = loadAutomaticWorkflowState(legacyPath)
     assert.equal(normalizedLegacy.autonomy, 'interactive')
@@ -554,6 +561,8 @@ describe('WorkflowEngine scheduling and events', () => {
     assert.equal(normalizedLegacy.budget.usage.bounded_write_bytes, 0)
     assert.equal(normalizedLegacy.budget.limits.max_bounded_read_bytes, 0)
     assert.equal(normalizedLegacy.budget.limits.max_bounded_write_bytes, 0)
+    assert.equal(normalizedLegacy.budget.limits.max_validation_runs, 0)
+    assert.equal(normalizedLegacy.budget.usage.validation_runs, 0)
 
     assert.throws(
       () => createEngine(workflowDefinition, adapter, { directory, state: saved, autonomy: 'interactive' }),
@@ -628,6 +637,36 @@ describe('WorkflowEngine budgets and persistence', () => {
     await Promise.all([ordered.cancel(), ordered.commit()])
     assert.equal(engine.snapshot().budget.usage.bounded_read_bytes, 4)
     assert.equal(engine.snapshot().budget.usage.bounded_write_bytes, 5)
+  })
+
+  it('atomically consumes the persisted validation run budget', async () => {
+    const adapter = new FakeAdapter()
+    const { engine } = createEngine(definition([{ id: 'validation' }]), adapter, {
+      budget: { max_validation_runs: 1 },
+      autonomy: 'bounded',
+    })
+    await start(engine)
+
+    const attempts = await Promise.allSettled([
+      engine.consumeValidationRun('child-1'),
+      engine.consumeValidationRun('child-1'),
+    ])
+    assert.equal(attempts.filter((result) => result.status === 'fulfilled').length, 1)
+    assert.equal(attempts.filter((result) => result.status === 'rejected').length, 1)
+    assert.equal(engine.snapshot().budget.usage.validation_runs, 1)
+  })
+
+  it('allows validation only from a currently running stage session', async () => {
+    const adapter = new FakeAdapter()
+    const { engine } = createEngine(definition([{ id: 'first' }, { id: 'second' }]), adapter, {
+      autonomy: 'bounded',
+    })
+    await start(engine)
+    await complete(engine, adapter, 'first')
+
+    assert.equal(engine.snapshot().status, 'running')
+    await assert.rejects(engine.consumeValidationRun('child-1'), /currently running workflow stage session/)
+    await assert.doesNotReject(engine.consumeValidationRun('child-2'))
   })
 
   it('pauses instead of false-completing when session or attempt budgets are exhausted', async () => {

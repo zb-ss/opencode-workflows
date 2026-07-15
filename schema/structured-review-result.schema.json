@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://opencode-workflows.example/schema/structured-review-result.schema.json",
+  "title": "Structured Fixed-Point Review Result",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "verdict": { "type": "string", "const": "pass" },
+        "summary": { "type": "string", "minLength": 1, "maxLength": 4000, "pattern": "^(?=.*\\S)[^\\0]+$" },
+        "issues": {
+          "maxItems": 0,
+          "type": "array",
+          "items": { "$ref": "#/$defs/reviewIssue" }
+        },
+        "resolved_issue_ids": { "$ref": "#/$defs/resolvedIssueIds" }
+      },
+      "required": ["verdict", "summary", "issues", "resolved_issue_ids"],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "verdict": { "type": "string", "const": "fail" },
+        "summary": { "type": "string", "minLength": 1, "maxLength": 4000, "pattern": "^(?=.*\\S)[^\\0]+$" },
+        "issues": {
+          "minItems": 1,
+          "maxItems": 100,
+          "type": "array",
+          "items": { "$ref": "#/$defs/reviewIssue" }
+        },
+        "resolved_issue_ids": { "$ref": "#/$defs/resolvedIssueIds" }
+      },
+      "required": ["verdict", "summary", "issues", "resolved_issue_ids"],
+      "additionalProperties": false
+    }
+  ],
+  "$defs": {
+    "reviewIssue": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 64, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$" },
+        "severity": { "type": "string", "enum": ["critical", "high", "major", "medium", "minor", "low"] },
+        "summary": { "type": "string", "minLength": 1, "maxLength": 4000, "pattern": "^(?=.*\\S)[^\\0]+$" },
+        "location": { "type": "string", "minLength": 1, "maxLength": 1000, "pattern": "^(?=.*\\S)[^\\0]+$" },
+        "remediation": { "type": "string", "minLength": 1, "maxLength": 4000, "pattern": "^(?=.*\\S)[^\\0]+$" }
+      },
+      "required": ["id", "severity", "summary", "remediation"],
+      "additionalProperties": false
+    },
+    "resolvedIssueIds": {
+      "maxItems": 100,
+      "type": "array",
+      "items": { "type": "string", "maxLength": 64, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$" },
+      "uniqueItems": true
+    }
+  }
+}

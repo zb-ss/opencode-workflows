@@ -1,0 +1,1 @@
+export const MAX_JSON_ESCAPE_BYTES_PER_INPUT_BYTE = 6

@@ -87,6 +87,21 @@ describe('bounded automatic workflow plugin', () => {
         max_bounded_write_bytes: 1_000,
         max_cost_usd: 1,
       },
+      validation_broker: {
+        enabled: true,
+        max_runs_per_workflow: 2,
+        operations: {
+          smoke: {
+            argv: ['/usr/bin/node', '-e', "process.stdout.write('validated')"],
+            working_directory: '.',
+            permission_pattern: 'node validation-smoke',
+            environment: [],
+            timeout_ms: 1000,
+            max_output_bytes: 1000,
+            success_exit_codes: [0],
+          },
+        },
+      },
     }))
     fs.writeFileSync(path.join(configDirectory, 'mode', 'standard.json'), JSON.stringify({
       agent_routing: { planning: 'architect' },
@@ -189,6 +204,18 @@ describe('bounded automatic workflow plugin', () => {
     assert.equal(JSON.parse(defaultReadOutput).content, args.content)
     const listOutput = await hooks.tool!.workflow_bounded_list.execute({}, childContext) as string
     assert.deepEqual(JSON.parse(listOutput).entries, [{ name: 'source.ts', type: 'file' }])
+    const validationArgs = { operation: 'smoke' }
+    await assert.rejects(
+      hooks['tool.execute.before']!(
+        { tool: 'workflow_validation_run', sessionID: childSessionId, callID: 'validation-call' },
+        { args: validationArgs },
+      ),
+      /not allowed inside a bounded automatic workflow stage/,
+    )
+    await assert.rejects(
+      hooks.tool!.workflow_validation_run.execute(validationArgs, childContext),
+      /requires interactive autonomy.*not OS-sandboxed/,
+    )
     const status = JSON.parse(await hooks.tool!.workflow_auto_status.execute({}, rootContext) as string)
     assert.equal(
       status.workflow.budget.usage.bounded_read_bytes,
@@ -197,6 +224,7 @@ describe('bounded automatic workflow plugin', () => {
         + Buffer.byteLength(listOutput, 'utf8'),
     )
     assert.equal(status.workflow.budget.usage.bounded_write_bytes, Buffer.byteLength(args.content, 'utf8'))
+    assert.equal(status.workflow.budget.usage.validation_runs, 0)
     await assert.rejects(
       hooks['tool.execute.before']!(
         { tool: 'edit', sessionID: childSessionId, callID: 'edit-call' },

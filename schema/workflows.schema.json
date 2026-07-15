@@ -115,6 +115,63 @@
       },
       "additionalProperties": false
     },
+    "validation_broker": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean", "default": false },
+        "max_runs_per_workflow": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "operations": {
+          "type": "object",
+          "propertyNames": { "$ref": "#/$defs/safeIdentifier" },
+          "additionalProperties": { "$ref": "#/$defs/validationOperation" }
+        }
+      },
+      "required": [],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": { "properties": { "enabled": { "const": true } }, "required": ["enabled"] },
+          "then": {
+            "required": ["max_runs_per_workflow", "operations"],
+            "properties": { "operations": { "type": "object", "minProperties": 1 } }
+          }
+        }
+      ]
+    },
+    "review_loop": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean", "default": false },
+        "max_iterations": { "type": "integer", "minimum": 1, "maximum": 10 },
+        "batch_timeout_ms": { "type": "integer", "minimum": 1, "maximum": 3600000 },
+        "max_result_bytes": { "type": "integer", "minimum": 1, "maximum": 1048576 },
+        "correction_agent": { "$ref": "#/$defs/safeIdentifier" },
+        "correction_focus": { "type": "string", "minLength": 1, "maxLength": 4000 },
+        "reviewers": {
+          "type": "array",
+          "maxItems": 16,
+          "items": { "$ref": "#/$defs/reviewLoopReviewer" }
+        }
+      },
+      "required": [],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": { "properties": { "enabled": { "const": true } }, "required": ["enabled"] },
+          "then": {
+            "required": [
+              "max_iterations",
+              "batch_timeout_ms",
+              "max_result_bytes",
+              "correction_agent",
+              "correction_focus",
+              "reviewers"
+            ],
+            "properties": { "reviewers": { "type": "array", "minItems": 1, "contains": { "type": "object", "properties": { "always": { "const": true } } } } }
+          }
+        }
+      ]
+    },
     "swarm_config": {
       "type": "object",
       "properties": {
@@ -142,6 +199,65 @@
   ],
   "additionalProperties": false,
   "$defs": {
+    "safeIdentifier": {
+      "type": "string",
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+    },
+    "validationOperation": {
+      "type": "object",
+      "properties": {
+        "argv": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "prefixItems": [{ "type": "string", "minLength": 1, "maxLength": 1024, "pattern": "^/[^\\u0000]*$" }],
+          "items": { "type": "string", "minLength": 1, "maxLength": 1024, "pattern": "^[^\\u0000]+$" }
+        },
+        "working_directory": { "type": "string", "minLength": 1, "maxLength": 1024, "allOf": [{ "not": { "pattern": "^(?:/|[A-Za-z]:[\\\\/]|\\\\)" } }, { "not": { "pattern": "\\u0000" } }] },
+        "permission_pattern": { "type": "string", "minLength": 1, "maxLength": 1024, "not": { "pattern": "\\u0000" } },
+        "environment": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": { "type": "string", "maxLength": 1024, "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" }
+        },
+        "timeout_ms": { "type": "integer", "minimum": 1, "maximum": 3600000 },
+        "max_output_bytes": { "type": "integer", "minimum": 1, "maximum": 16777216 },
+        "success_exit_codes": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": { "type": "integer", "minimum": 0, "maximum": 255 }
+        }
+      },
+      "required": ["argv", "working_directory", "permission_pattern", "environment", "timeout_ms", "max_output_bytes", "success_exit_codes"],
+      "additionalProperties": false
+    },
+    "reviewLoopReviewer": {
+      "type": "object",
+      "properties": {
+        "id": { "$ref": "#/$defs/safeIdentifier" },
+        "agent": { "$ref": "#/$defs/safeIdentifier" },
+        "always": { "type": "boolean" },
+        "risk_tags": {
+          "type": "array",
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/safeIdentifier" }
+        },
+        "focus": { "type": "string", "minLength": 1, "maxLength": 4000 }
+      },
+      "required": ["id", "agent", "always", "risk_tags", "focus"],
+      "allOf": [
+        {
+          "if": { "properties": { "always": { "const": false } }, "required": ["always"] },
+          "then": { "properties": { "risk_tags": { "type": "array", "minItems": 1 } } }
+        }
+      ],
+      "additionalProperties": false
+    },
     "modelId": {
       "type": "string",
       "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*/\\S+$"

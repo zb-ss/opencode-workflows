@@ -94,6 +94,7 @@
             "max_output_tokens",
             "max_bounded_read_bytes",
             "max_bounded_write_bytes",
+            "max_validation_runs",
             "max_cost_usd"
           ],
           "properties": {
@@ -105,6 +106,7 @@
             "max_output_tokens": { "type": "integer", "minimum": 0 },
             "max_bounded_read_bytes": { "type": "integer", "minimum": 0, "maximum": 16777216 },
             "max_bounded_write_bytes": { "type": "integer", "minimum": 0, "maximum": 16777216 },
+            "max_validation_runs": { "type": "integer", "minimum": 0, "maximum": 100 },
             "max_cost_usd": { "type": ["number", "null"], "minimum": 0 }
           }
         },
@@ -119,6 +121,7 @@
             "cost_usd",
             "bounded_read_bytes",
             "bounded_write_bytes",
+            "validation_runs",
             "messages"
           ],
           "properties": {
@@ -129,6 +132,7 @@
             "cost_usd": { "type": "number", "minimum": 0 },
             "bounded_read_bytes": { "type": "integer", "minimum": 0 },
             "bounded_write_bytes": { "type": "integer", "minimum": 0 },
+            "validation_runs": { "type": "integer", "minimum": 0 },
             "messages": {
               "type": "object",
               "additionalProperties": {

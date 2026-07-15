@@ -10,7 +10,11 @@ import {
   type BoundedIoKind,
   type BoundedIoReservation,
 } from './bounded-io-ledger.ts'
-import { MAX_BOUNDED_IO_BYTES, type ModelCandidate } from './workflow-config.ts'
+import {
+  MAX_BOUNDED_IO_BYTES,
+  MAX_VALIDATION_RUNS_PER_WORKFLOW,
+  type ModelCandidate,
+} from './workflow-config.ts'
 
 export type WorkflowModelTier = 'low' | 'mid' | 'high'
 export type AutomaticWorkflowStatus = 'running' | 'paused' | 'completed' | 'failed' | 'cancelled'
@@ -64,6 +68,7 @@ export interface AutomationLimits {
   max_output_tokens: number
   max_bounded_read_bytes: number
   max_bounded_write_bytes: number
+  max_validation_runs: number
   max_cost_usd: number | null
 }
 
@@ -111,6 +116,7 @@ export interface AutomaticWorkflowState {
       cost_usd: number
       bounded_read_bytes: number
       bounded_write_bytes: number
+      validation_runs: number
       messages: Record<string, MessageUsage>
     }
   }
@@ -379,6 +385,13 @@ export function validateAutomationLimits(input: AutomationLimits): AutomationLim
     max_output_tokens: nonNegativeInteger(input.max_output_tokens, 'max_output_tokens'),
     max_bounded_read_bytes: boundedByteLimit(input.max_bounded_read_bytes, 'max_bounded_read_bytes'),
     max_bounded_write_bytes: boundedByteLimit(input.max_bounded_write_bytes, 'max_bounded_write_bytes'),
+    max_validation_runs: (() => {
+      const runs = nonNegativeInteger(input.max_validation_runs, 'max_validation_runs')
+      if (runs > MAX_VALIDATION_RUNS_PER_WORKFLOW) {
+        throw new Error(`max_validation_runs must not exceed ${MAX_VALIDATION_RUNS_PER_WORKFLOW}`)
+      }
+      return runs
+    })(),
     max_cost_usd: input.max_cost_usd === null
       ? null
       : (() => {
@@ -394,14 +407,13 @@ export function loadWorkflowDefinition(filePath: string): WorkflowDefinition {
   return validateWorkflowDefinition(JSON.parse(fs.readFileSync(filePath, 'utf8')))
 }
 
-function byteDefaults(value: unknown, first: string, second: string): unknown {
+function numericDefaults(value: unknown, fields: string[]): unknown {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return value
   const input = value as Record<string, unknown>
-  return {
-    ...input,
-    [first]: input[first] ?? 0,
-    [second]: input[second] ?? 0,
-  }
+  return Object.fromEntries([
+    ...Object.entries(input),
+    ...fields.filter((field) => input[field] === undefined).map((field) => [field, 0]),
+  ])
 }
 
 function normalizeAutomaticWorkflowState(parsed: unknown): unknown {
@@ -419,8 +431,12 @@ function normalizeAutomaticWorkflowState(parsed: unknown): unknown {
     ...(autonomy === undefined ? {} : { autonomy }),
     budget: {
       ...budget,
-      limits: byteDefaults(budget.limits, 'max_bounded_read_bytes', 'max_bounded_write_bytes'),
-      usage: byteDefaults(budget.usage, 'bounded_read_bytes', 'bounded_write_bytes'),
+      limits: numericDefaults(budget.limits, [
+        'max_bounded_read_bytes', 'max_bounded_write_bytes', 'max_validation_runs',
+      ]),
+      usage: numericDefaults(budget.usage, [
+        'bounded_read_bytes', 'bounded_write_bytes', 'validation_runs',
+      ]),
     },
   }
 }
@@ -481,12 +497,13 @@ export function validateAutomaticWorkflowState(input: unknown): asserts input is
     usage,
     [
       'sessions', 'attempts', 'input_tokens', 'output_tokens', 'cost_usd',
-      'bounded_read_bytes', 'bounded_write_bytes', 'messages',
+      'bounded_read_bytes', 'bounded_write_bytes', 'validation_runs', 'messages',
     ],
     'automatic workflow usage',
   )
   for (const key of [
     'sessions', 'attempts', 'input_tokens', 'output_tokens', 'bounded_read_bytes', 'bounded_write_bytes',
+    'validation_runs',
   ]) {
     nonNegativeInteger(usage[key], `automatic workflow usage ${key}`)
   }
@@ -637,6 +654,7 @@ export class WorkflowEngine {
             cost_usd: 0,
             bounded_read_bytes: 0,
             bounded_write_bytes: 0,
+            validation_runs: 0,
             messages: {},
           },
         },
@@ -751,6 +769,25 @@ export class WorkflowEngine {
     return this.boundedIoLedger.reserve(kind, requestedBytes)
   }
 
+  consumeValidationRun(sessionId: string): Promise<number> {
+    return this.serial(async () => {
+      const state = this.requiredState()
+      if (state.status !== 'running') {
+        throw new Error('validation operations require a running workflow')
+      }
+      const stage = Object.values(state.stages).find((candidate) => candidate.session_id === sessionId)
+      if (!stage || stage.status !== 'running') {
+        throw new Error('validation operations require the currently running workflow stage session')
+      }
+      if (state.budget.usage.validation_runs >= state.budget.limits.max_validation_runs) {
+        throw new Error('validation run budget exhausted')
+      }
+      state.budget.usage.validation_runs++
+      this.persist()
+      return state.budget.usage.validation_runs
+    })
+  }
+
   dispose(): void {
     this.clearWallTimer()
   }
@@ -853,7 +890,7 @@ export class WorkflowEngine {
       ...(dependencySummaries.length > 0 ? ['', 'Dependency results:', ...dependencySummaries] : []),
       '',
       ...(this.autonomy === 'bounded' ? [
-        'Bounded stage: use workflow_bounded_list, workflow_bounded_read, and workflow_bounded_write for permitted source files. Built-in list, glob, read, edit, write, apply_patch, grep, LSP, Skill, shell, and network tools are unavailable.',
+        'Bounded stage: use workflow_bounded_list, workflow_bounded_read, and workflow_bounded_write for permitted source files. Executable validation is unavailable because bounded mode does not provide an OS sandbox. Built-in list, glob, read, edit, write, apply_patch, grep, LSP, Skill, shell, and network tools are unavailable.',
       ] : []),
       'Do not call the Task tool or spawn nested agents. This session is the complete budgeted stage.',
       'Do not ask questions. This automatic stage cannot receive interactive answers.',

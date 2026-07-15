@@ -6,7 +6,14 @@ import path from 'node:path'
 import { afterEach, describe, it } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { MAX_BOUNDED_IO_BYTES, configuredCandidates, transformModelMetadata } from '../install.mjs'
-import { MAX_BOUNDED_IO_BYTES as RUNTIME_MAX_BOUNDED_IO_BYTES } from '../lib/workflow-config.ts'
+import {
+  MAX_BOUNDED_IO_BYTES as RUNTIME_MAX_BOUNDED_IO_BYTES,
+  MAX_REVIEW_ITERATIONS,
+  MAX_REVIEW_RESULT_BYTES,
+  MAX_VALIDATION_OUTPUT_BYTES,
+  MAX_VALIDATION_RUNS_PER_WORKFLOW,
+  MAX_VALIDATION_TIMEOUT_MS,
+} from '../lib/workflow-config.ts'
 
 const REPO_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 const INSTALLER = path.join(REPO_ROOT, 'install.mjs')
@@ -209,6 +216,14 @@ describe('installer subprocess', () => {
       assert.equal(configured[field].maximum, MAX_BOUNDED_IO_BYTES)
       assert.equal(persisted[field].maximum, MAX_BOUNDED_IO_BYTES)
     }
+    const validationOperation = workflowSchema.$defs.validationOperation.properties
+    assert.equal(validationOperation.timeout_ms.maximum, MAX_VALIDATION_TIMEOUT_MS)
+    assert.equal(validationOperation.max_output_bytes.maximum, MAX_VALIDATION_OUTPUT_BYTES)
+    assert.equal(workflowSchema.properties.validation_broker.properties.max_runs_per_workflow.maximum, MAX_VALIDATION_RUNS_PER_WORKFLOW)
+    assert.equal(persisted.max_validation_runs.maximum, MAX_VALIDATION_RUNS_PER_WORKFLOW)
+    assert.equal(workflowSchema.properties.review_loop.properties.max_iterations.maximum, MAX_REVIEW_ITERATIONS)
+    assert.equal(workflowSchema.properties.review_loop.properties.batch_timeout_ms.maximum, MAX_VALIDATION_TIMEOUT_MS)
+    assert.equal(workflowSchema.properties.review_loop.properties.max_result_bytes.maximum, MAX_REVIEW_RESULT_BYTES)
   })
 
   it('describes autonomy as automatic-stage permission handling only in help output', () => {

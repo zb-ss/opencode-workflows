@@ -119,8 +119,10 @@ describe('bounded autonomy policy', () => {
     const allowed = resolveBoundedPermissionRules([
       { permission: '*', pattern: '*', action: 'allow' },
       { permission: 'edit', pattern: '*', action: 'allow' },
+      { permission: 'workflow_validation_run', pattern: '*', action: 'allow' },
     ])
     assert.equal(evaluatePermissionRules(allowed, 'workflow_bounded_write', 'source.ts'), 'allow')
+    assert.equal(evaluatePermissionRules(allowed, 'workflow_validation_run', 'npm test'), 'deny')
     assert.equal(evaluatePermissionRules(allowed, 'custom_tool', '*'), 'deny')
   })
 

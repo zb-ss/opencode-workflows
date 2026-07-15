@@ -42,8 +42,7 @@ Automatic DAG sessions do not use the manual `VERDICT:` parser. Every stage must
 {
   "status": "passed",
   "summary": "Directly verified result",
-  "details": ["Optional evidence"],
-  "retryable": true
+  "details": ["Optional evidence"]
 }
 ```
 
@@ -52,6 +51,8 @@ The engine validates the object strictly. Invalid JSON or unsupported fields fai
 ## Swarm Validation
 
 `swarm_spawn_validation` creates functional, security, and quality review sessions. All results are expected to pass. The runtime does not calculate a two-out-of-three consensus and does not convert assistant prose into a combined verdict; the caller must collect and evaluate every result.
+
+`swarm_review_fixed_point` is the structured alternative. It selects only configured always-on and risk-matched reviewers, binds the caller's changed-file list to authoritative path and content identities, and supplies bounded secret-scanned snapshots to tool-denied reviewer sessions. One tool-denied correction agent proposes complete replacements for that immutable scope. The coordinator rechecks source content, requests per-file edit authority, and applies approved source or documentation replacements through the bounded file transport before starting a fresh review round. Each repeat reviewer must explicitly retain or resolve every prior issue ID. It returns `accepted` only when every selected reviewer passes in the same round and two whole-set identity passes remain stable under the project review lease. Repeated issue IDs, iteration exhaustion, correction blockers, invalid or credential-bearing output, child failure, and timeout remain explicit non-pass outcomes.
 
 ## Delegated Worktree Review
 
@@ -71,3 +72,4 @@ For automatic workflows, terminal status is computed from required stage states.
 - [Swarm Mode](./swarm-mode.md)
 - [Delegated Workflows](./delegated-workflows.md)
 - [E2E Testing](./e2e-testing.md)
+- [Validation And Fixed-Point Review](./validation-and-fixed-point-review.md)

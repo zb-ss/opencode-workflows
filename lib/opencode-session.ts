@@ -21,6 +21,7 @@ export interface SessionPromptOptions {
 export interface SessionCreateOptions {
   agent?: string
   autonomy?: AutonomyProfile
+  permission?: PermissionRule[]
 }
 
 type SdkEnvelope<T> = {
@@ -76,6 +77,10 @@ export class OpenCodeSessionAdapter {
   ) {}
 
   async create(title: string, parentID?: string, options: SessionCreateOptions = {}): Promise<Pick<Session, 'id'>> {
+    if (options.permission && options.autonomy) {
+      throw new Error('session creation cannot combine an autonomy profile with explicit permissions')
+    }
+    if (options.permission) return this.createWithPermissions(title, parentID, options.agent, options.permission)
     if (options.autonomy === 'bounded') return this.createBounded(title, parentID, options.agent)
 
     const result = await this.client.session.create({
@@ -84,6 +89,25 @@ export class OpenCodeSessionAdapter {
       throwOnError: true,
     })
     return unwrapSdkResult<Session>(result, 'session.create')
+  }
+
+  private async createWithPermissions(
+    title: string,
+    parentID: string | undefined,
+    agent: string | undefined,
+    permission: PermissionRule[],
+  ): Promise<Pick<Session, 'id'>> {
+    if (!agent) throw new Error('restricted session creation requires an agent')
+    if (!this.autonomyClient) throw new Error('restricted session creation requires the OpenCode v2 client')
+    const rules = parsePermissionRules(permission)
+    const result = await this.autonomyClient.session.create({
+      directory: this.directory,
+      title,
+      ...(parentID ? { parentID } : {}),
+      agent,
+      permission: rules,
+    }, { throwOnError: true })
+    return unwrapSdkResult<Pick<Session, 'id'>>(result, 'session.create')
   }
 
   private async createBounded(
@@ -186,14 +210,20 @@ export class OpenCodeSessionAdapter {
     return unwrapSdkResult<Array<{ info: Message; parts: Part[] }>>(result, 'session.messages')
   }
 
-  async lastAssistantText(sessionID: string): Promise<string> {
+  async lastAssistantText(sessionID: string, maximumBytes = Number.MAX_SAFE_INTEGER): Promise<string> {
     const messages = await this.messages(sessionID)
     const assistant = messages.slice().reverse().find((message) => message.info.role === 'assistant')
     if (!assistant) return ''
-    return assistant.parts
+    const parts = assistant.parts
       .filter((part): part is Extract<Part, { type: 'text' }> => part.type === 'text')
-      .map((part) => part.text)
-      .join('\n')
+    const output: string[] = []
+    let bytes = 0
+    for (const part of parts) {
+      bytes += Buffer.byteLength(part.text, 'utf8') + (output.length === 0 ? 0 : 1)
+      if (bytes > maximumBytes) throw new Error('assistant text exceeds configured result bytes')
+      output.push(part.text)
+    }
+    return output.join('\n')
   }
 
   async availableModels(): Promise<Map<string, { variants: string[]; status?: string; context?: number }>> {

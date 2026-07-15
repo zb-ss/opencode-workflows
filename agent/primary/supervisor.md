@@ -247,10 +247,11 @@ When mode is `swarm`, use swarm tools for parallel execution:
 swarm_spawn_batch(batchId, tasks, workingDir)
 swarm_await_batch(batchId, timeoutMs)
 swarm_spawn_validation(workingDir, summary, changedFiles)
+swarm_review_fixed_point(summary, changedFiles, riskTags)
 swarm_collect_results(batchId)
 ```
 
-Max 4 sessions per batch, 100ms delay between spawns.
+Respect the configured global and per-provider swarm concurrency. Use `swarm_review_fixed_point` only when `review_loop` is enabled; supply observed configured risk tags, never invented tags. Treat `accepted` as the only passing terminal status.
 
 ## Review Iteration Tracking
 

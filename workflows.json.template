@@ -28,6 +28,52 @@
     "autonomy": "interactive"
   },
 
+  "_comment_validation_broker": "Optional named validation operations for attended interactive automatic stages. Bounded autonomy rejects executable validation because it is not OS-sandboxed. argv[0] is an operator-configured absolute executable path; commands are fixed argv arrays, never shell text. Configure explicit limits before enabling.",
+  "_example_validation_operation": {
+    "argv": ["/absolute/path/to/package-manager", "run", "check"],
+    "working_directory": ".",
+    "permission_pattern": "package-manager run check",
+    "environment": [],
+    "timeout_ms": 300000,
+    "max_output_bytes": 1048576,
+    "success_exit_codes": [0]
+  },
+  "validation_broker": {
+    "enabled": false,
+    "max_runs_per_workflow": 10,
+    "operations": {}
+  },
+
+  "_comment_review_loop": "Optional structured swarm review and correction loop. Reviewer selection is driven by always plus risk_tags; all limits and agents are operator-configured.",
+  "_example_review_loop": {
+    "enabled": true,
+    "max_iterations": 3,
+    "batch_timeout_ms": 300000,
+    "max_result_bytes": 1048576,
+    "correction_agent": "wf-executor",
+    "correction_focus": "Propose complete scoped file replacements for every reported issue, and report blockers without claiming success.",
+    "reviewers": [
+      {
+        "id": "functional",
+        "agent": "wf-reviewer-deep",
+        "always": true,
+        "risk_tags": [],
+        "focus": "Review functional correctness and requirement completeness."
+      },
+      {
+        "id": "security",
+        "agent": "wf-security-deep",
+        "always": false,
+        "risk_tags": ["security"],
+        "focus": "Review authorization, injection, data exposure, and unsafe execution risks."
+      }
+    ]
+  },
+  "review_loop": {
+    "enabled": false,
+    "reviewers": []
+  },
+
   "_comment_capabilities": "Capability values are disabled, auto, or required. Auto uses a capability when runtime support is detected. Required also stops automatic workflow start or resume when support is unavailable. These settings are never copied as unknown opencode.json keys.",
   "_comment_optional_integrations": "Experimental runtime support is detected from the documented OpenCode environment flags. Plugin v2 support is detected from the loaded plugin runtime.",
   "experimental_capabilities": {
