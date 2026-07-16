@@ -13,7 +13,7 @@
  * - Step failed: Critical notification requiring attention
  */
 
-import type { Plugin } from "@opencode-ai/plugin"
+import { tool as pluginTool, type Plugin } from "@opencode-ai/plugin"
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { getWorkflowForSession, allMandatoryGatesPassed } from '../lib/state.ts'
@@ -126,7 +126,6 @@ async function sendNotification(
  * Main plugin export
  */
 export const WorkflowNotifications: Plugin = async () => {
-  const { tool: pluginTool } = await import('@opencode-ai/plugin')
   const z = pluginTool.schema
 
   // Track seen events to avoid duplicate notifications

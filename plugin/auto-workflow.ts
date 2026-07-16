@@ -1,4 +1,4 @@
-import type { Plugin, ToolContext } from '@opencode-ai/plugin'
+import { tool, type Plugin, type ToolContext } from '@opencode-ai/plugin'
 import fs from 'node:fs'
 import path from 'node:path'
 
@@ -135,7 +135,6 @@ function stateSummary(state: AutomaticWorkflowState) {
 }
 
 export const AutoWorkflow: Plugin = async ({ client, directory }) => {
-  const { tool } = await import('@opencode-ai/plugin')
   const engines = new Map<string, WorkflowEngine>()
   const pluginDirectory = path.resolve(directory)
 

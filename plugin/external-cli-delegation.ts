@@ -5,7 +5,7 @@
  * approval. Run records and bounded process output are isolated by session.
  */
 
-import type { Plugin, ToolContext } from '@opencode-ai/plugin'
+import { tool as pluginTool, type Plugin, type ToolContext } from '@opencode-ai/plugin'
 import { spawn } from 'node:child_process'
 import crypto from 'node:crypto'
 import fs from 'node:fs'
@@ -1636,7 +1636,6 @@ export async function executeDelegateCommand(
 }
 
 export const ExternalCliDelegation: Plugin = async () => {
-  const { tool: pluginTool } = await import('@opencode-ai/plugin')
   const z = pluginTool.schema
 
   return {

@@ -1,4 +1,4 @@
-import type { Plugin, ToolContext } from '@opencode-ai/plugin'
+import { tool, type Plugin, type ToolContext } from '@opencode-ai/plugin'
 import fs from 'node:fs'
 import path from 'node:path'
 
@@ -97,7 +97,6 @@ function validationTasks(summary: string, changedFiles: string): SwarmTask[] {
 }
 
 export const SwarmManager: Plugin = async ({ client, directory }) => {
-  const { tool } = await import('@opencode-ai/plugin')
   const swarmConfig = loadSwarmConfig()
   const runtime = new SwarmRuntime(client, swarmConfig, { scopeDirectory: directory })
   log('swarm', `SwarmManager initialized with global concurrency ${swarmConfig.default_concurrency ?? 4}`)

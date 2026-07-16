@@ -14,7 +14,7 @@
  * - workflow_get_state: Read workflow state
  */
 
-import type { Plugin, ToolContext } from "@opencode-ai/plugin"
+import { tool as pluginTool, type Plugin, type ToolContext } from "@opencode-ai/plugin"
 import {
   getWorkflowForSession,
   allMandatoryGatesPassed,
@@ -77,7 +77,6 @@ function formatWorktreeOwnership(state: WorkflowState, worktree: string): string
 }
 
 export const WorkflowEnforcer: Plugin = async ({ client, worktree, project }) => {
-  const { tool: pluginTool } = await import('@opencode-ai/plugin')
   const z = pluginTool.schema
 
   // Stop-guard counters (replaces file-based counters from Claude Code hooks)
