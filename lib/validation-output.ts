@@ -1,9 +1,10 @@
 import crypto from 'node:crypto'
 
-import { containsSensitiveContent } from './sensitive-content.ts'
+import {
+  containsSensitiveContent,
+  SENSITIVE_CONTENT_STREAM_OVERLAP_BYTES,
+} from './sensitive-content.ts'
 import type { ValidationRunResult } from './validation-types.ts'
-
-const SENSITIVE_STREAM_OVERLAP_BYTES = 4096
 
 export interface CapturedOutput {
   chunks: Buffer[]
@@ -30,7 +31,7 @@ export function appendOutput(output: CapturedOutput, chunk: Buffer, remaining: n
   const sensitiveWindow = Buffer.concat([output.sensitiveTail, chunk])
   if (containsSensitiveContent(sensitiveWindow.toString('utf8'))) output.sensitive = true
   output.sensitiveTail = Buffer.from(
-    sensitiveWindow.subarray(Math.max(0, sensitiveWindow.length - SENSITIVE_STREAM_OVERLAP_BYTES)),
+    sensitiveWindow.subarray(Math.max(0, sensitiveWindow.length - SENSITIVE_CONTENT_STREAM_OVERLAP_BYTES)),
   )
   output.totalBytes = Math.min(Number.MAX_SAFE_INTEGER, output.totalBytes + chunk.length)
   if (remaining <= 0) return 0

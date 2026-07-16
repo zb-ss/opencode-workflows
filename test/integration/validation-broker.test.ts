@@ -188,7 +188,7 @@ describe('ValidationBroker integration', () => {
 
   it('redacts a credential detected after the returned-output cap across stream chunks', async () => {
     const fixtureData = fixture(operation(
-      "process.stdout.write('x'.repeat(16) + '\\npassword=su'); setTimeout(() => process.stdout.write('persecret'), 5)",
+      "process.stdout.write('password=\"' + 'a'.repeat(4090)); setTimeout(() => process.stdout.write('aaaaaa\"'), 5)",
       { max_output_bytes: 20 },
     ))
 
