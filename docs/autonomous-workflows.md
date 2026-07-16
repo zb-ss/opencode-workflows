@@ -1,6 +1,6 @@
 # Autonomous Workflows
 
-Phase 1 adds bounded, session-owned execution to the existing declarative `development` and `e2e` DAGs. Phase 2 adds configured validation operations for attended interactive stages and structured fixed-point swarm review. Together they provide deterministic scheduling, explicit budgets, structured results, persistence, cancellation, and bounded review/correction cycles. They do not provide full unattended software delivery.
+Phase 1 adds bounded, session-owned execution to the existing declarative `development` and `e2e` DAGs. Phase 2 adds configured validation operations for attended interactive stages and structured fixed-point swarm review. Phase 3 adds post-completion guarded publication with immutable previews, complete-history scrub, pinned targets, and separate external-effect approval. Together they provide deterministic scheduling, explicit budgets, structured results, persistence, cancellation, bounded review/correction cycles, and attended publication. They do not provide full unattended software delivery.
 
 ## Autonomy Profiles
 
@@ -75,13 +75,12 @@ Resume reauthorizes routed agents under the workflow's persisted autonomy profil
 
 ## Current Delivery Boundary
 
-Phases 1 and 2 can coordinate bounded edits, run explicitly configured validation in interactive workflows, and drive structured review/correction cycles. Correction models are tool-denied proposal generators that receive only bounded source snapshots; only status-confirmed source and documentation replacements with explicit edit authority pass through the bounded writer. Protected control files and credential-bearing paths still require an attended path. Content scanning is defense in depth, not a guarantee that every secret or personal-data format will be recognized; do not enable bounded reads for a worktree that stores untracked credentials, data dumps, or other sensitive material. Validation commands execute repository code, so configure them deliberately. The validation broker currently requires POSIX process-group semantics and is unavailable to bounded autonomy. Publication, deployment, arbitrary shell work, and unsupported checks remain outside the boundary.
+Phases 1 through 3 can coordinate bounded edits, run explicitly configured validation in interactive workflows, drive structured review/correction cycles, and prepare and execute an attended publication through a trusted configured publisher. Publication is root-only after workflow completion; automatic children never receive credentials or external authority. The broker does not implement provider APIs, remote protection discovery, deployment, reconciliation, rollback, or a universal secret scanner. Content scanning remains defense in depth. Validation and publication execute trusted processes without an OS sandbox and currently require POSIX process-group semantics. Arbitrary shell work, deployments, unsupported checks, and unattended external effects remain outside the boundary. See [Guarded Publication](./guarded-publication.md).
 
 ## Secure Delivery Roadmap
 
-The delivery plan has five phases. Bounded autonomy and the validation/fixed-point review phase are complete. The remaining directions are not current capabilities:
+The delivery plan has five phases. Bounded autonomy, validation/fixed-point review, and guarded publication are complete. The remaining directions are not current capabilities:
 
-3. **Guarded publication and scrub** — explicit publication gates, secret and internal-information scanning, protected-target checks, previewable artifacts, and separate approval for external side effects.
 4. **Epic worktrees** — isolated worktrees for coordinated work items, dependency-aware integration, provenance, conflict handling, and guarded merges.
 5. **Durable queue autopilot** — restart-safe queued workflows with leases, idempotent reconciliation, ownership transfer, rate and budget controls, and explicit pause, cancel, and recovery operations.
 
@@ -93,3 +92,4 @@ OpenUltraCode may be consulted as an optional source of workflow ideas. It is no
 - [Agent Reference](./agents.md)
 - [Review System](./review-system.md)
 - [Validation And Fixed-Point Review](./validation-and-fixed-point-review.md)
+- [Guarded Publication](./guarded-publication.md)

@@ -273,6 +273,12 @@ On plugin startup, valid saved workflows are restored with scheduling disabled. 
 
 The `workflow_auto_status` tool reports the current session's automatic workflow. The `workflow_auto_cancel` tool aborts running child sessions, marks pending stages blocked, and sets the workflow to `cancelled`. Terminal workflows are not restarted by resume.
 
+### Guarded Publication
+
+A completed automatic workflow can be published only from its owning root session. `/publication-preview <target>` creates a private immutable artifact after checking the exact worktree root, clean Git state, configured target and publisher policy, and all history reachable from the publication head. `/publication-execute <artifact-id> <artifact-sha256>` revalidates the source and publisher identities before and after one-shot approval, atomically claims the artifact, records dispatch intent, and invokes the fixed configured publisher. `/publication-status` reads durable artifact and execution state.
+
+Publication tools are explicitly rejected inside automatic child sessions. A protected target requests `workflow_publication_protected`; every external dispatch requests `workflow_publication_external`. Both must resolve to `ask`, use artifact-bound patterns, and provide no persistent `always` pattern. Nonzero exit, timeout, cancellation, signal, process uncertainty, or a restored dispatching record is ambiguous and is never automatically retried. See [Guarded Publication](./docs/guarded-publication.md).
+
 ## Capability Modes
 
 Capabilities are configured in `experimental_capabilities`:
@@ -395,10 +401,13 @@ Use `/translate-auto <component-path> <target-language>` for the orchestration c
 | Delegated worktree operation | `worktree`, plus edit or delegation as applicable |
 | Path outside the worktree | `external_directory` |
 | Translation read or write | `read` or `edit`, plus external-directory approval when applicable |
+| Publication preview | `workflow_publication_preview` for the configured target |
+| Protected publication target | one-shot `workflow_publication_protected` bound to the artifact |
+| Publication external side effect | one-shot `workflow_publication_external` bound to the artifact |
 
 OpenCode permission rules remain authoritative. Workflow state does not grant filesystem, shell, task, or external process access.
 
-For the Phase 1 autonomy boundary and planned secure delivery capabilities, see [Autonomous Workflows](./docs/autonomous-workflows.md).
+For the autonomy boundary and secure delivery roadmap, see [Autonomous Workflows](./docs/autonomous-workflows.md).
 
 ## Diagnostics
 
@@ -417,6 +426,7 @@ For a manual workflow, use `/workflow-status` and inspect its active state. For 
 
 - [Agent Reference](./docs/agents.md)
 - [Autonomous Workflows](./docs/autonomous-workflows.md)
+- [Guarded Publication](./docs/guarded-publication.md)
 - [Model Compatibility](./docs/model-compatibility.md)
 - [Review System](./docs/review-system.md)
 - [Swarm Mode](./docs/swarm-mode.md)

@@ -112,6 +112,7 @@ npm run test:integration
 |---|---|---|---|---|
 | Manual workflow | `/workflow`, `/workflow-resume`, `/workflow-status` | Supervisor agent | Org file, state sidecar, session binding, saved Task IDs | User-visible gate orchestration with explicit completion checks |
 | Automatic workflow | `/workflow-auto`, `/workflow-auto-resume` | Declarative DAG engine | Session-owned definition and state | Opt-in deterministic scheduling of installed `development` or `e2e` DAGs |
+| Guarded publication | `/publication-preview`, `/publication-execute`, `/publication-status` | Root-side publication broker | Immutable artifacts, one-shot claims, hash-chained execution events | Attended publication through an operator-configured trusted publisher |
 | Native subagent | OpenCode Task tool | Calling agent | OpenCode task/session ID | One agent task, resumed with the same `task_id` |
 | Swarm batch | `swarm_*` tools | SDK session runtime | Session-scoped batch state | Parallel independent OpenCode subagent sessions |
 | Direct external delegation | `/delegate` or `delegate_*` tools | Provider CLI process | Session-scoped run records and output logs | One-off Claude Code or Antigravity prompts and follow-ups |
@@ -159,7 +160,9 @@ Before enabling automation, configure child-session, parallel-session, attempt, 
 
 The engine validates a fixed JSON schema, rejects dependency cycles and unsupported fields, routes stage roles through the selected mode, and accepts only structured stage results. It does not generate or execute arbitrary workflow code. Session- or process-spawning tools are blocked so every child session remains budgeted and cancellable.
 
-Bounded mode is an OpenCode permission profile, not an OS sandbox, and provides no general shell or executable validation. Attended interactive workflows may opt into a POSIX validation broker that executes named, fixed-argv operations with an operator-pinned absolute executable, descriptor-anchored worktree containment, persisted run counts, timeout/output limits, cancellation, credential-output redaction, and private full-stream audit hashes. It does not contain deliberately detached descendants, so operators must not overlap validation with fixed-point review. The swarm plugin also offers an opt-in fixed-point review tool with configured reviewer selection, strict JSON verdicts, status-bound changed-file scope, tool-denied correction proposals over bounded source snapshots, authorized source-file replacement, and explicit accepted/stalled/exhausted/blocked outcomes. See [Validation And Fixed-Point Review](./docs/validation-and-fixed-point-review.md) and [Autonomous Workflows](./docs/autonomous-workflows.md).
+Bounded mode is an OpenCode permission profile, not an OS sandbox, and provides no general shell or executable validation. Attended interactive workflows may opt into a POSIX validation broker that executes named, fixed-argv operations with an operator-pinned absolute executable, descriptor-anchored worktree containment, persisted run counts, timeout/output limits, cancellation, credential-output redaction, and private full-stream audit hashes. It does not contain deliberately detached descendants, so operators must not overlap validation with fixed-point review. The swarm plugin also offers an opt-in fixed-point review tool with configured reviewer selection, strict JSON verdicts, status-bound changed-file scope, tool-denied correction proposals over bounded source snapshots, authorized source-file replacement, and explicit accepted/stalled/exhausted/blocked outcomes.
+
+After an automatic workflow completes, guarded publication can create an immutable preview for a configured target, scan every commit, blob, tree, and changed path reachable from the publication head, pin exact Git, publisher, and target identities, and invoke the fixed trusted publisher only after fresh revalidation and separate one-shot approval. Protected targets require an additional approval; blocked or ambiguous executions are never retried automatically. See [Validation And Fixed-Point Review](./docs/validation-and-fixed-point-review.md), [Guarded Publication](./docs/guarded-publication.md), and [Autonomous Workflows](./docs/autonomous-workflows.md).
 
 State is written atomically below the selected config directory, including the autonomy profile selected at start. That profile is immutable for the workflow lifetime; changing `workflows.json` affects only new workflows. Older version-1 states without a profile are normalized to `interactive`. After a plugin or OpenCode restart, saved workflows are restored without launching new stages. `/workflow-auto-resume` reauthorizes agents under the persisted profile, reconciles child sessions, refreshes budgets, and retries eligible blocked paths while retaining accumulated usage and attempts. Runtime tools also expose status, capability reporting, and cancellation for the workflow owned by the current session.
 
@@ -193,6 +196,7 @@ Plugin v2 availability is detected from the loaded plugin runtime rather than an
 - Delegated worktree operations request `worktree` and edit permission before creating or merging changes.
 - Translation paths outside the current worktree request `external_directory` plus read or edit permission.
 - Automatic workflows are owned by the starting session and exact directory/worktree context.
+- Guarded publication requires the completed workflow's root session, immutable preview digest, effective one-shot `ask` authority, and a separate external-side-effect approval.
 - Bounded autonomy removes child permission prompts but does not grant denied authority; blocked is an expected safe outcome.
 - Swarm sessions share their configured working directory; use only independent tasks unless worktrees are managed separately.
 - Delegated merges require successful execution, a recorded passing review, the authorized feature branch, and a clean target worktree. Task changes are checkpointed in the isolated worktree and merged with a non-fast-forward merge. Failed merges are aborted, and normal cleanup retains dirty or unmerged worktrees.
@@ -203,6 +207,7 @@ Review permission requests before allowing them. The supplied `opencode.jsonc.te
 
 - [Workflow System](./WORKFLOWS.md)
 - [Autonomous Workflows](./docs/autonomous-workflows.md)
+- [Guarded Publication](./docs/guarded-publication.md)
 - [Agent Reference](./docs/agents.md)
 - [Coding Conventions](./docs/conventions.md)
 - [Model Compatibility](./docs/model-compatibility.md)

@@ -1,0 +1,367 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://opencode-workflows.example/schema/publication-execution-event.schema.json",
+  "title": "Publication Execution Event",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "type": "number",
+      "const": 1
+    },
+    "execution_id": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+    },
+    "artifact_id": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+    },
+    "sequence": {
+      "type": "integer",
+      "exclusiveMinimum": 0,
+      "maximum": 9007199254740991
+    },
+    "previous_event_sha256": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "event_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "occurred_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "dispatching",
+        "succeeded",
+        "ambiguous"
+      ]
+    },
+    "detail": {
+      "$ref": "#/$defs/executionDetail"
+    }
+  },
+  "required": [
+    "schema_version",
+    "execution_id",
+    "artifact_id",
+    "sequence",
+    "previous_event_sha256",
+    "event_sha256",
+    "occurred_at",
+    "status",
+    "detail"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "executionDetail": {
+      "type": "object",
+      "properties": {
+        "exit_code": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "signal": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[^\\0\\r\\n]+$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "duration_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "stdout_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "stderr_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "stdout_sha256": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "stderr_sha256": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "output_truncated": {
+          "type": "boolean"
+        },
+        "output_redacted": {
+          "type": "boolean"
+        },
+        "request_acknowledged": {
+          "type": "boolean"
+        },
+        "forced_status": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "timed_out",
+                "cancelled",
+                "output_limit"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "invocation_attempted": {
+          "type": "boolean"
+        },
+        "spawn_uncertain": {
+          "type": "boolean"
+        },
+        "termination_uncertain": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "exit_code",
+        "signal",
+        "duration_ms",
+        "stdout_bytes",
+        "stderr_bytes",
+        "stdout_sha256",
+        "stderr_sha256",
+        "output_truncated",
+        "output_redacted",
+        "request_acknowledged",
+        "forced_status",
+        "invocation_attempted",
+        "spawn_uncertain",
+        "termination_uncertain"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "allOf": [
+    {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "sequence": {
+              "const": 1
+            },
+            "previous_event_sha256": {
+              "type": "null"
+            }
+          },
+          "required": [
+            "sequence",
+            "previous_event_sha256"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "sequence": {
+              "type": "integer",
+              "minimum": 2
+            },
+            "previous_event_sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          },
+          "required": [
+            "sequence",
+            "previous_event_sha256"
+          ]
+        }
+      ]
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "const": "dispatching"
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "then": {
+        "type": "object",
+        "properties": {
+          "sequence": {
+            "const": 1
+          },
+          "detail": {
+            "type": "object",
+            "properties": {
+              "exit_code": {
+                "const": null
+              },
+              "signal": {
+                "const": null
+              },
+              "duration_ms": {
+                "const": 0
+              },
+              "stdout_bytes": {
+                "const": 0
+              },
+              "stderr_bytes": {
+                "const": 0
+              },
+              "stdout_sha256": {
+                "const": null
+              },
+              "stderr_sha256": {
+                "const": null
+              },
+              "output_truncated": {
+                "const": false
+              },
+              "output_redacted": {
+                "const": false
+              },
+              "request_acknowledged": {
+                "const": false
+              },
+              "forced_status": {
+                "const": null
+              },
+              "invocation_attempted": {
+                "const": false
+              },
+              "spawn_uncertain": {
+                "const": false
+              },
+              "termination_uncertain": {
+                "const": false
+              }
+            }
+          }
+        },
+        "required": [
+          "sequence",
+          "detail"
+        ]
+      },
+      "else": {
+        "type": "object",
+        "properties": {
+          "sequence": {
+            "type": "integer",
+            "minimum": 2
+          }
+        },
+        "required": [
+          "sequence"
+        ]
+      }
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "const": "succeeded"
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "then": {
+        "type": "object",
+        "properties": {
+          "detail": {
+            "type": "object",
+            "properties": {
+              "exit_code": {
+                "const": 0
+              },
+              "signal": {
+                "const": null
+              },
+              "stdout_sha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "stderr_sha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "output_truncated": {
+                "const": false
+              },
+              "request_acknowledged": {
+                "const": true
+              },
+              "forced_status": {
+                "const": null
+              },
+              "invocation_attempted": {
+                "const": true
+              },
+              "spawn_uncertain": {
+                "const": false
+              },
+              "termination_uncertain": {
+                "const": false
+              }
+            }
+          }
+        },
+        "required": [
+          "detail"
+        ]
+      }
+    }
+  ]
+}

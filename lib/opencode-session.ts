@@ -140,6 +140,23 @@ export class OpenCodeSessionAdapter {
     }
   }
 
+  async assertPermissionAction(
+    agent: string,
+    permission: string,
+    patterns: string[],
+    expected: 'allow' | 'ask' | 'deny',
+  ): Promise<void> {
+    const rules = await this.agentRules(agent)
+    for (const pattern of patterns) {
+      const action = evaluatePermissionRules(rules, permission, pattern)
+      if (action !== expected) {
+        throw new Error(
+          `${permission} permission for ${pattern} must resolve to ${expected}; resolved action is ${action}`,
+        )
+      }
+    }
+  }
+
   private async agentRules(agent: string): Promise<PermissionRule[]> {
     const rules = (await this.loadEffectiveAgentRules()).get(agent)
     if (!rules) throw new Error(`bounded session agent not found: ${agent}`)

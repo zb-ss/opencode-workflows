@@ -74,6 +74,47 @@
     "reviewers": []
   },
 
+  "_comment_publication": "Guarded publication is disabled by default. Before enabling it, choose all scan, artifact, and Git command limits, internal markers, and at least one complete target. Git and publisher executables must be root-owned native binaries and not group/world-writable; scripts and shebang interpreters are rejected. Source refs must be refs/heads/...; publisher argv must be exactly [absolute executable, {request_file}], success_exit_codes must be [0], and the adapter must return the documented request-bound acknowledgment on fd5.",
+  "_example_publication": {
+    "enabled": false,
+    "git_timeout_ms": 300000,
+    "record_settle_attempts": 200,
+    "record_settle_delay_ms": 5,
+    "record_settle_timeout_ms": 1000,
+    "internal_markers": [
+      {
+        "id": "internal-example",
+        "literal": "internal-example",
+        "case_sensitive": false
+      }
+    ],
+    "targets": {
+      "example-target": {
+        "display_name": "Example destination",
+        "git_executable": "/absolute/path/to/git",
+        "base_ref": "refs/heads/base",
+        "head_ref": "refs/heads/review",
+        "remote": "upstream",
+        "expected_remote_url": "https://example.invalid/organization/repository.git",
+        "destination_ref": "refs/heads/destination",
+        "protection": "approval_required",
+        "publisher": {
+          "argv": ["/absolute/path/to/publisher", "{request_file}"],
+          "working_directory": ".",
+          "environment": [],
+          "timeout_ms": 300000,
+          "max_output_bytes": 1048576,
+          "success_exit_codes": [0]
+        }
+      }
+    }
+  },
+  "publication": {
+    "enabled": false,
+    "internal_markers": [],
+    "targets": {}
+  },
+
   "_comment_capabilities": "Capability values are disabled, auto, or required. Auto uses a capability when runtime support is detected. Required also stops automatic workflow start or resume when support is unavailable. These settings are never copied as unknown opencode.json keys.",
   "_comment_optional_integrations": "Experimental runtime support is detected from the documented OpenCode environment flags. Plugin v2 support is detected from the loaded plugin runtime.",
   "experimental_capabilities": {

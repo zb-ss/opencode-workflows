@@ -216,6 +216,16 @@ describe('bounded automatic workflow plugin', () => {
       hooks.tool!.workflow_validation_run.execute(validationArgs, childContext),
       /requires interactive autonomy.*not OS-sandboxed/,
     )
+    assert.ok(hooks.tool!.workflow_publication_preview)
+    assert.ok(hooks.tool!.workflow_publication_execute)
+    assert.ok(hooks.tool!.workflow_publication_status)
+    await assert.rejects(
+      hooks['tool.execute.before']!(
+        { tool: 'workflow_publication_preview', sessionID: childSessionId, callID: 'publication-call' },
+        { args: { target: 'public' } },
+      ),
+      /available only to the owning automatic-workflow root session/,
+    )
     const status = JSON.parse(await hooks.tool!.workflow_auto_status.execute({}, rootContext) as string)
     assert.equal(
       status.workflow.budget.usage.bounded_read_bytes,

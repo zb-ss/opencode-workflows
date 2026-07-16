@@ -11,6 +11,7 @@ import {
 import { assertRequiredCapabilities, detectCapabilities } from '../lib/capabilities.ts'
 import { OpenCodeSessionAdapter } from '../lib/opencode-session.ts'
 import { ensurePrivateDirectory, getConfigDir, getRuntimeDir, getSessionRuntimeDir, isPathInside } from '../lib/paths.ts'
+import { PublicationBroker } from '../lib/publication-broker.ts'
 import {
   WorkflowEngine,
   loadAutomaticWorkflowState,
@@ -190,8 +191,14 @@ export const AutoWorkflow: Plugin = async ({ client, directory, serverUrl }) => 
   }
 
   const boundedFiles = new BoundedFileService(ownerForSession)
-  const validationBrokerConfig = loadWorkflowConfig().validation_broker
+  const startupConfig = loadWorkflowConfig()
+  const validationBrokerConfig = startupConfig.validation_broker
   const validationBroker = new ValidationBroker(validationBrokerConfig, ownerForSession)
+  const publicationBroker = new PublicationBroker(
+    startupConfig.publication,
+    (sessionId) => engines.get(sessionId),
+    (context) => sessionAdapter(context.directory),
+  )
 
   function buildEngine(
     state: AutomaticWorkflowState,
@@ -273,6 +280,9 @@ export const AutoWorkflow: Plugin = async ({ client, directory, serverUrl }) => 
     'tool.execute.before': async (input, output) => {
       const owner = ownerForSession(input.sessionID)
       if (!owner) return
+      if (input.tool.startsWith('workflow_publication_')) {
+        throw new Error('publication tools are available only to the owning automatic-workflow root session')
+      }
       const state = owner.snapshot()
       const isBounded = owner.usesBoundedAutonomy()
       if (state.status !== 'running') {
@@ -425,6 +435,48 @@ export const AutoWorkflow: Plugin = async ({ client, directory, serverUrl }) => 
           const state = engine.snapshot()
           assertOwner(state, context)
           return JSON.stringify({ active: true, workflow: stateSummary(state) })
+        },
+      }),
+
+      workflow_publication_preview: tool({
+        description: 'Create an immutable, expiring publication preview for one configured target after a completed automatic workflow. Scans all Git history reachable from the publication head and performs no external side effect.',
+        args: {
+          target: tool.schema.string().min(1).max(MAX_SAFE_IDENTIFIER_LENGTH)
+            .describe('Configured publication target identifier'),
+        },
+        async execute(args, context) {
+          assertContextPaths(context)
+          const engine = restoreOne(context.sessionID, false)
+          if (!engine) throw new Error('no automatic workflow belongs to this root session')
+          return publicationBroker.preview(args.target, context)
+        },
+      }),
+
+      workflow_publication_execute: tool({
+        description: 'Execute one exact ready publication artifact after fresh source revalidation and separate one-shot approval for the external side effect. Never retries an ambiguous outcome.',
+        args: {
+          artifact_id: tool.schema.string().uuid().describe('Publication artifact UUID'),
+          artifact_sha256: tool.schema.string().regex(/^[a-f0-9]{64}$/)
+            .describe('Exact SHA-256 returned by publication preview'),
+        },
+        async execute(args, context) {
+          assertContextPaths(context)
+          const engine = restoreOne(context.sessionID, false)
+          if (!engine) throw new Error('no automatic workflow belongs to this root session')
+          return publicationBroker.execute(args.artifact_id, args.artifact_sha256, context)
+        },
+      }),
+
+      workflow_publication_status: tool({
+        description: 'Inspect guarded publication artifacts and execution outcomes for the automatic workflow owned by this root session. A persisted dispatching state is reported as ambiguous.',
+        args: {
+          artifact_id: tool.schema.string().uuid().optional().describe('Optional publication artifact UUID'),
+        },
+        async execute(args, context) {
+          assertContextPaths(context)
+          const engine = restoreOne(context.sessionID, false)
+          if (!engine) throw new Error('no automatic workflow belongs to this root session')
+          return await publicationBroker.status(args.artifact_id, context)
         },
       }),
 

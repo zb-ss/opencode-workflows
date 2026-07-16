@@ -86,6 +86,7 @@ Per-agent frontmatter can be stricter than global OpenCode permissions. In parti
 - Review and exploration agents may be read-only.
 - Implementation and test agents request the filesystem and command access needed by their role.
 - External CLI and worktree actions use separate plugin permission requests.
+- Publication preview and execution remain root-session operations; automatic child agents cannot invoke them.
 
 OpenCode permission decisions remain authoritative; selecting an agent does not bypass them.
 
@@ -95,6 +96,8 @@ OpenCode permission decisions remain authoritative; selecting an agent does not 
 
 Specialists in a bounded stage must return `blocked` when required authority or executable evidence is unavailable. Blocker text is untrusted status output and must not request secret values, commands, links, permission bypasses, or weaker safeguards. Executable validation requires an attended interactive workflow; bounded mode has no general shell and is not an OS sandbox. See [Autonomous Workflows](./autonomous-workflows.md).
 
+After a terminal automatic workflow, the supervisor may call the guarded-publication tools from the owning root session. It must present the exact preview artifact, must not execute blocked artifacts, and must not retry ambiguous external outcomes. Execution requires custom publication permissions to resolve to `ask`; silent authority is rejected. See [Guarded Publication](./guarded-publication.md).
+
 ## Related Documentation
 
 - [Workflow System](../WORKFLOWS.md)
@@ -102,4 +105,5 @@ Specialists in a bounded stage must return `blocked` when required authority or 
 - [Coding Conventions](./conventions.md)
 - [Review System](./review-system.md)
 - [Validation And Fixed-Point Review](./validation-and-fixed-point-review.md)
+- [Guarded Publication](./guarded-publication.md)
 - [E2E Testing](./e2e-testing.md)

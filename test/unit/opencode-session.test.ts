@@ -126,6 +126,21 @@ describe('OpenCodeSessionAdapter', () => {
     )
 
     await adapter.assertPermissionAllowed('supervisor', 'task', ['executor'])
+    await adapter.assertPermissionAction(
+      'supervisor',
+      'workflow_publication_external',
+      ['target:public'],
+      'ask',
+    )
+    await assert.rejects(
+      adapter.assertPermissionAction(
+        'supervisor',
+        'workflow_publication_external',
+        ['target:public'],
+        'allow',
+      ),
+      /must resolve to allow; resolved action is ask/,
+    )
     await assert.rejects(
       adapter.assertPermissionAllowed('supervisor', 'task', ['wf-security']),
       /resolved action is ask/,

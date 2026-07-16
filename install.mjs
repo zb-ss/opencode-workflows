@@ -966,11 +966,14 @@ export function migrateWorkflowConfig(dryRun = false) {
     }
   }
 
-  // Loading supplies this default without rewriting user configuration. A migration
-  // persists it only when another normalization has already made a write necessary.
+  // Loading supplies these defaults without rewriting user configuration. A migration
+  // persists them only when another normalization has already made a write necessary.
   if (changed && config.automation && typeof config.automation === 'object'
     && !Array.isArray(config.automation) && config.automation.autonomy === undefined) {
     config.automation.autonomy = 'interactive'
+  }
+  if (changed && config.publication === undefined) {
+    config.publication = { enabled: false, internal_markers: [], targets: {} }
   }
 
   if (!changed) {
@@ -978,7 +981,7 @@ export function migrateWorkflowConfig(dryRun = false) {
     return
   }
   if (dryRun) {
-    console.log('Migration would normalize workflow candidates, capability flags, bounded byte budgets, and delegation settings.')
+    console.log('Migration would normalize workflow candidates, capability flags, bounded byte budgets, and delegation settings; when absent, it would also initialize disabled publication defaults.')
     return
   }
 
