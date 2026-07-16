@@ -53,7 +53,6 @@ export class FixedPointBatchRunner {
       timedOut = true
       deadline.abort(new Error(`fixed-point batch timed out: ${batchId}`))
     }, timeoutMs)
-    timer.unref?.()
     try {
       const completion = await this.runtime.awaitBatch(
         context.callerSessionId,

@@ -11,7 +11,7 @@ import { ValidationBroker } from '../../lib/validation-broker.ts'
 import { WorkflowConfigSchema } from '../../lib/workflow-config.ts'
 
 const temporaryDirectories: string[] = []
-const TRUSTED_NODE_EXECUTABLE = '/usr/bin/node'
+const TRUSTED_NODE_EXECUTABLE = fs.existsSync('/usr/bin/node') ? '/usr/bin/node' : process.execPath
 
 afterEach(() => {
   for (const directory of temporaryDirectories.splice(0)) fs.rmSync(directory, { recursive: true, force: true })
