@@ -1,5 +1,5 @@
 ---
-description: Delegate prompts (status [provider] [--auth] | ask <provider> <prompt> | followup <run-id> <prompt>)
+description: Delegate prompts (status [provider] [--auth] | ask <provider> [--model <alias>] <prompt> | followup <run-id> <prompt>)
 agent: delegator
 ---
 
@@ -20,16 +20,16 @@ Delegate prompts to external provider CLIs in headless mode.
 /delegate status
 /delegate status claude --auth
 /delegate ask auto "Summarize the architecture of this repository"
-/delegate ask claude --model sonnet "Explain the auth flow"
-/delegate ask gemini --model gemini-2.5-flash "List all API endpoints"
+/delegate ask claude --model <claude-model-alias> "Explain the auth flow"
+/delegate ask gemini "List all API endpoints with Antigravity"
+/delegate ask gemini --model <agy-model-alias> "Review the current UI"
 /delegate followup dlg-20260404123456-ab12cd "Now focus on security risks"
 /delegate runs 10
 /delegate show dlg-20260404123456-ab12cd
 ```
 
-## Model Configuration
-Models can be set per-provider in `~/.config/opencode/workflows.json` under the `delegation` key,
-or overridden per-request with `--model`. See `workflows.json.template` for examples.
+## Model Selection
+Delegation uses each CLI's current default model. To select a model manually for one run, pass the provider-native alias with `--model`. For Antigravity aliases, run `agy models`. Do not add model pins to `workflows.json`.
 
 ## Your Task
 

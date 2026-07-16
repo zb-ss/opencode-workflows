@@ -1,6 +1,7 @@
-import { tool } from "@opencode-ai/plugin"
+import { tool, type ToolContext } from "@opencode-ai/plugin"
 import { readFileSync, existsSync } from "fs"
 import { basename, dirname } from "path"
+import { abortCheckpoint, authorizeToolPath, throwIfAborted } from "../lib/tool-context.ts"
 
 interface HardcodedString {
   text: string
@@ -820,9 +821,10 @@ function extractComponentName(filePath: string): string {
 }
 
 // Check if a line number is inside a <script> block
-function isInScriptBlock(lines: string[], lineNumber: number): boolean {
+function isInScriptBlock(lines: string[], lineNumber: number, context: ToolContext): boolean {
   let inScript = false
   for (let i = 0; i < lineNumber && i < lines.length; i++) {
+    if (i % 128 === 0) throwIfAborted(context)
     const line = lines[i].toLowerCase()
     if (line.includes('<script')) inScript = true
     if (line.includes('</script')) inScript = false
@@ -889,8 +891,9 @@ export default tool({
     componentName: tool.schema.string().optional().describe("Component name for key generation (auto-detected from path if not provided)"),
     includeComments: tool.schema.boolean().default(false).describe("Include strings found in HTML comments (default: false)")
   },
-  async execute(args) {
-    const { filePath, startLine, endLine, minLength = 2, framework = "joomla", includeComments = false } = args
+  async execute(args, context: ToolContext) {
+    const { startLine, endLine, minLength = 2, framework = "joomla", includeComments = false } = args
+    const filePath = await authorizeToolPath(context, args.filePath, "read")
 
     if (!existsSync(filePath)) {
       return JSON.stringify({
@@ -913,6 +916,7 @@ export default tool({
 
     // Process line by line for accurate line numbers
     for (let i = 0; i < linesToProcess.length; i++) {
+      await abortCheckpoint(context, i)
       const line = linesToProcess[i]
       const actualLineNumber = lineOffset + i + 1
 
@@ -942,8 +946,8 @@ export default tool({
           if (seenTexts.has(textKey)) continue
           seenTexts.add(textKey)
 
-          const context = findContext(allLines, actualLineNumber)
-          const isInJs = isInScriptBlock(allLines, actualLineNumber) || isJsContext(line)
+          const codeContext = findContext(allLines, actualLineNumber)
+          const isInJs = isInScriptBlock(allLines, actualLineNumber, context) || isJsContext(line)
           
           // Determine the correct type - upgrade to js_php_embed if in JS context
           let finalType = pattern.type
@@ -964,7 +968,7 @@ export default tool({
             requiresJsEscaping = true
           }
           
-          const suggestedKey = generateKeyName(componentName, text, finalType, context)
+          const suggestedKey = generateKeyName(componentName, text, finalType, codeContext)
           const suggestedReplacement = generateReplacement(match[0], suggestedKey, requiresJsEscaping ? 'js_php_embed' : finalType, framework)
           const warning = getJsContextWarning(line, finalType)
 
@@ -973,7 +977,7 @@ export default tool({
             line: actualLineNumber,
             column: match.index + 1,
             type: finalType,
-            context,
+            context: codeContext,
             codeSnippet: match[0].substring(0, 150) + (match[0].length > 150 ? "..." : ""),
             suggestedKey,
             suggestedReplacement,
@@ -995,7 +999,9 @@ export default tool({
     // Remove duplicates (same text on same line with different patterns)
     const deduped: HardcodedString[] = []
     const seen = new Set<string>()
-    for (const h of hardcoded) {
+    for (let i = 0; i < hardcoded.length; i++) {
+      await abortCheckpoint(context, i)
+      const h = hardcoded[i]
       const key = `${h.line}:${h.text}`
       if (!seen.has(key)) {
         seen.add(key)
@@ -1005,7 +1011,9 @@ export default tool({
 
     // Calculate summary by type
     const byType: Record<string, number> = {}
-    for (const h of deduped) {
+    for (let i = 0; i < deduped.length; i++) {
+      await abortCheckpoint(context, i)
+      const h = deduped[i]
       byType[h.type] = (byType[h.type] || 0) + 1
     }
 

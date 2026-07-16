@@ -1,7 +1,8 @@
 ---
-description: Show workflow status: /workflow-status [workflow-id]
+description: "Show workflow status: /workflow-status [workflow-id]"
 agent: supervisor
 model_tier: mid
+subtask: true
 ---
 
 Display the status of active workflows.
@@ -29,14 +30,21 @@ You are the supervisor agent. Report workflow status.
 ### Instructions
 
 1. **Find Workflows**
-   
-   List all `.org` files in `workflows/active/`
+
+   Resolve `<CONFIG_DIR>` from `OPENCODE_CONFIG_DIR`, otherwise `$XDG_CONFIG_HOME/opencode`, otherwise `$HOME/.config/opencode`.
+   List all `.state.json` files in `<CONFIG_DIR>/workflows/active/` and read each companion `.org` file.
    
    If $ARGUMENTS is empty: report on all
    If $ARGUMENTS specifies ID: find and report on that one
 
 2. **For Each Workflow, Extract**:
-   
+
+   From the state file:
+   - Current phase from `phase.current`
+   - Gate statuses from `gates`
+   - Current or most recent Task ID from `task_ids`, when present
+   - Execution mode from `mode.current`
+
    From the org file headers:
    - #+TITLE: workflow title
    - #+WORKFLOW_ID: unique identifier

@@ -1,5 +1,6 @@
-import { tool } from "@opencode-ai/plugin"
+import { tool, type ToolContext } from "@opencode-ai/plugin"
 import { readFileSync, existsSync } from "fs"
+import { abortCheckpoint, authorizeToolPath } from "../lib/tool-context.ts"
 
 interface ExtractedString {
   key: string | null
@@ -111,8 +112,9 @@ export default tool({
     endLine: tool.schema.number().optional().describe("End line for chunk processing"),
     framework: tool.schema.enum(["joomla", "laravel", "symfony", "vue"]).default("joomla").describe("Framework to use for pattern matching")
   },
-  async execute(args) {
-    const { filePath, startLine, endLine, framework = "joomla" } = args
+  async execute(args, context: ToolContext) {
+    const { startLine, endLine, framework = "joomla" } = args
+    const filePath = await authorizeToolPath(context, args.filePath, "read")
 
     // Validate file exists
     if (!existsSync(filePath)) {
@@ -144,6 +146,7 @@ export default tool({
 
     // Process each line
     for (let i = 0; i < linesToProcess.length; i++) {
+      await abortCheckpoint(context, i)
       const line = linesToProcess[i]
       const actualLineNumber = lineOffset + i + 1
 

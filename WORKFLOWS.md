@@ -1,876 +1,374 @@
-# Workflow System Guide
+# Workflow System
 
-Complete guide to OpenCode Workflows v2.0 automated workflow system.
+OpenCode Workflows provides related but distinct orchestration mechanisms. This guide describes their current runtime boundaries and state transitions.
 
-## Overview
+## Choose A Driver
 
-OpenCode workflows automate multi-step development processes by orchestrating specialized agents through defined gates. Workflows maintain state in org-mode files, support interruption/resumption, and provide desktop notifications.
+| Driver | Starts with | Executes work through | Continues automatically |
+|---|---|---|---|
+| Manual workflow | `/workflow` | Supervisor calls the native Task tool and workflow tools | No; the supervisor advances each gate |
+| Automatic DAG | `/workflow-auto` | Plugin creates SDK child sessions from an installed JSON DAG | Yes, while enabled, authorized, within budget, and loaded |
+| Native Task | A Task tool call | One OpenCode subagent | Only within that task; reuse `task_id` to continue it |
+| Swarm | `swarm_spawn_batch` | Parallel SDK child sessions | The queue drains within configured limits |
+| External CLI | `/delegate` or `delegate_run` | A `claude` or Antigravity `agy` child process | No; each run or follow-up is explicit |
 
-**Key Features**:
-- 5 execution modes (eco, turbo, standard, thorough, swarm)
-- 6 workflow templates
-- Zero-tolerance review system
-- Parallel execution (swarm mode)
-- Multi-workflow session binding
+Manual and automatic workflows do not share a state format. `/workflow-resume` never resumes an automatic DAG, and `/workflow-auto-resume` never falls back to a manual workflow.
 
-## Workflow Lifecycle
+## Configuration Directory
 
-### 1. Start
-```bash
-/workflow <type> <description>
+Runtime and installer code resolve the OpenCode configuration directory in this order:
+
+1. `OPENCODE_CONFIG_DIR`
+2. `$XDG_CONFIG_HOME/opencode`
+3. `$HOME/.config/opencode`
+
+This guide calls that location `<config-dir>`. The installer writes plural directories including:
+
+```text
+<config-dir>/agents/
+<config-dir>/commands/
+<config-dir>/skills/
+<config-dir>/plugins/
+<config-dir>/tools/
+<config-dir>/mode/
+<config-dir>/workflow/
+<config-dir>/schema/
+<config-dir>/workflows/
 ```
 
-**Supervisor**:
-- Validates workflow type
-- Asks about branch strategy
-- Creates `.state.json` sidecar file
-- Binds workflow to current session
-- Loads workflow template
-- Initializes first gate
+Use the same `OPENCODE_CONFIG_DIR` when installing, running `--doctor`, and starting OpenCode. Restart OpenCode after changing configuration-time files or environment flags.
 
-### 2. Execute Steps
+## Manual Lifecycle
 
-Each gate represents a phase:
-```
-Gate: planning
-├── Invoke: architect agent
-├── Wait for completion
-├── Update state file
-└── Proceed to next gate or fail
+The `/workflow` command is an agent-driven protocol, not a background scheduler. Its command definition exposes `feature`, `bugfix`, `refactor`, `figma`, `translate`, and `delegate` flows. Installed template files also provide the gate content used by the supervisor.
+
+### Start
+
+```text
+/workflow feature Add request validation --mode=standard
 ```
 
-**Gate Types**:
-- `planning` - Architecture, design
-- `implementation` - Code changes
-- `implementation_review` - Review of implementation
-- `testing` - Test generation/execution
-- `testing_review` - Review of tests
-- `security_audit` - Security checks
-- `security_review` - Deep security analysis
-- `performance_check` - Performance validation
-- `performance_review` - Optimization analysis
-- `quality_gate` - Final checks
-- `completion` - Cleanup, archival
+The supervisor is instructed to:
 
-### 3. Review
+1. Parse the workflow type and mode.
+2. Load the selected mode's `agent_routing` and settings.
+3. Ask how to handle the Git branch.
+4. Create an org file under `<config-dir>/workflows/active/`.
+5. Call `workflow_bind_session` with that org path, workflow ID, type, mode, and ordered gates.
+6. Invoke the routed `wf-*` agents and update each gate.
 
-Each implementation gate followed by review gate:
-```
-implementation (executor)
-  ↓
-implementation_review (reviewer)
-  ↓ PASS
-testing (test-writer)
-  ↓
-testing_review (reviewer)
-  ↓ PASS
-Continue...
-```
+`workflow_bind_session` creates a `.state.json` sidecar when given an org or Markdown path. State is accepted only below `<config-dir>/workflows/`. A private binding below `<config-dir>/workflows/runtime/sessions/<session-hash>/` associates the state with the exact OpenCode session.
 
-**Zero-Tolerance Review**:
-- PASS requires ZERO issues
-- Reviewer reports [ISSUE-N] [SEVERITY] format
-- Executor fixes all issues
-- Re-review until PASS or max iterations
-- Auto-escalate after max iterations
+The initial manual state includes:
 
-### 4. Complete
+- Workflow ID and type
+- `driver: "manual"`
+- Current, completed, and remaining phases
+- Gate status and iteration data
+- Mode
+- Agent log
+- `task_ids` for native Task resumption
+- Org file path
 
-**Supervisor**:
-- Runs completion-guard
-- Archives workflow state to `completed/`
-- Unbinds from session
-- Sends completion notification
-- Optionally creates commit
+### Run A Gate
 
-## Execution Modes
+For each gate the supervisor should:
 
-### Eco Mode
+1. Mark it `in_progress` with `workflow_update_gate`.
+2. Call the native Task tool with an explicit `subagent_type`, such as `wf-executor`.
+3. Read the returned `<task id="...">` and persist it under the gate's `task_ids` entry.
+4. Mark the gate `passed`, `failed`, or `skipped` based on direct evidence.
+5. Pause and report failures rather than silently bypassing the gate.
 
-**Profile**: Fast, basic quality, minimal cost
+The enforcer injects bound workflow context into agent system prompts and preserves workflow identity during compaction. Native Task children inherit a read-only binding for context; only the current controller session can mutate gates or complete the workflow, and completion clears all propagated bindings. Idle-session events produce advisory logs when gates remain incomplete. They do not launch work or forcibly keep a session running.
 
-**Gates**:
-1. `planning` - architect-lite
-2. `implementation` - executor-lite
-3. `final_review` - reviewer-lite (2 iterations max)
-4. `security_audit` - security-lite
-5. `quality_gate` - quality-gate
+### Native Task Resumption
 
-**Use Cases**:
-- Prototypes
-- Experiments
-- Non-critical features
-- Learning/exploration
+A native Task ID belongs to one OpenCode subagent invocation. Continue the same agent and context by passing both the same `subagent_type` and stored `task_id`:
 
-**Configuration**:
 ```json
 {
-  "name": "eco",
-  "gates": [
-    { "name": "planning", "agent": "architect-lite", "tier": "mid" },
-    { "name": "implementation", "agent": "executor-lite", "tier": "low" },
-    { "name": "final_review", "agent": "reviewer-lite", "tier": "low" },
-    { "name": "security_audit", "agent": "security-lite", "tier": "low" },
-    { "name": "quality_gate", "agent": "quality-gate", "tier": "mid" }
-  ],
-  "parallel_execution": false
+  "description": "Continue the implementation gate",
+  "prompt": "Address the recorded review findings and rerun focused checks.",
+  "subagent_type": "wf-executor",
+  "task_id": "<saved-task-id>"
 }
 ```
 
----
+Do not reuse a Task ID with a different subagent type. Start a new task only for separate work or when the previous task cannot be resumed, then replace the saved ID.
 
-### Turbo Mode
+### Completion Gate
 
-**Profile**: Fastest, standard quality, 3-architect validation
+`workflow_check_completion` is the authoritative manual completion check. It returns `canComplete: false` until every non-skipped gate has passed. Repeated checks never bypass pending gates. A successful controller check atomically archives the state sidecar and companion org file under `<config-dir>/workflows/completed/`, then clears every propagated session binding.
 
-**Gates**:
-1. `planning` - architect-lite
-2. `implementation` - executor-lite
-3. `validation` - 3x architect (parallel consensus)
-4. `testing` - test-writer
-5. `quality_gate` - quality-gate
+The plugin does not perform a commit or branch action. Notifications and any later repository action remain explicit supervisor or user operations under normal OpenCode permissions.
 
-**Use Cases**:
-- Quick features
-- Time-sensitive fixes
-- Standard production code
-- When speed matters
+### Status And Resume
 
-**3-Architect Validation**:
-```
-Spawn 3 architects in parallel
-  ↓
-Each reviews independently
-  ↓
-Aggregate results
-  ↓
-Apply consensus (2/3 must PASS)
-```
-
-**Configuration**:
-```json
-{
-  "name": "turbo",
-  "gates": [
-    { "name": "planning", "agent": "architect-lite", "tier": "mid" },
-    { "name": "implementation", "agent": "executor-lite", "tier": "low" },
-    { "name": "validation", "agent": "architect", "tier": "high", "parallel": 3 },
-    { "name": "testing", "agent": "test-writer", "tier": "mid" },
-    { "name": "quality_gate", "agent": "quality-gate", "tier": "mid" }
-  ],
-  "parallel_execution": false
-}
-```
-
----
-
-### Standard Mode
-
-**Profile**: Balanced speed and quality
-
-**Gates**:
-1. `planning` - architect
-2. `implementation` - executor
-3. `implementation_review` - reviewer (3 iterations max)
-4. `testing` - test-writer
-5. `testing_review` - reviewer
-6. `security_audit` - security
-7. `quality_gate` - quality-gate
-
-**Use Cases**:
-- Production features
-- Standard development
-- Balanced cost/quality
-- Most common mode
-
-**Configuration**:
-```json
-{
-  "name": "standard",
-  "gates": [
-    { "name": "planning", "agent": "architect", "tier": "high" },
-    { "name": "implementation", "agent": "executor", "tier": "mid" },
-    { "name": "implementation_review", "agent": "reviewer", "tier": "mid" },
-    { "name": "testing", "agent": "test-writer", "tier": "mid" },
-    { "name": "testing_review", "agent": "reviewer", "tier": "mid" },
-    { "name": "security_audit", "agent": "security", "tier": "mid" },
-    { "name": "quality_gate", "agent": "quality-gate", "tier": "mid" }
-  ],
-  "parallel_execution": false
-}
-```
-
----
-
-### Thorough Mode
-
-**Profile**: Maximum quality, comprehensive analysis
-
-**Gates**:
-1. `planning` - architect
-2. `codebase_analysis` - codebase-analyzer
-3. `implementation` - executor
-4. `implementation_review` - reviewer-deep (5 iterations max)
-5. `testing` - test-writer
-6. `testing_review` - reviewer-deep
-7. `security_review` - security-deep
-8. `performance_review` - perf-reviewer
-9. `quality_gate` - quality-gate
-
-**Use Cases**:
-- Critical production systems
-- Security-sensitive features
-- Payment/auth systems
-- High-stakes refactoring
-
-**Configuration**:
-```json
-{
-  "name": "thorough",
-  "gates": [
-    { "name": "planning", "agent": "architect", "tier": "high" },
-    { "name": "codebase_analysis", "agent": "codebase-analyzer", "tier": "mid" },
-    { "name": "implementation", "agent": "executor", "tier": "mid" },
-    { "name": "implementation_review", "agent": "reviewer-deep", "tier": "high" },
-    { "name": "testing", "agent": "test-writer", "tier": "mid" },
-    { "name": "testing_review", "agent": "reviewer-deep", "tier": "high" },
-    { "name": "security_review", "agent": "security-deep", "tier": "high" },
-    { "name": "performance_review", "agent": "perf-reviewer", "tier": "high" },
-    { "name": "quality_gate", "agent": "quality-gate", "tier": "mid" }
-  ],
-  "parallel_execution": false
-}
-```
-
----
-
-### Swarm Mode
-
-**Profile**: Fastest with excellent quality, parallel execution
-
-**Gates**:
-1. `planning` - architect
-2. `implementation_batch` - 4x executor (parallel)
-3. `validation` - 3x architect (parallel consensus)
-4. `testing` - test-writer
-5. `quality_gate` - quality-gate
-
-**Use Cases**:
-- Large modular features
-- Independent parallel work
-- When speed + quality both matter
-- Multiple independent components
-
-**Parallel Execution**:
-```
-Batch 1: [executor, executor, executor, executor]
-  ↓ wait for all
-Validation: [architect, architect, architect]
-  ↓ consensus (2/3 PASS)
-Continue...
-```
-
-**Requirements**:
-- `@opencode-ai/sdk` installed
-- Tasks can be split into independent units
-- No shared state modifications
-
-**Configuration**:
-```json
-{
-  "name": "swarm",
-  "gates": [
-    { "name": "planning", "agent": "architect", "tier": "high" },
-    { "name": "implementation_batch", "agent": "executor", "tier": "mid", "parallel": 4 },
-    { "name": "validation", "agent": "architect", "tier": "high", "parallel": 3 },
-    { "name": "testing", "agent": "test-writer", "tier": "mid" },
-    { "name": "quality_gate", "agent": "quality-gate", "tier": "mid" }
-  ],
-  "parallel_execution": true,
-  "max_parallel_agents": 4
-}
-```
-
----
-
-## Mode Selection Guide
-
-| Scenario | Recommended Mode |
-|----------|------------------|
-| Quick prototype | eco |
-| Time-critical fix | turbo |
-| Standard feature | standard |
-| Payment integration | thorough |
-| Auth system | thorough |
-| Large modular feature | swarm |
-| Refactoring | standard or thorough |
-| Bug fix | eco or standard |
-| E2E test generation | standard |
-| Figma to code | standard |
-
-## Workflow Templates
-
-### 1. Feature Development
-
-**Template**: `templates/feature-development.org`
-
-**Description**: Complete feature development pipeline
-
-**Steps**:
-```
-planning → implementation → implementation_review →
-testing → testing_review → security_audit → quality_gate → completion
-```
-
-**Usage**:
-```bash
-/workflow feature Add JWT authentication with refresh tokens
-```
-
-**Supported Modes**: All
-
----
-
-### 2. Figma to Code
-
-**Template**: `templates/figma-to-code.org`
-
-**Description**: Pixel-perfect UI from Figma designs
-
-**Steps**:
-```
-planning (design analysis) → implementation (figma-builder) →
-design_review → e2e_testing → accessibility_audit → quality_gate → completion
-```
-
-**Usage**:
-```bash
-/workflow figma https://figma.com/file/ABC/Design?node-id=1:2 Dashboard header
-```
-
-**Supported Modes**: standard, thorough
-
----
-
-### 3. Bug Fix
-
-**Template**: `templates/bug-fix.org`
-
-**Description**: Systematic bug investigation and resolution
-
-**Steps**:
-```
-investigation (debug) → planning (fix strategy) →
-implementation → implementation_review → testing → quality_gate → completion
-```
-
-**Usage**:
-```bash
-/workflow bug-fix "Users can't login with special characters"
-```
-
-**Supported Modes**: All
-
----
-
-### 4. Refactor
-
-**Template**: `templates/refactor.org`
-
-**Description**: Safe refactoring with comprehensive validation
-
-**Steps**:
-```
-codebase_analysis → planning → implementation →
-implementation_review → testing_review → quality_gate → completion
-```
-
-**Usage**:
-```bash
-/workflow refactor "Extract user service from controller"
-```
-
-**Supported Modes**: standard, thorough
-
----
-
-### 5. E2E Testing
-
-**Template**: `templates/e2e-testing.org`
-
-**Description**: 6-phase Playwright test generation
-
-**Steps**:
-```
-setup → exploration (e2e-explorer) → generation (e2e-generator) →
-validation (e2e-reviewer) → quality_gate → completion
-```
-
-**Usage**:
-```bash
-/workflow e2e http://localhost:3000 "Test checkout flow"
-```
-
-**Supported Modes**: All
-
-**Phases**:
-1. **Setup**: Install Playwright, create config
-2. **Exploration**: BFS crawl, generate app-map.json
-3. **Generation**: Create tests with accessibility-first selectors
-4. **Validation**: Run 3x, detect flakiness, check anti-patterns
-5. **Quality Gate**: Full suite validation
-6. **Completion**: Archive and report
-
----
-
-### 6. Joomla Translation (Optional)
-
-**Template**: `templates/joomla-translation.org`
-
-**Description**: i18n conversion for Joomla components
-
-**Steps**:
-```
-planning (translation-planner - scan views) →
-implementation (translation-coder - process views) →
-review (translation-reviewer) → quality_gate → completion
-```
-
-**Usage**:
-```bash
-/translate-auto com_mycomponent fr-CA
-```
-
-**Supported Modes**: standard
-
-**Requires**: translate module installed
-
----
-
-## Gate Enforcement System
-
-### Gate Definition
-
-Each gate defines:
-- Agent to invoke
-- Model tier
-- Parallelism (1 or N)
-- Required inputs
-- Expected outputs
-- Success criteria
-
-**Example**:
-```json
-{
-  "name": "implementation_review",
-  "agent": "reviewer",
-  "tier": "mid",
-  "parallel": 1,
-  "max_iterations": 3,
-  "required_inputs": ["implementation_files"],
-  "expected_outputs": ["verdict", "issues"],
-  "success_criteria": "verdict === 'PASS'"
-}
-```
-
-### Gate Execution Flow
-
-```
-1. Load gate configuration
-2. Validate required inputs present
-3. Spawn agent session(s)
-   - Single agent: spawn 1
-   - Parallel: spawn N simultaneously
-4. Wait for completion
-5. Validate outputs
-6. Check success criteria
-7. Update state file
-8. Proceed or fail
-```
-
-### Parallel Gate Execution
-
-**Single Agent**:
-```typescript
-const result = await spawnAgent({ agent: 'reviewer', ... })
-```
-
-**Parallel Batch**:
-```typescript
-const results = await swarm_spawn_batch({
-  agents: [
-    { name: 'architect', ... },
-    { name: 'architect', ... },
-    { name: 'architect', ... }
-  ]
-})
-
-// Apply consensus
-const consensus = applyConsensus(results, '2/3')
-```
-
-### Gate Failure Handling
-
-**On Failure**:
-1. Log error to workflow state
-2. Pause workflow
-3. Send critical notification
-4. Wait for user intervention
-5. User fixes issue
-6. User runs `/workflow-resume`
-7. Retry failed gate
-
-**Retry Logic**:
-```
-Attempt 1: Execute gate
-  ↓ FAIL
-Attempt 2: Retry with fixes
-  ↓ FAIL
-Attempt 3: Final retry
-  ↓ FAIL (max iterations)
-Escalate to higher tier agent or manual intervention
-```
-
-## State Management
-
-### State File Format
-
-**Location**: `~/.config/opencode/workflows/active/<workflow-id>.state.json`
-
-**Structure**:
-```json
-{
-  "workflow_id": "wf-2026-02-14-001",
-  "type": "feature-development",
-  "mode": "standard",
-  "status": "in_progress",
-  "current_gate": "implementation_review",
-  "branch": "feature/jwt-auth",
-  "session_id": "sess-abc123",
-  "started_at": "2026-02-14T10:30:00Z",
-  "updated_at": "2026-02-14T10:45:00Z",
-  "gates": [
-    {
-      "name": "planning",
-      "status": "completed",
-      "agent": "architect",
-      "started_at": "2026-02-14T10:30:00Z",
-      "completed_at": "2026-02-14T10:35:00Z",
-      "outputs": { "plan_file": "plans/2026-02-14-jwt-auth.org" }
-    },
-    {
-      "name": "implementation",
-      "status": "completed",
-      "agent": "executor",
-      "started_at": "2026-02-14T10:35:00Z",
-      "completed_at": "2026-02-14T10:42:00Z",
-      "outputs": { "files_modified": [...] }
-    },
-    {
-      "name": "implementation_review",
-      "status": "in_progress",
-      "agent": "reviewer",
-      "started_at": "2026-02-14T10:42:00Z",
-      "iteration": 1,
-      "max_iterations": 3
-    }
-  ],
-  "errors": []
-}
-```
-
-### Sidecar Files
-
-Each workflow creates `.state.json` alongside the `.org` file:
-```
-~/.config/opencode/workflows/
-├── active/
-│   ├── 2026-02-14-jwt-auth.state.json  # Machine-readable state
-│   └── 2026-02-14-jwt-auth.org         # Human-readable org file
-└── completed/
-    └── 2026-02-13-user-service.state.json
-```
-
-### Session Binding
-
-**Multi-Workflow Support**: Multiple workflows can run simultaneously in different sessions.
-
-**Binding Protocol**:
-1. User starts workflow in session A: `/workflow feature ...`
-2. Create `.state.json` with `session_id: "sess-A"`
-3. Session A owns this workflow
-4. User starts another workflow in session B: `/workflow e2e ...`
-5. Create separate `.state.json` with `session_id: "sess-B"`
-6. Both workflows run independently
-
-**Commands**:
-```bash
-# In session A
-/workflow feature Add auth
-
-# In session B (different terminal)
-/workflow e2e http://localhost:3000
-
-# Check status of all
+```text
 /workflow-status
-
-# Resume specific workflow
-/workflow-resume wf-2026-02-14-001
+/workflow-status <workflow-id>
+/workflow-resume
+/workflow-resume <workflow-id>
 ```
 
-## Workflow Commands
+Manual resume reads active state and its companion org file. For a failed or interrupted gate, the supervisor should offer to continue the stored Task ID. If no Task ID exists, it should ask before starting a replacement.
 
-### /workflow
+Session bindings are exact. A workflow state discovered by `/workflow-resume` must be transferred with the permission-gated `workflow_resume_session` tool before enforcement tools can update it. Ordinary binding cannot transfer controller ownership, and inherited child bindings are ineligible for resume handoff.
 
-Start automated workflow.
+## Manual Modes
 
-**Syntax**:
-```bash
-/workflow <type> <description>
-```
+Mode JSON files route roles to installed workflow agents. Manual iteration and parallelism guidance also lives in each mode's `settings`.
 
-**Parameters**:
-- `type`: feature, figma, bug-fix, refactor, e2e, translate (optional module)
-- `description`: What to build/test/fix
+| Mode | Current routing intent |
+|---|---|
+| `eco` | Lite planning, implementation, review, security, and performance agents |
+| `turbo` | Speed-oriented lite routing with reduced iteration limits |
+| `standard` | Standard planner, executor, reviewer, security, and test routing |
+| `thorough` | Deep code and security review with larger iteration limits |
+| `swarm` | Deep review routing plus parallel swarm guidance |
+| `delegate` | Manual planning, external CLI execution, review, merge, and completion routing |
 
-**Examples**:
-```bash
-/workflow feature Add JWT authentication
-/workflow figma https://figma.com/... Dashboard header
-/workflow bug-fix "Login fails with special chars"
-/workflow refactor "Extract payment service"
-/workflow e2e http://localhost:3000 "Test checkout"
-```
+The mode files do not pin provider model IDs. Runtime model behavior is described in [Model Selection](#model-selection).
 
-**Behavior**:
-1. Validate workflow type exists
-2. Ask branch strategy (current/new/specify)
-3. Create state file and bind to session
-4. Load template gates
-5. Execute first gate
-6. Update state after each gate
-7. Send notifications on events
+## Automatic DAG Lifecycle
 
----
+Automatic workflow driving is a separate opt-in plugin path. It accepts only installed declarative definitions named `development` and `e2e`.
 
-### /workflow-resume
+### Enable Budgets
 
-Resume paused or interrupted workflow.
-
-**Syntax**:
-```bash
-/workflow-resume [workflow-id]
-```
-
-**Parameters**:
-- `workflow-id` (optional): Specific workflow to resume. Omit for most recent in current session.
-
-**Examples**:
-```bash
-/workflow-resume                    # Resume most recent
-/workflow-resume wf-2026-02-14-001  # Resume specific
-```
-
-**Use Cases**:
-- After Ctrl+C interruption
-- After fixing error that caused failure
-- After lunch break during long workflow
-
-**Behavior**:
-1. Find workflow by ID or session
-2. Load state from `.state.json`
-3. Show current gate and status
-4. Ask for confirmation
-5. Resume from current gate
-
----
-
-### /workflow-status
-
-Show status of active workflows.
-
-**Syntax**:
-```bash
-/workflow-status [workflow-id]
-```
-
-**Parameters**:
-- `workflow-id` (optional): Specific workflow. Omit for all active.
-
-**Examples**:
-```bash
-/workflow-status                    # Show all
-/workflow-status wf-2026-02-14-001  # Show specific
-```
-
-**Displays**:
-- Workflow ID, title, type, mode
-- Current gate and status
-- Progress through all gates
-- Last activity timestamp
-- Any errors
-
-**Output Example**:
-```
-Active Workflows:
-
-[wf-2026-02-14-001] Add JWT authentication (feature-development, standard)
-├── Session: sess-abc123
-├── Branch: feature/jwt-auth
-├── Status: in_progress
-├── Current Gate: implementation_review (iteration 1/3)
-├── Progress: 2/7 gates completed
-├── Last Activity: 3 minutes ago
-└── Errors: none
-
-[wf-2026-02-14-002] Test checkout flow (e2e-testing, standard)
-├── Session: sess-def456
-├── Status: in_progress
-├── Current Gate: validation
-├── Progress: 3/6 gates completed
-└── Last Activity: 1 minute ago
-```
-
----
-
-## Branch Management
-
-When starting workflow, supervisor asks:
-
-```
-Current branch: main
-Git status: clean
-
-How should I handle branching?
-1. Use current branch (main)
-2. Create new feature branch (feature/jwt-auth)
-3. Specify custom branch name: ____
-```
-
-**Recommendations**:
-- **Option 1**: Quick fixes, hotfixes, working on feature branch already
-- **Option 2**: New features (auto-generated name from description)
-- **Option 3**: Specific naming convention required
-
-**Auto-Generated Branch Names**:
-```
-/workflow feature Add JWT auth
-  → feature/jwt-auth
-
-/workflow bug-fix "Login fails"
-  → fix/login-fails
-
-/workflow refactor "Extract service"
-  → refactor/extract-service
-```
-
-## Notifications
-
-Desktop notifications via `notify-send` (Linux) or equivalent:
-
-**Events**:
-- ✓ Step completion (normal priority)
-- ✓ Workflow completion (normal priority)
-- ✗ Step failure (critical priority)
-- ⏸ Workflow paused (critical priority)
-
-**Example**:
-```
-✓ OpenCode Workflow
-Step 'implementation' completed successfully
-(wf-2026-02-14-001)
-```
-
-```
-✗ OpenCode Workflow - FAILURE
-Step 'implementation_review' failed with 3 issues
-View details and fix, then /workflow-resume
-(wf-2026-02-14-001)
-```
-
-## Troubleshooting
-
-### Workflow Not Starting
-
-**Symptom**: `/workflow` command does nothing
-
-**Solutions**:
-1. Verify supervisor agent exists: `ls ~/.config/opencode/agent/supervisor.md`
-2. Check OpenCode config: `opencode --help`
-3. Ensure workflow directories exist: `mkdir -p ~/.config/opencode/workflows/active ~/.config/opencode/workflows/completed`
-4. Check for conflicting workflows in session
-
-### Workflow Stuck
-
-**Symptom**: Gate shows `in_progress` for long time
-
-**Solutions**:
-1. Check if agent is running (view session activity)
-2. Interrupt (Ctrl+C) and resume
-3. Check `.state.json` for error details
-4. View logs in workflow directory
-
-### Gate Failure Loop
-
-**Symptom**: Review fails repeatedly with same issues
-
-**Solutions**:
-1. Check if executor is actually fixing issues
-2. Verify fixes are being applied to correct files
-3. Escalate to higher tier reviewer
-4. Manual intervention if max iterations reached
-
-### Notifications Not Appearing
-
-**Symptom**: No desktop notifications
-
-**Solutions**:
-1. Install `notify-send`: `sudo apt install libnotify-bin`
-2. Check plugin exists: `ls ~/.config/opencode/plugin/workflow-notifications.ts`
-3. Test manually: `notify-send "Test" "Message"`
-
-## Best Practices
-
-### 1. Start Simple
-Begin with eco or standard mode to learn workflow system.
-
-### 2. Use Appropriate Mode
-Don't use thorough mode for simple tasks. Match mode to criticality.
-
-### 3. Monitor Progress
-Keep workflow state file visible in another window.
-
-### 4. Fix Issues Promptly
-When review fails, fix all issues before resuming (don't skip MINOR issues).
-
-### 5. Leverage Swarm for Modular Work
-If task can be split into 3-4 independent parts, use swarm mode.
-
-### 6. Archive Completed Workflows
-Completed workflows serve as development logs. Consider committing them to repo.
-
-## Configuration
-
-Configure model tiers in `~/.config/opencode/workflows.json`:
+`automation.enabled` defaults to `false`. When it is `true`, every budget field is required:
 
 ```json
 {
-  "model_tiers": {
-    "low":  ["google/gemini-3-flash", "minimax/m2.5"],
-    "mid":  ["minimax/m2.5", "zhipu/glm-5", "google/gemini-3-pro"],
-    "high": ["zhipu/glm-5", "google/gemini-3-pro", "openai/gpt-5.2"]
-  },
-  "fallback_order": ["minimax/m2.5", "zhipu/glm-5", "google/gemini-3-pro"],
-  "default_mode": "standard"
+  "automation": {
+    "enabled": true,
+    "max_parallel_sessions": 2,
+    "max_sessions": 12,
+    "max_attempts_per_stage": 2,
+    "max_wall_time_ms": 3600000,
+    "max_input_tokens": 250000,
+    "max_output_tokens": 80000,
+    "max_cost_usd": null
+  }
 }
 ```
 
-Review iterations and swarm settings are configured per-mode in `mode/*.json`, not here.
+These values are examples, not defaults. Select limits for the project and provider account. The schema requires positive session, attempt, and wall-time limits; token limits may be zero; cost may be a non-negative number or `null`.
 
-## See Also
+### Start
 
-- [AGENTS.md](./AGENTS.md) - Agent reference
-- [docs/model-compatibility.md](./docs/model-compatibility.md) - Model configuration
-- [docs/review-system.md](./docs/review-system.md) - Zero-tolerance review
-- [docs/swarm-mode.md](./docs/swarm-mode.md) - Parallel execution
-- [docs/e2e-testing.md](./docs/e2e-testing.md) - E2E testing pipeline
+```text
+/workflow-auto development Implement the requested change --mode=standard
+/workflow-auto e2e Exercise the requested browser flow --mode=thorough
+```
+
+The command calls `workflow_auto_start` once. The tool:
+
+1. Confirms automation is enabled.
+2. Detects capabilities and rejects unavailable `required` capabilities.
+3. Loads and validates the installed definition.
+4. Loads role routing from the selected mode.
+5. Requests `task` permission for every routed agent used by the definition.
+6. Persists a copy of the validated definition and initial state.
+7. Starts dependency-ready stages up to the parallel-session budget.
+
+Only `eco`, `turbo`, `standard`, `thorough`, and `swarm` are accepted automatic modes. `delegate` is not an automatic DAG mode.
+
+The DAG validator accepts only declared stage fields, safe identifiers, known model tiers, existing dependencies, and acyclic graphs. Definitions are data; the engine does not generate or evaluate arbitrary workflow code.
+
+### Installed DAGs
+
+`development` follows this dependency structure:
+
+```text
+planning -> implementation -> code_review ----\
+                           -> security_review  +-> quality_gate -> completion_guard
+                           -> tests -----------/
+```
+
+`e2e` follows:
+
+```text
+setup -> e2e_exploration -> e2e_generation -> e2e_validation
+      -> quality_gate -> completion_guard
+```
+
+Each stage runs in a child OpenCode session with a routed `wf-*` agent. Native Task, swarm, external delegation, and nested automatic-workflow tools are blocked inside stage sessions so sessions, processes, tokens, cost, and cancellation remain under engine control. The final assistant response must be one JSON object matching the stage result contract. Invalid output is an attempt failure. A failed result is retried unless it explicitly sets `retryable: false` or exhausts the configured attempt budget.
+
+### Budgets And Pausing
+
+The engine tracks:
+
+- Child sessions created
+- Stage attempts
+- Concurrent running sessions
+- Input tokens
+- Output and reasoning tokens
+- Reported message cost
+- Wall time from original workflow creation
+
+Before a launch, exhausted limits pause scheduling. If usage crosses a limit while stages are running, those sessions are aborted and returned to pending before the workflow pauses. Attempt exhaustion also pauses for explicit intervention.
+
+Increase or otherwise change budgets in `workflows.json`, restart OpenCode, and use `/workflow-auto-resume` to apply them. A resume refreshes saved limits but does not reset accumulated usage or original wall-clock age.
+
+### Persistence And Reconciliation
+
+Automatic state and the copied definition are stored atomically with private file modes below the owning session's runtime directory. State records the root session, exact directory, exact worktree, stage sessions, attempts, model selections, results, errors, and budget usage.
+
+On plugin startup, valid saved workflows are restored with scheduling disabled. This prevents a restart from launching new agents without an explicit action. `/workflow-auto-resume`:
+
+1. Verifies current session, directory, and worktree ownership.
+2. Reauthorizes routed agents.
+3. Reconciles saved child session IDs with OpenCode session status.
+4. Collects completed structured results.
+5. Resumes deterministic scheduling.
+
+The `workflow_auto_status` tool reports the current session's automatic workflow. The `workflow_auto_cancel` tool aborts running child sessions, marks pending stages blocked, and sets the workflow to `cancelled`. Terminal workflows are not restarted by resume.
+
+## Capability Modes
+
+Capabilities are configured in `experimental_capabilities`:
+
+| Mode | Behavior |
+|---|---|
+| `disabled` | Capability remains inactive even if runtime support is available |
+| `auto` | Capability is active when detected; absence does not block automatic start or resume |
+| `required` | Capability is active when detected; absence blocks automatic start or resume |
+
+Environment-backed detection uses:
+
+| Capability | Environment variable |
+|---|---|
+| `background_subagents` | `OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS` |
+| `native_workspaces` | `OPENCODE_EXPERIMENTAL_WORKSPACES` |
+| `mcp_code_mode` | `OPENCODE_EXPERIMENTAL_CODE_MODE` |
+| `references` | `OPENCODE_EXPERIMENTAL_REFERENCES` |
+
+Truthy values are `1`, `true`, `yes`, and `on`, case-insensitively. `plugin_v2` has no environment flag. The live plugin reports it available because the v2 plugin runtime successfully loaded the plugin. Installer `--doctor` performs a static check based on the compatible OpenCode version and installed automatic-workflow plugin.
+
+If a capability-specific variable is absent, detection falls back to `OPENCODE_EXPERIMENTAL`. An explicitly false capability-specific value overrides the broad flag.
+
+Use `workflow_capabilities` for the loaded runtime report. Capability settings currently report and gate availability; they do not modify OpenCode configuration, set environment variables, or replace the workflow's existing SDK scheduling. Restart OpenCode after changing a capability mode or environment variable.
+
+## Model Selection
+
+### Default: Runtime Inheritance
+
+The installer strips repository-only `model_tier` metadata by default. Installed agents and commands then inherit OpenCode's merged runtime model configuration. This is also the behavior of the legacy `--runtime-models` and `--no-model-resolve` aliases.
+
+### Explicit Materialization
+
+`node install.mjs --materialize-models` resolves the ordered candidates for each agent:
+
+1. `agent_models[agent]`, when present
+2. The agent's `model_tiers[tier]`
+3. `fallback_order`
+
+Candidates can be a provider/model string or an object with `model` and `variant`. `agent_variants[agent]` supplies a variant when the candidate does not. Variants are sent only with a concrete model. The installer writes only the first valid configured candidate; it does not probe provider credentials.
+
+No provider/model list is bundled. Schema validation checks candidate shape. Runtime catalog code queries OpenCode's live `config.providers` response and reports unavailable models or variants without model-name heuristics. Keep configured IDs aligned with the catalog exposed by the OpenCode installation.
+
+## Swarm Runtime
+
+Swarm is parallel OpenCode child-session execution, not external CLI delegation and not automatic DAG scheduling by itself.
+
+The main tools are:
+
+- `swarm_spawn_batch`: authorize agents and enqueue tasks
+- `swarm_await_batch`: wait for event-driven completion with a timeout
+- `swarm_collect_results`: retrieve final assistant text after completion
+- `swarm_cancel_task`: abort one task and release its queue slot
+- `swarm_spawn_validation`: create functional, security, and quality review tasks
+
+Global and per-provider concurrency come from `swarm_config`. Provider slots are derived from an explicitly supplied task model's provider prefix; tasks without one use the general queue. Queue state is persisted per caller session and restored paused after restart. The next `swarm_await_batch` call reauthorizes agents and the working directory before resuming queued work and reconciling running sessions; lifecycle events and staleness timers then drive completion.
+
+Swarm tasks normally share a working directory. Parallelize only work that can safely share that directory, or use a separate worktree mechanism. See [Swarm Mode](./docs/swarm-mode.md).
+
+## External CLI Delegation
+
+Direct delegation executes official `claude` or Antigravity `agy` binaries as argv-only child processes. The compatible `gemini` routing token invokes `agy`; Gemini CLI is not used. This path is separate from native OpenCode subagents.
+
+```text
+/delegate status --auth
+/delegate ask auto Summarize the current diff
+/delegate ask gemini --model <agy-model-alias> Review the UI flow
+/delegate followup <run-id> Check the security implications
+/delegate runs
+/delegate show <run-id>
+```
+
+The plugin requests `delegation` permission before execution. Unsafe provider modes are used only when configured and separately approved through `delegation_unsafe`. Models are not pinned in workflow configuration; an optional request-scoped alias can be passed manually. Runs are session-scoped, store bounded response data in JSON, and cap private stdout/stderr files according to `delegation.max_output_bytes`. Claude follow-up uses an internal native resume token when available; otherwise follow-up is stateless and includes a bounded excerpt of prior context.
+
+See [External CLI Delegation](./docs/external-cli-delegation.md).
+
+## Delegated Worktrees
+
+`/workflow delegate ...` combines the manual supervisor, external provider processes, native OpenCode review agents, and managed Git worktrees.
+
+Worktrees are created below the private workflow runtime, grouped by a hash of the canonical repository path, on validated `delegate/<workflow-id>/<task-id>` branches. Before merge, the manager:
+
+1. Requires the target branch to be checked out in the target worktree.
+2. Requires the target worktree to be clean; managed worktrees live outside the repository.
+3. Checkpoints every task change inside the delegated worktree.
+4. Verifies the task branch tip and worktree are a clean committed snapshot.
+5. Refuses a no-op merge unless explicitly allowed by the library caller.
+6. Uses a non-fast-forward merge and aborts on conflict.
+
+Normal cleanup removes only clean worktrees whose exact branch tip is demonstrably merged. Dirty, unmerged, mismatched, or out-of-root paths are retained. Delegation batches are in memory; a plugin restart does not reconstruct an in-flight orchestrator batch, although Git worktrees preserve task changes for inspection.
+
+See [Delegated Workflows](./docs/delegated-workflows.md).
+
+## Translation Workflow
+
+Install the optional module with `node install.mjs --all`. The translation plugin creates a session-owned Joomla workflow state under `<config-dir>/workflows/active/` and binds it to the exact session, directory, and worktree.
+
+The flow is view-by-view:
+
+1. `workflow_translate_init` validates and scans a component.
+2. `workflow_translate_next` selects a pending or retryable view.
+3. The coder inspects and converts only that view.
+4. `workflow_translate_view_done` records observed counts and moves it to review.
+5. `workflow_translate_review` passes the view or returns it to the error queue.
+6. `workflow_translate_status` reports progress.
+
+PHP view files in `tmpl/` and `layouts/` are considered; common backup names are excluded. Files over the plugin's line threshold require chunked inspection. Source language defaults to `en-GB`; target and component paths are explicit. Paths outside the current worktree require `external_directory` authorization, and edits require normal OpenCode edit permission.
+
+Use `/translate-auto <component-path> <target-language>` for the orchestration command or `/translate-view` for focused work. See the installed command definitions for arguments.
+
+## Permissions Summary
+
+| Operation | Permission request |
+|---|---|
+| Native or automatic subagent | `task` for the routed agent |
+| Swarm task | `task` for each distinct agent |
+| Direct provider process | `delegation` |
+| Unsafe provider flag | `delegation_unsafe` |
+| Delegated worktree operation | `worktree`, plus edit or delegation as applicable |
+| Path outside the worktree | `external_directory` |
+| Translation read or write | `read` or `edit`, plus external-directory approval when applicable |
+
+OpenCode permission rules remain authoritative. Workflow state does not grant filesystem, shell, task, or external process access.
+
+## Diagnostics
+
+```bash
+node install.mjs --doctor
+npm run validate:config
+npm run typecheck
+npm test
+```
+
+`--doctor` checks the minimum OpenCode version, installed `workflows.json` schema, installation manifest schema and target, managed-file ownership, legacy singular directories, and configured capability availability. Use `node install.mjs --migrate --dry-run` before normalizing an older workflow config.
+
+For a manual workflow, use `/workflow-status` and inspect its active state. For an automatic workflow, use `workflow_auto_status`; after a restart, use `/workflow-auto-resume` rather than starting another workflow in the same session.
+
+## Related Documentation
+
+- [Agent Reference](./docs/agents.md)
+- [Model Compatibility](./docs/model-compatibility.md)
+- [Review System](./docs/review-system.md)
+- [Swarm Mode](./docs/swarm-mode.md)
+- [Delegated Workflows](./docs/delegated-workflows.md)
+- [External CLI Delegation](./docs/external-cli-delegation.md)
+- [E2E Testing](./docs/e2e-testing.md)

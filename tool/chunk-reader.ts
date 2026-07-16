@@ -1,5 +1,6 @@
-import { tool } from "@opencode-ai/plugin"
+import { tool, type ToolContext } from "@opencode-ai/plugin"
 import { readFileSync, existsSync } from "fs"
+import { abortCheckpoint, authorizeToolPath } from "../lib/tool-context.ts"
 
 interface ChunkState {
   filePath: string
@@ -21,8 +22,9 @@ export default tool({
     stateFile: tool.schema.string().describe("Path to the state file created by file-chunker"),
     chunkId: tool.schema.number().describe("The chunk ID to read (1-based)")
   },
-  async execute(args) {
-    const { stateFile, chunkId } = args
+  async execute(args, context: ToolContext) {
+    const { chunkId } = args
+    const stateFile = await authorizeToolPath(context, args.stateFile, "read")
 
     // Validate state file exists
     if (!existsSync(stateFile)) {
@@ -44,16 +46,18 @@ export default tool({
       }, null, 2)
     }
 
+    const sourceFile = await authorizeToolPath(context, state.filePath, "read")
+
     // Validate source file exists
-    if (!existsSync(state.filePath)) {
+    if (!existsSync(sourceFile)) {
       return JSON.stringify({
         success: false,
-        error: `Source file not found: ${state.filePath}`
+        error: `Source file not found: ${sourceFile}`
       }, null, 2)
     }
 
     // Read source file
-    const content = readFileSync(state.filePath, "utf-8")
+    const content = readFileSync(sourceFile, "utf-8")
     const lines = content.split("\n")
 
     // Extract chunk content (convert to 0-based index)
@@ -84,15 +88,19 @@ export default tool({
     }
 
     // Build content with line numbers
-    const numberedContent = chunkLines.map((line, idx) => {
+    const numberedLines: string[] = []
+    for (let idx = 0; idx < chunkLines.length; idx++) {
+      await abortCheckpoint(context, idx)
+      const line = chunkLines[idx]
       const lineNum = chunk.startLine + idx
-      return `${String(lineNum).padStart(5, " ")} | ${line}`
-    }).join("\n")
+      numberedLines.push(`${String(lineNum).padStart(5, " ")} | ${line}`)
+    }
+    const numberedContent = numberedLines.join("\n")
 
     return JSON.stringify({
       success: true,
       chunkId,
-      filePath: state.filePath,
+      filePath: sourceFile,
       startLine: chunk.startLine,
       endLine: chunk.endLine,
       totalLines: chunk.endLine - chunk.startLine + 1,

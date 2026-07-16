@@ -424,7 +424,7 @@ function buildDevelopmentSection(projectRoot: string): string[] {
  * Generate the full markdown init-file content for a given provider and project.
  */
 export function generateInitContent(provider: DelegationProvider, projectRoot: string): string {
-  const cliName = provider === 'claude' ? 'Claude Code' : 'Gemini CLI'
+  const cliName = provider === 'claude' ? 'Claude Code' : 'Antigravity CLI'
   const stack = detectProjectStack(projectRoot)
   const projectName = resolveProjectName(projectRoot)
   const topDirs = describeTopLevelDirs(projectRoot)

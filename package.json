@@ -1,1 +1,28 @@
-{"dependencies":{"zod":"^3.24.0"}}
+{
+  "name": "opencode-workflows",
+  "version": "2.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test test/*.test.ts test/*.test.mjs test/unit/*.test.ts test/integration/*.test.ts",
+    "test:unit": "tsx --test test/*.test.ts test/*.test.mjs test/unit/*.test.ts",
+    "test:integration": "tsx --test test/integration/*.test.ts",
+    "validate:config": "node script/validate-config.mjs",
+    "verify": "npm run typecheck && npm run validate:config && npm test"
+  },
+  "dependencies": {
+    "@opencode-ai/plugin": "1.17.20",
+    "@opencode-ai/sdk": "1.17.20",
+    "ajv": "8.20.0",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "26.1.1",
+    "tsx": "4.23.1",
+    "typescript": "7.0.2"
+  }
+}

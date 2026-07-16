@@ -2,16 +2,29 @@
 description: "Quick implementation for simple changes"
 model_tier: low
 mode: subagent
+hidden: true
 temperature: 0.2
 steps: 15
 permission:
   external_directory:
-    "~/.config/opencode/**": allow
+    "*": ask
   edit: allow
-  write: allow
   read: allow
   grep: allow
   glob: allow
+  bash:
+    "*": ask
+    "git *": deny
+    "git status*": allow
+    "git diff*": allow
+    "git log*": allow
+    "git show*": allow
+    "git blame*": allow
+    "git branch": allow
+    "git branch --show-current*": allow
+    "rm -rf*": deny
+    "sudo*": deny
+  task: deny
 ---
 
 # Quick Executor Agent

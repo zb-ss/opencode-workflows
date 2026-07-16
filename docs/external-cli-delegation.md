@@ -1,112 +1,91 @@
 # External CLI Delegation
 
-Use OpenCode Workflows to delegate prompts to official provider CLIs in headless mode.
+External CLI delegation runs an installed `claude` or Antigravity `agy` executable in headless mode. The public `gemini` provider token routes Gemini-model work to Antigravity; it does not invoke the enterprise-only Gemini CLI. This path does not use OpenCode's native Task tool and does not create a worktree unless the explicit worktree command or delegated workflow tools are used.
 
-Supported providers:
-- Claude Code CLI (`claude`)
-- Gemini CLI (`gemini`)
+## Commands
 
-## Why this exists
-
-- Keep provider-native auth and usage boundaries
-- Reuse existing subscriptions/credentials through official CLIs
-- Integrate delegated outputs into workflow sessions with traceability
-
-## Command
-
-```bash
-/delegate status [provider]
-/delegate status [provider] --auth
-/delegate ask <provider|auto> [--model <model>] <prompt>
+```text
+/delegate status [claude|gemini] [--auth]
+/delegate ask <claude|gemini|auto> [--model <cli-alias>] <prompt>
 /delegate followup <run-id> <prompt>
 /delegate runs [limit]
 /delegate show <run-id>
 ```
 
-## Typical flow
+The `/delegate` command passes its raw input to `delegate_command`. The plugin also exposes direct tools:
 
-1. Validate setup:
+- `delegate_preflight`
+- `delegate_run`
+- `delegate_followup`
+- `delegate_get_run`
+- `delegate_list_runs`
 
-```bash
-/delegate status
-# Full auth probe (may be slower depending on provider CLI behavior)
-/delegate status --auth
-```
+Use direct tools when another agent needs structured arguments and results.
 
-2. Ask a provider (or auto fallback):
+## Readiness
 
-```bash
-/delegate ask auto "Summarize architecture and security risks"
-```
+`/delegate status` checks that selected binaries exist and can report a version. Add `--auth` to perform provider-specific authentication probes. The `delegate_preflight` tool checks authentication by default unless its caller disables that probe.
 
-3. Continue from prior output:
+Install Antigravity CLI from its [official documentation](https://antigravity.google/docs/cli-overview), run `agy` once to authenticate, and use `agy models` to inspect aliases accepted by the installed version.
 
-```bash
-/delegate followup <run-id> "Focus only on high-severity risks"
-```
+An unknown authentication state is a warning, not proof of readiness. Complete any interactive provider login outside the headless run.
 
-4. Inspect recent runs:
+## Provider Selection
 
-```bash
-/delegate runs 10
-/delegate show <run-id>
-```
+`auto` uses `delegation.default_provider` when configured, then the configured fallback order. If no order is configured, the direct runner uses its supported providers in its built-in order. An explicit provider can disable fallback through the direct tool.
 
-## Readiness and warnings
-
-Delegation tools are warning-first by default:
-- Missing binary -> warning with install guidance
-- Auth appears missing -> warning with interactive login guidance
-- Unknown auth state -> warning to verify manually
-- Timeout/command failure -> structured error in run output
-
-Workflows should not crash solely because delegation is unavailable.
-
-## Follow-up behavior
-
-`/delegate followup` attempts provider-native resume when a resume token is available from previous run metadata.
-
-If no token is available, it falls back to stateless follow-up by prepending prior context. The fallback is explicitly reported in warnings.
-
-## Model configuration
-
-Default models can be configured per-provider in `~/.config/opencode/workflows.json`:
+Provider configuration contains runtime controls, not model pins:
 
 ```json
 {
   "delegation": {
-    "claude": { "model": "sonnet", "timeout_ms": 120000 },
-    "gemini": { "model": "gemini-2.5-pro", "timeout_ms": 120000 },
-    "fallback_order": ["claude", "gemini"]
+    "claude": {},
+    "gemini": {},
+    "fallback_order": []
   }
 }
 ```
 
-Per-request override: `/delegate ask claude --model opus "your prompt"`
+Normal delegation omits `--model` and lets the provider CLI choose its current default. Manual request-level selection remains available through `/delegate ask ... --model`, `delegate_run.model`, `exec-worktree --model`, or a delegated batch task's optional `model` field. Values are provider-native aliases, not OpenCode provider/model IDs.
 
-## Provider differences
+## Invocation And Permissions
 
-| Feature | Claude CLI | Gemini CLI |
-|---------|-----------|------------|
-| Non-interactive | `--print` (flag) + positional prompt | `--prompt TEXT` (option) |
-| JSON output | `--output-format json` | `--output-format json` |
-| Resume | `--resume SESSION_ID` | Not supported (stateless fallback) |
-| Auth check | `claude auth status` (JSON) | Probe with minimal prompt |
-| Model flag | `--model sonnet` | `--model gemini-2.5-pro` |
+Processes are spawned as argument arrays with `shell: false` in the current authorized directory. Claude prompts use a `--` separator. Antigravity receives the prompt through `agy --print`. Timeouts and OpenCode abort signals terminate the child process.
 
-Claude always uses JSON output internally for reliable response parsing and session ID extraction.
-Gemini does not support session-based resume — follow-ups always use stateless context injection.
+Every external run requests `delegation` permission. A configured `dangerously-skip-permissions` mode for Claude or Antigravity requires a separate `delegation_unsafe` decision. Unsupported permission-mode strings are ignored with a warning.
 
-## Security notes
+Do not treat worktree isolation as a replacement for provider permission controls. Direct `/delegate ask` preserves Antigravity's default execution mode. The explicit `exec-worktree` path uses `accept-edits` only inside its approved managed worktree.
 
-- Commands are spawned without shell interpolation (`shell: false`).
-- Prompts use `--` separator to prevent flag injection (Claude).
-- Run metadata is stored locally under:
-  - `~/.config/opencode/workflows/context/delegation/runs/*.json`
-- Prompts and responses are truncated for storage safety.
+## Run Records
 
-## Caveats
+Runs are scoped to the current OpenCode session and stored below:
 
-- CLI flags can vary across provider versions; keep CLIs up to date.
-- First-time OAuth login may require opening a browser.
-- For CI/non-interactive environments, use provider-supported API key or enterprise auth modes.
+```text
+<config-dir>/workflows/runtime/sessions/<session-hash>/external-cli-delegation/
+```
+
+The private run record contains provider attempts, status, timing, a prompt hash and bounded preview, response data, warnings, output file references, and a resume token when available. Private per-attempt stdout and stderr files are capped by `delegation.max_output_bytes`; bounded copies are returned in tool output. Public tool responses omit resume tokens, raw provider JSON, executable paths, and private output paths.
+
+Run IDs from another current session are not readable. Importing a legacy run record requires an explicit legacy delegation permission.
+
+## Follow-Up
+
+Claude follow-up uses provider-native resume when the prior successful run contains a safe resume token and native resume is preferred. Antigravity follow-up remains stateless in this integration.
+
+When native resume is unavailable, the plugin creates a stateless prompt from a bounded prior prompt preview, a bounded prior response excerpt, and the new request. The result explicitly reports stateless fallback.
+
+## Failure Results
+
+Failures are classified rather than inferred as success from process exit alone. Categories include missing binary, timeout, authentication, rate limit, unavailable model, invalid request, unsupported flag, provider error, storage failure, and empty output.
+
+Fallback stops at the first successful provider or after all allowed attempts fail. Each attempt remains in the run record.
+
+## Worktree Command
+
+The low-level `exec-worktree` delegate subcommand can create one managed worktree and execute a provider there. Full plan, review, checkpoint, merge, and cleanup behavior belongs to [Delegated Workflows](./delegated-workflows.md), which uses the delegation orchestrator rather than this one-off path.
+
+## Related Documentation
+
+- [Delegated Workflows](./delegated-workflows.md)
+- [Model Compatibility](./model-compatibility.md)
+- [Workflow System](../WORKFLOWS.md#external-cli-delegation)

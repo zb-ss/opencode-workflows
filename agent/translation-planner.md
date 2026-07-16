@@ -17,7 +17,7 @@ permission:
     "rm *": ask
     "rm -rf *": deny
     "sudo *": deny
-    "*": allow
+    "*": ask
 ---
 
 You are a Joomla localization specialist who analyzes components and creates a VIEW QUEUE for processing one view at a time.

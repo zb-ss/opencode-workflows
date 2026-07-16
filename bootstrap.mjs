@@ -12,6 +12,7 @@
 //   INSTALL_DIR=~/my/path  — custom clone location
 //   INSTALL_MODE=copy      — copy files instead of symlinks
 //   INSTALL_MODULES=all    — install all modules including translate
+//   OPENCODE_CONFIG_DIR=... — explicit OpenCode configuration directory
 
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -67,12 +68,19 @@ if (existsSync(installDir)) {
 
 // --- Run installer ---
 
-const args = [];
-// Windows defaults to copy mode (symlinks require Developer Mode or admin)
-if (process.env.INSTALL_MODE === "copy" || (isWindows && process.env.INSTALL_MODE !== "symlink")) {
-  args.push("--copy");
+const args = process.argv.slice(2).filter((arg) => arg !== "--");
+const hasMode = args.includes("--copy") || args.includes("--symlink");
+// Windows defaults to copy mode (symlinks require Developer Mode or admin).
+if (!hasMode && process.env.INSTALL_MODE === "symlink") args.push("--symlink");
+else if (!hasMode && (process.env.INSTALL_MODE === "copy" || isWindows)) args.push("--copy");
+
+if (process.env.INSTALL_MODULES === "all" && !args.includes("--all")) {
+  args.push("--all");
+} else if (process.env.INSTALL_MODULES && process.env.INSTALL_MODULES !== "all") {
+  for (const moduleName of process.env.INSTALL_MODULES.split(",").map((value) => value.trim()).filter(Boolean)) {
+    args.push("--module", moduleName);
+  }
 }
-if (process.env.INSTALL_MODULES === "all") args.push("--all");
 
 log("Running installer...");
 try {
@@ -84,4 +92,4 @@ try {
   err("Installer failed. Check the output above for details.");
 }
 
-log("Done! Run `opencode` to get started.");
+log("Done. Restart OpenCode to load configuration-time changes.");

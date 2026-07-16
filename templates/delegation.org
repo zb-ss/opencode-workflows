@@ -48,7 +48,7 @@
 - [ ] Break plan into discrete tasks
 - [ ] Tag each task as [code] or [ui]
 - [ ] Identify task dependencies
-- [ ] Route tasks to providers (Claude/Gemini)
+- [ ] Route tasks to providers (Claude/Antigravity)
 
 ** Task Breakdown
 #+BEGIN_SRC json
@@ -68,10 +68,10 @@
 - [ ] Ensure GEMINI.md exists (create if missing)
 
 ** Results
-| Provider | File | Status |
-|----------|------|--------|
-| claude | CLAUDE.md | pending |
-| gemini | GEMINI.md | pending |
+| Provider     | File      | Status   |
+| ----------   | ------    | -------- |
+| claude       | CLAUDE.md | pending  |
+| gemini (agy) | GEMINI.md | pending  |
 
 * Step 4: Parallel Execution
 :PROPERTIES:
@@ -89,8 +89,8 @@
 
 ** Execution Log
 
-| Task ID | Provider | Model | Worktree | Status | Duration |
-|---------|----------|-------|----------|--------|----------|
+| Task ID   | Provider   | Model   | Worktree   | Status   | Duration   |
+| --------- | ---------- | ------- | ---------- | -------- | ---------- |
 
 * Step 5: Per-Task Review
 :PROPERTIES:
@@ -107,8 +107,8 @@
 
 ** Review Log
 
-| Task ID | Attempt | Verdict | Issues |
-|---------|---------|---------|--------|
+| Task ID   | Attempt   | Verdict   | Issues   |
+| --------- | --------- | --------- | -------- |
 
 * Step 6: Merge
 :PROPERTIES:
@@ -125,8 +125,8 @@
 
 ** Merge Log
 
-| Task ID | Branch | Status | Conflicts |
-|---------|--------|--------|-----------|
+| Task ID   | Branch   | Status   | Conflicts   |
+| --------- | -------- | -------- | ----------- |
 
 * Step 7: Quality Gate
 :PROPERTIES:

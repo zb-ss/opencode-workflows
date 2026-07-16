@@ -1,6 +1,7 @@
-import { tool } from "@opencode-ai/plugin"
+import { tool, type ToolContext } from "@opencode-ai/plugin"
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs"
 import { dirname } from "path"
+import { authorizeToolPath, throwIfAborted } from "../lib/tool-context.ts"
 
 interface IniString {
   key: string
@@ -77,14 +78,16 @@ function escapeIniValue(value: string): string {
     .replace(/"/g, '\\"')     // Escape double quotes
 }
 
-function parseIniFile(content: string): { strings: Map<string, string>; sections: Map<string, string[]> } {
+function parseIniFile(content: string, context: ToolContext): { strings: Map<string, string>; sections: Map<string, string[]> } {
   const strings = new Map<string, string>()
   const sections = new Map<string, string[]>()
   let currentSection = "Other"
   
   const lines = content.split("\n")
   
-  for (const line of lines) {
+  for (let i = 0; i < lines.length; i++) {
+    if (i % 128 === 0) throwIfAborted(context)
+    const line = lines[i]
     const trimmed = line.trim()
     
     // Skip empty lines
@@ -127,11 +130,13 @@ function parseIniFile(content: string): { strings: Map<string, string>; sections
   return { strings, sections }
 }
 
-function generateIniContent(strings: IniString[], sort: boolean = true): string {
+function generateIniContent(strings: IniString[], context: ToolContext, sort: boolean = true): string {
   // Group by section
   const grouped = new Map<string, IniString[]>()
   
-  for (const str of strings) {
+  for (let i = 0; i < strings.length; i++) {
+    if (i % 128 === 0) throwIfAborted(context)
+    const str = strings[i]
     const section = str.section || categorizeKey(str.key)
     if (!grouped.has(section)) {
       grouped.set(section, [])
@@ -149,7 +154,9 @@ function generateIniContent(strings: IniString[], sort: boolean = true): string 
   ]
   
   // Output sections in order
-  for (const sectionName of sectionOrder) {
+  for (let sectionIndex = 0; sectionIndex < sectionOrder.length; sectionIndex++) {
+    throwIfAborted(context)
+    const sectionName = sectionOrder[sectionIndex]
     const sectionStrings = grouped.get(sectionName)
     if (!sectionStrings || sectionStrings.length === 0) continue
     
@@ -162,7 +169,9 @@ function generateIniContent(strings: IniString[], sort: boolean = true): string 
     lines.push(`; ${sectionName}`)
     lines.push("; ============================================")
     
-    for (const str of sectionStrings) {
+    for (let i = 0; i < sectionStrings.length; i++) {
+      if (i % 128 === 0) throwIfAborted(context)
+      const str = sectionStrings[i]
       if (str.comment) {
         lines.push(`; ${str.comment}`)
       }
@@ -175,7 +184,7 @@ function generateIniContent(strings: IniString[], sort: boolean = true): string 
   return lines.join("\n")
 }
 
-function validateIniContent(content: string): { valid: boolean; errors: ValidationError[]; warnings: ValidationWarning[] } {
+function validateIniContent(content: string, context: ToolContext): { valid: boolean; errors: ValidationError[]; warnings: ValidationWarning[] } {
   const errors: ValidationError[] = []
   const warnings: ValidationWarning[] = []
   const seenKeys = new Set<string>()
@@ -183,6 +192,7 @@ function validateIniContent(content: string): { valid: boolean; errors: Validati
   const lines = content.split("\n")
   
   for (let i = 0; i < lines.length; i++) {
+    if (i % 128 === 0) throwIfAborted(context)
     const lineNum = i + 1
     const line = lines[i]
     const trimmed = line.trim()
@@ -231,27 +241,31 @@ function validateIniContent(content: string): { valid: boolean; errors: Validati
   }
 }
 
-function compareIniFiles(sourceContent: string, targetContent: string): {
+function compareIniFiles(sourceContent: string, targetContent: string, context: ToolContext): {
   missing: string[]
   extra: string[]
   placeholderMismatch: Array<{ key: string; source: string; target: string; issue: string }>
 } {
-  const sourceData = parseIniFile(sourceContent)
-  const targetData = parseIniFile(targetContent)
+  const sourceData = parseIniFile(sourceContent, context)
+  const targetData = parseIniFile(targetContent, context)
   
   const missing: string[] = []
   const extra: string[] = []
   const placeholderMismatch: Array<{ key: string; source: string; target: string; issue: string }> = []
   
   // Find missing keys (in source but not in target)
+  let index = 0
   for (const key of sourceData.strings.keys()) {
+    if (index++ % 128 === 0) throwIfAborted(context)
     if (!targetData.strings.has(key)) {
       missing.push(key)
     }
   }
   
   // Find extra keys (in target but not in source)
+  index = 0
   for (const key of targetData.strings.keys()) {
+    if (index++ % 128 === 0) throwIfAborted(context)
     if (!sourceData.strings.has(key)) {
       extra.push(key)
     }
@@ -260,7 +274,9 @@ function compareIniFiles(sourceContent: string, targetContent: string): {
   // Check placeholder consistency
   const placeholderPattern = /%(?:\d+\$)?[sdfu]|%%|\{[^}]+\}/g
   
+  index = 0
   for (const [key, sourceValue] of sourceData.strings) {
+    if (index++ % 128 === 0) throwIfAborted(context)
     const targetValue = targetData.strings.get(key)
     if (!targetValue) continue
     
@@ -290,8 +306,9 @@ export default tool({
     targetFile: tool.schema.string().optional().describe("Target language file for diff comparison"),
     sort: tool.schema.boolean().default(true).describe("Sort keys alphabetically within sections")
   },
-  async execute(args) {
+  async execute(args, context: ToolContext) {
     const { action, filePath, sourceFile, targetFile, sort = true } = args
+    throwIfAborted(context)
 
     // Parse strings if provided
     let stringsArray: IniString[] = []
@@ -315,20 +332,20 @@ export default tool({
           }, null, 2)
         }
 
-        const content = generateIniContent(stringsArray, sort)
+        const content = generateIniContent(stringsArray, context, sort)
         
         // If filePath provided, write to file
         if (filePath) {
-          const dir = dirname(filePath)
-          if (!existsSync(dir)) {
-            mkdirSync(dir, { recursive: true })
-          }
-          writeFileSync(filePath, content, "utf-8")
+          const writableFilePath = await authorizeToolPath(context, filePath, "edit")
+          throwIfAborted(context)
+          mkdirSync(dirname(writableFilePath), { recursive: true })
+          throwIfAborted(context)
+          writeFileSync(writableFilePath, content, "utf-8")
           
           return JSON.stringify({
             success: true,
             action: "create",
-            filePath,
+            filePath: writableFilePath,
             stats: {
               totalKeys: stringsArray.length,
               sections: [...new Set(stringsArray.map(s => s.section || categorizeKey(s.key)))].length
@@ -362,15 +379,18 @@ export default tool({
           }, null, 2)
         }
 
+        const readableFilePath = await authorizeToolPath(context, filePath, "read")
+
         // Read existing file or start fresh
         let existingStrings: IniString[] = []
         const existingKeys = new Set<string>()
         
-        if (existsSync(filePath)) {
-          const content = readFileSync(filePath, "utf-8")
-          const parsed = parseIniFile(content)
+        if (existsSync(readableFilePath)) {
+          const content = readFileSync(readableFilePath, "utf-8")
+          const parsed = parseIniFile(content, context)
           
           for (const [key, value] of parsed.strings) {
+            throwIfAborted(context)
             existingStrings.push({ key, value })
             existingKeys.add(key)
           }
@@ -380,7 +400,9 @@ export default tool({
         let added = 0
         let skipped = 0
         
-        for (const str of stringsArray) {
+        for (let i = 0; i < stringsArray.length; i++) {
+          if (i % 128 === 0) throwIfAborted(context)
+          const str = stringsArray[i]
           if (existingKeys.has(str.key)) {
             skipped++
           } else {
@@ -391,20 +413,19 @@ export default tool({
         }
         
         // Generate new content
-        const newContent = generateIniContent(existingStrings, sort)
+        const newContent = generateIniContent(existingStrings, context, sort)
+        const writableFilePath = await authorizeToolPath(context, readableFilePath, "edit")
         
         // Ensure directory exists
-        const dir = dirname(filePath)
-        if (!existsSync(dir)) {
-          mkdirSync(dir, { recursive: true })
-        }
-        
-        writeFileSync(filePath, newContent, "utf-8")
+        throwIfAborted(context)
+        mkdirSync(dirname(writableFilePath), { recursive: true })
+        throwIfAborted(context)
+        writeFileSync(writableFilePath, newContent, "utf-8")
         
         return JSON.stringify({
           success: true,
           action: "add",
-          filePath,
+          filePath: writableFilePath,
           added,
           skipped,
           stats: {
@@ -421,21 +442,23 @@ export default tool({
           }, null, 2)
         }
         
-        if (!existsSync(filePath)) {
+        const readableFilePath = await authorizeToolPath(context, filePath, "read")
+
+        if (!existsSync(readableFilePath)) {
           return JSON.stringify({
             success: false,
-            error: `File not found: ${filePath}`
+            error: `File not found: ${readableFilePath}`
           }, null, 2)
         }
 
-        const content = readFileSync(filePath, "utf-8")
-        const result = validateIniContent(content)
-        const parsed = parseIniFile(content)
+        const content = readFileSync(readableFilePath, "utf-8")
+        const result = validateIniContent(content, context)
+        const parsed = parseIniFile(content, context)
         
         return JSON.stringify({
           success: true,
           action: "validate",
-          filePath,
+          filePath: readableFilePath,
           valid: result.valid,
           errors: result.errors,
           warnings: result.warnings,
@@ -455,32 +478,35 @@ export default tool({
           }, null, 2)
         }
         
-        if (!existsSync(sourceFile)) {
+        const readableSourceFile = await authorizeToolPath(context, sourceFile, "read")
+        const readableTargetFile = await authorizeToolPath(context, targetFile, "read")
+
+        if (!existsSync(readableSourceFile)) {
           return JSON.stringify({
             success: false,
-            error: `Source file not found: ${sourceFile}`
+            error: `Source file not found: ${readableSourceFile}`
           }, null, 2)
         }
         
-        if (!existsSync(targetFile)) {
+        if (!existsSync(readableTargetFile)) {
           return JSON.stringify({
             success: false,
-            error: `Target file not found: ${targetFile}`
+            error: `Target file not found: ${readableTargetFile}`
           }, null, 2)
         }
 
-        const sourceContent = readFileSync(sourceFile, "utf-8")
-        const targetContent = readFileSync(targetFile, "utf-8")
+        const sourceContent = readFileSync(readableSourceFile, "utf-8")
+        const targetContent = readFileSync(readableTargetFile, "utf-8")
         
-        const comparison = compareIniFiles(sourceContent, targetContent)
-        const sourceData = parseIniFile(sourceContent)
-        const targetData = parseIniFile(targetContent)
+        const comparison = compareIniFiles(sourceContent, targetContent, context)
+        const sourceData = parseIniFile(sourceContent, context)
+        const targetData = parseIniFile(targetContent, context)
         
         return JSON.stringify({
           success: true,
           action: "diff",
-          sourceFile,
-          targetFile,
+          sourceFile: readableSourceFile,
+          targetFile: readableTargetFile,
           missing: comparison.missing,
           extra: comparison.extra,
           placeholderMismatch: comparison.placeholderMismatch,

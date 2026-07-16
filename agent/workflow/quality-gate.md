@@ -2,22 +2,32 @@
 description: "Mandatory quality verification with auto-fix retry loop"
 model_tier: mid
 mode: subagent
+hidden: true
 temperature: 0.1
 steps: 20
 permission:
   external_directory:
-    "~/.config/opencode/**": allow
+    "*": ask
   edit: allow
-  write: allow
   read: allow
   grep: allow
   glob: allow
   bash:
-    "git commit*": deny
-    "git push*": deny
-    "*": allow
+    "*": ask
+    "git *": deny
+    "git status*": allow
+    "git diff*": allow
+    "git log*": allow
+    "git show*": allow
+    "git blame*": allow
+    "git branch": allow
+    "git branch --show-current*": allow
+    "rm -rf*": deny
+    "sudo*": deny
   task:
-    "*": allow
+    "*": deny
+    "wf-executor": allow
+    "wf-executor-lite": allow
 ---
 
 # Quality Gate Agent
@@ -70,7 +80,8 @@ while failures exist AND iteration <= MAX_ITERATIONS:
        - Verify fixes applied
 
     3. For REQUIRES_CODE_CHANGE issues:
-       - Spawn executor agent with specific fix instructions
+       - Call the native Task tool with `subagent_type` set to `wf-executor` or `wf-executor-lite`
+       - Record the returned Task ID; for another correction pass, resume that executor with the same `task_id`
 
     4. Re-run failed checks
     5. iteration++

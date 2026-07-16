@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "id": "e2e",
+  "description": "Explore, implement, and validate an end-to-end test workflow.",
+  "stages": [
+    {
+      "id": "setup",
+      "description": "Inspect the application and establish the E2E test scope.",
+      "agent_role": "planning",
+      "model_tier": "mid",
+      "prompt": "Inspect the application, test tooling, run instructions, credentials guidance, and requested user flow. Define a safe, focused E2E scope and required cleanup."
+    },
+    {
+      "id": "e2e_exploration",
+      "description": "Explore the live user flow and its boundaries.",
+      "depends_on": ["setup"],
+      "agent_role": "e2e_exploration",
+      "model_tier": "mid",
+      "prompt": "Exercise the requested live flow, one adjacent path, and one obvious failure path. Record observed behavior and blockers without inventing results."
+    },
+    {
+      "id": "e2e_generation",
+      "description": "Create or update focused end-to-end coverage.",
+      "depends_on": ["e2e_exploration"],
+      "agent_role": "e2e_generation",
+      "model_tier": "mid",
+      "prompt": "Create or update maintainable E2E coverage for the observed flow. Use stable selectors, avoid leaked credentials, and clean up generated test data."
+    },
+    {
+      "id": "e2e_validation",
+      "description": "Run and review the end-to-end coverage.",
+      "depends_on": ["e2e_generation"],
+      "agent_role": "e2e_validation",
+      "model_tier": "mid",
+      "prompt": "Run the focused E2E coverage and review it for false positives, brittle waits, missing assertions, console errors, unexpected responses, and cleanup failures."
+    },
+    {
+      "id": "quality_gate",
+      "description": "Verify the E2E evidence and repository quality.",
+      "depends_on": ["e2e_validation"],
+      "agent_role": "quality_gate",
+      "model_tier": "mid",
+      "prompt": "Verify the requested flow and failure path are covered by passing executable tests and that no test data or browser processes were left behind."
+    },
+    {
+      "id": "completion_guard",
+      "description": "Confirm the E2E task is complete.",
+      "depends_on": ["quality_gate"],
+      "agent_role": "completion_guard",
+      "model_tier": "mid",
+      "prompt": "Confirm the requested E2E outcome is supported by direct execution evidence and all required stages passed."
+    }
+  ]
+}

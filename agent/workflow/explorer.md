@@ -2,19 +2,29 @@
 description: "Fast codebase exploration and understanding"
 model_tier: low
 mode: subagent
+hidden: true
 temperature: 0.1
 steps: 15
 permission:
   external_directory:
-    "~/.config/opencode/**": allow
+    "*": deny
   read: allow
   grep: allow
   glob: allow
+  edit: deny
   bash:
-    "ls *": allow
-    "git commit*": deny
-    "git push*": deny
-    "*": allow
+    "*": deny
+    "git *": deny
+    "git status*": allow
+    "git diff*": allow
+    "git log*": allow
+    "git show*": allow
+    "git blame*": allow
+    "git branch": allow
+    "git branch --show-current*": allow
+    "rm -rf*": deny
+    "sudo*": deny
+  task: deny
 ---
 
 # Explorer Agent

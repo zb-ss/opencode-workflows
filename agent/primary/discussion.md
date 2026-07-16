@@ -5,8 +5,10 @@ mode: primary
 temperature: 0.7
 permission:
   external_directory:
-    "~/.config/opencode/**": allow
+    "*": deny
   read: allow
+  edit: deny
+  bash: deny
   webfetch: allow
   grep: allow
   glob: allow

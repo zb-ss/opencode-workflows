@@ -1,0 +1,133 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://opencode-workflows.example/schema/workflow-state.schema.json",
+  "title": "Automatic workflow state",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "workflow_id",
+    "definition_id",
+    "definition_path",
+    "root_session_id",
+    "directory",
+    "worktree",
+    "mode",
+    "task",
+    "status",
+    "pause_reason",
+    "created_at",
+    "updated_at",
+    "stages",
+    "budget"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "workflow_id": { "type": "string", "minLength": 1 },
+    "definition_id": { "type": "string", "minLength": 1 },
+    "definition_path": { "type": "string", "minLength": 1 },
+    "root_session_id": { "type": "string", "minLength": 1 },
+    "directory": { "type": "string", "minLength": 1 },
+    "worktree": { "type": "string", "minLength": 1 },
+    "mode": { "type": "string", "minLength": 1 },
+    "task": { "type": "string", "minLength": 1 },
+    "status": {
+      "type": "string",
+      "enum": ["running", "paused", "completed", "failed", "cancelled"]
+    },
+    "pause_reason": { "type": ["string", "null"] },
+    "created_at": { "type": "string", "format": "date-time" },
+    "updated_at": { "type": "string", "format": "date-time" },
+    "stages": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "status",
+          "attempt",
+          "session_id",
+          "agent",
+          "model",
+          "started_at",
+          "completed_at",
+          "result",
+          "error"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": ["pending", "running", "passed", "failed", "blocked"]
+          },
+          "attempt": { "type": "integer", "minimum": 0 },
+          "session_id": { "type": ["string", "null"] },
+          "agent": { "type": "string", "minLength": 1 },
+          "model": { "type": ["string", "null"] },
+          "started_at": { "type": ["string", "null"], "format": "date-time" },
+          "completed_at": { "type": ["string", "null"], "format": "date-time" },
+          "result": {
+            "anyOf": [
+              { "$ref": "stage-result.schema.json" },
+              { "type": "null" }
+            ]
+          },
+          "error": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["limits", "usage"],
+      "properties": {
+        "limits": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "max_sessions",
+            "max_parallel_sessions",
+            "max_attempts_per_stage",
+            "max_wall_time_ms",
+            "max_input_tokens",
+            "max_output_tokens",
+            "max_cost_usd"
+          ],
+          "properties": {
+            "max_sessions": { "type": "integer", "minimum": 1 },
+            "max_parallel_sessions": { "type": "integer", "minimum": 1 },
+            "max_attempts_per_stage": { "type": "integer", "minimum": 1 },
+            "max_wall_time_ms": { "type": "integer", "minimum": 1 },
+            "max_input_tokens": { "type": "integer", "minimum": 0 },
+            "max_output_tokens": { "type": "integer", "minimum": 0 },
+            "max_cost_usd": { "type": ["number", "null"], "minimum": 0 }
+          }
+        },
+        "usage": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["sessions", "attempts", "input_tokens", "output_tokens", "cost_usd", "messages"],
+          "properties": {
+            "sessions": { "type": "integer", "minimum": 0 },
+            "attempts": { "type": "integer", "minimum": 0 },
+            "input_tokens": { "type": "integer", "minimum": 0 },
+            "output_tokens": { "type": "integer", "minimum": 0 },
+            "cost_usd": { "type": "number", "minimum": 0 },
+            "messages": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["input_tokens", "output_tokens", "cost_usd"],
+                "properties": {
+                  "input_tokens": { "type": "integer", "minimum": 0 },
+                  "output_tokens": { "type": "integer", "minimum": 0 },
+                  "cost_usd": { "type": "number", "minimum": 0 }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

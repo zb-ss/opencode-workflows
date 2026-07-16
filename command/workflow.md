@@ -1,7 +1,8 @@
 ---
-description: Start workflow: /workflow <type> <description>
+description: "Start workflow: /workflow <type> <description>"
 agent: supervisor
 model_tier: mid
+subtask: false
 ---
 
 Start a new automated workflow with configurable execution modes.
@@ -79,11 +80,11 @@ Parse `$ARGUMENTS` using these rules in order:
 
 ### Step 3: Resolve Config Directory
 
-**CRITICAL**: First, run `echo $HOME` to get the absolute home path. Then use it to build the config directory path:
-```
-<HOME>/.config/opencode
-```
-For example: `/home/zashboy/.config/opencode`
+Resolve one absolute `<CONFIG_DIR>` using the first non-empty value in this order:
+
+1. `OPENCODE_CONFIG_DIR`
+2. `$XDG_CONFIG_HOME/opencode`
+3. `$HOME/.config/opencode`
 
 **NEVER use relative paths.** Always use the absolute path for all file reads below.
 
@@ -92,7 +93,7 @@ For example: `/home/zashboy/.config/opencode`
 Read the mode config JSON file. Use the absolute path:
 ```bash
 # If mode is "swarm":
-cat <HOME>/.config/opencode/mode/swarm.json
+cat <CONFIG_DIR>/mode/swarm.json
 ```
 
 Available mode files: `eco.json`, `turbo.json`, `standard.json`, `thorough.json`, `swarm.json`
@@ -105,7 +106,7 @@ The JSON contains:
 
 Read the workflow config:
 ```
-<HOME>/.config/opencode/workflows.json
+<CONFIG_DIR>/workflows.json
 ```
 This contains `model_tiers` and `default_mode`.
 
@@ -120,18 +121,18 @@ Read the workflow template using its absolute path:
 
 | Type | Template Path |
 |------|---------------|
-| `feature` | `<HOME>/.config/opencode/templates/feature-development.org` |
-| `bugfix` | `<HOME>/.config/opencode/templates/bug-fix.org` |
-| `refactor` | `<HOME>/.config/opencode/templates/refactor.org` |
-| `figma` | `<HOME>/.config/opencode/templates/figma-to-code.org` |
+| `feature` | `<CONFIG_DIR>/templates/feature-development.org` |
+| `bugfix` | `<CONFIG_DIR>/templates/bug-fix.org` |
+| `refactor` | `<CONFIG_DIR>/templates/refactor.org` |
+| `figma` | `<CONFIG_DIR>/templates/figma-to-code.org` |
 | `translate` | See Translation section below |
 
-Create the workflow `.org` file in: `<HOME>/.config/opencode/workflows/active/`
+Create the workflow `.org` file in: `<CONFIG_DIR>/workflows/active/`
 Then call `workflow_bind_session` with **named JSON parameters** — this automatically creates the `.state.json` tracking sidecar:
 ```json
 {
   "sessionId": "<session-id>",
-  "workflowPath": "<HOME>/.config/opencode/workflows/active/YYYY-MM-DD-slug.org",
+  "workflowPath": "<CONFIG_DIR>/workflows/active/YYYY-MM-DD-slug.org",
   "workflowId": "wf-YYYY-MM-DD-NNN",
   "workflowType": "<type>",
   "mode": "<mode>",
@@ -143,8 +144,16 @@ The `phases` array should match the keys from the mode config's `agent_routing` 
 ### Step 8: Execute
 
 Follow the supervisor agent instructions for workflow execution.
-Invoke agents using `@agent-name` syntax (e.g., `@wf-executor`, `@wf-reviewer`).
-Use the agents from the mode config's `agent_routing` (Step 4), prefixed with `@wf-`.
+Invoke each internal agent with the native Task tool. For a new gate, make an explicit call in this shape:
+```json
+{
+  "description": "Implement the current workflow gate",
+  "prompt": "<complete gate instructions and workflow context>",
+  "subagent_type": "wf-executor"
+}
+```
+Use the role from the mode config's `agent_routing` (Step 4), prefixed with `wf-`, as `subagent_type`. Do not invoke internal agents with `@wf-*` mentions.
+The Task result contains `<task id="...">`. Record that ID immediately in the state file under the current gate and reuse it as `task_id` for continuations or corrections to that same agent.
 Update the workflow state file after every action.
 
 ## Translation Workflow
@@ -158,6 +167,6 @@ For `translate` workflows, processing is **view-by-view** to prevent context ove
 
 Arguments after type: `<component-path> <target-lang> [source-lang]`
 - Source language defaults to `en-GB`
-- Uses specialized agents: `@translation-planner`, `@translation-coder`, `@translation-reviewer`
+- Invoke specialized agents through the native Task tool with `subagent_type` set to `translation-planner`, `translation-coder`, or `translation-reviewer`; record every returned task ID
 
 Do NOT attempt to process all views in a single session.

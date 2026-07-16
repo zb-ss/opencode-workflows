@@ -31,6 +31,8 @@ export interface WorkflowMode {
 }
 
 export interface WorkflowState {
+  schema_version?: number;
+  revision?: number;
   workflow_id: string;
   workflow_type: string;
   phase: WorkflowPhase;
@@ -38,10 +40,52 @@ export interface WorkflowState {
   agent_log: AgentLogEntry[];
   mode: WorkflowMode;
   updated_at: string;
+  created_at?: string;
+  status?: 'pending' | 'running' | 'paused' | 'completed' | 'failed' | 'cancelled';
+  driver?: 'manual' | 'automatic' | 'external_cli';
+  owner?: {
+    root_session_id: string;
+    current_session_id: string;
+    project_id?: string;
+    directory?: string;
+  };
+  task_ids?: Record<string, string>;
+  stages?: Record<string, WorkflowStageState>;
+  budget?: WorkflowBudgetState | null;
   org_file?: string;
   workflow?: {
     type?: string;
     description?: string;
+  };
+}
+
+export interface WorkflowStageState {
+  status: 'pending' | 'queued' | 'running' | 'passed' | 'failed' | 'blocked' | 'skipped';
+  attempt: number;
+  task_id: string | null;
+  session_id: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  result: unknown | null;
+  error: string | null;
+}
+
+export interface WorkflowBudgetState {
+  limits: {
+    max_sessions: number;
+    max_parallel_sessions: number;
+    max_attempts_per_stage: number;
+    max_wall_time_ms: number;
+    max_input_tokens: number;
+    max_output_tokens: number;
+    max_cost_usd: number | null;
+  };
+  usage: {
+    sessions: number;
+    input_tokens: number;
+    output_tokens: number;
+    cost_usd: number;
+    started_at: string;
   };
 }
 
@@ -50,6 +94,7 @@ export interface SessionBinding {
   workflow_path: string;
   workflow_id: string | null;
   bound_at: string;
+  project_directory?: string;
 }
 
 export interface SessionMarker {
@@ -197,6 +242,7 @@ export interface SwarmBatch {
 // Delegation Orchestration Types
 // ---------------------------------------------------------------------------
 
+// The `gemini` routing token executes Gemini models through Antigravity CLI (`agy`).
 export type DelegationProvider = 'claude' | 'gemini'
 export type DelegationTaskTag = 'code' | 'ui'
 export type DelegationTaskStatus = 'pending' | 'executing' | 'reviewing' | 'passed' | 'failed' | 'merged'
@@ -206,6 +252,7 @@ export interface DelegationTask {
   description: string
   tag: DelegationTaskTag
   provider: DelegationProvider
+  model: string | null
   prompt: string
   files: string[]
   worktree_name: string | null
@@ -246,7 +293,6 @@ export interface DelegationRoutingConfig {
 }
 
 export interface DelegationProviderConfig {
-  model?: string
   timeout_ms?: number
   permission_mode?: string
 }
@@ -259,6 +305,7 @@ export interface DelegationOrchestratorConfig {
   fallback_order: DelegationProvider[]
   max_review_iterations: number
   auto_init_files: boolean
+  max_output_bytes: number
 }
 
 export const DELEGATE_PHASE_ORDER: string[] = [

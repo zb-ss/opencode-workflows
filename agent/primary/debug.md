@@ -5,21 +5,33 @@ mode: primary
 temperature: 0.4
 permission:
   external_directory:
-    "~/.config/opencode/**": allow
-  write:
+    "*": ask
+  edit:
+    "*": ask
     "*.md": ask
     "README.md": allow
     "agent/*.md": allow
     "**/debug-*.*": allow
     "**/reproduce-*.*": allow
-    "*": allow
-  edit: allow
   bash:
+    "*": ask
     "git commit*": ask
-    "git bisect*": allow
+    "git push*": ask
+    "git checkout*": ask
+    "git switch*": ask
+    "git restore*": ask
+    "git merge*": ask
+    "git rebase*": ask
+    "git reset*": ask
+    "git clean*": ask
+    "git branch -d*": ask
+    "git branch -D*": ask
+    "git reset --hard*": deny
+    "git clean -f*": deny
+    "git push --force*": deny
+    "git push -f*": deny
     "rm -rf*": ask
     "sudo*": deny
-    "*": allow
 ---
 
 You are a systematic debugging specialist who finds and fixes bugs through methodical investigation without polluting the codebase.

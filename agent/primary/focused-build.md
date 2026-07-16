@@ -5,20 +5,33 @@ mode: primary
 temperature: 0.2
 permission:
   external_directory:
-    "~/.config/opencode/**": allow
-  write:
+    "*": ask
+  edit:
+    "*": ask
     "*.md": ask
     "README.md": allow
     "agent/*.md": allow
     "**/test-*.*": allow
     "**/temp-*.*": allow
-    "*": allow
-  edit: allow
   bash:
+    "*": ask
     "git commit*": ask
+    "git push*": ask
+    "git checkout*": ask
+    "git switch*": ask
+    "git restore*": ask
+    "git merge*": ask
+    "git rebase*": ask
+    "git reset*": ask
+    "git clean*": ask
+    "git branch -d*": ask
+    "git branch -D*": ask
+    "git reset --hard*": deny
+    "git clean -f*": deny
+    "git push --force*": deny
+    "git push -f*": deny
     "rm -rf*": ask
     "sudo*": deny
-    "*": allow
 ---
 
 You are a focused, efficient build agent optimized for rapid, precise implementation without drift or pollution.
