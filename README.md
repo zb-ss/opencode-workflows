@@ -52,6 +52,19 @@ Restart OpenCode after installation, migration, uninstallation, plugin changes, 
 
 After restarting, `/workflow feature <task>` starts the normal gate-driven workflow and `/workflow-status` reports its state. External CLI delegation is optional; run `/delegate status --auth` before relying on it.
 
+## Install With An AI Agent
+
+Paste this prompt into a coding agent that can read web pages and run terminal commands:
+
+```text
+Install and configure OpenCode Workflows for me. Follow the setup guide at:
+https://raw.githubusercontent.com/zb-ss/opencode-workflows/master/docs/ai-agent-setup.md
+
+Use the recommended safe defaults unless I say otherwise. Explain the choices, ask for confirmation before changing files, and verify the installation when finished.
+```
+
+The [AI Agent Setup Guide](./docs/ai-agent-setup.md) leads the agent through prerequisite checks, installation choices, a dry run, installation or migration, `--doctor`, restart guidance, and a first workflow. It defaults to core modules in copy mode, leaves automatic workflows and guarded publication disabled, and does not authenticate provider CLIs or invoke external delegation. Review the linked guide before sharing it when your agent can execute commands without confirmation.
+
 ## Upgrade An Existing Installation
 
 From the existing repository checkout, preview and apply configuration migration before reinstalling managed files:
@@ -210,6 +223,7 @@ Review permission requests before allowing them. The supplied `opencode.jsonc.te
 ## Documentation
 
 - [Workflow System](./WORKFLOWS.md)
+- [AI Agent Setup Guide](./docs/ai-agent-setup.md)
 - [Autonomous Workflows](./docs/autonomous-workflows.md)
 - [Validation And Fixed-Point Review](./docs/validation-and-fixed-point-review.md)
 - [Guarded Publication](./docs/guarded-publication.md)
