@@ -32,7 +32,12 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: npm
       - run: npm ci
-      - run: npm run verify
+      - name: Install trusted Node test fixture
+        run: sudo install -o root -g root -m 0755 "$(command -v node)" /usr/local/bin/opencode-workflows-test-node
+      - name: Verify
+        run: npm run verify
+        env:
+          OPENCODE_WORKFLOWS_TEST_NODE: /usr/local/bin/opencode-workflows-test-node
 
   audit:
     name: Production dependency audit
