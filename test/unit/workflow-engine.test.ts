@@ -114,6 +114,14 @@ function limits(overrides: Partial<AutomationLimits> = {}): AutomationLimits {
   }
 }
 
+async function waitFor(check: () => boolean, message: string): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (check()) return
+    await new Promise<void>((resolve) => setTimeout(resolve, 5))
+  }
+  assert.fail(message)
+}
+
 function definition(
   stages: Array<{ id: string; depends_on?: string[]; required?: boolean; role?: string }>,
 ): WorkflowDefinition {
@@ -460,7 +468,10 @@ describe('WorkflowEngine scheduling and events', () => {
       state: loadAutomaticWorkflowState(original.statePath),
       schedulingEnabled: false,
     })
-    await new Promise((resolve) => setTimeout(resolve, 20))
+    await waitFor(
+      () => /wall-time budget exhausted/i.test(restored.engine.snapshot().pause_reason ?? ''),
+      'restored wall-time enforcement did not settle',
+    )
 
     const expired = restored.engine.snapshot()
     assert.equal(expired.status, 'paused')

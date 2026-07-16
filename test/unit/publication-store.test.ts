@@ -472,6 +472,7 @@ describe('PublicationStore artifacts and private layout', () => {
         startAt,
         Buffer.from(JSON.stringify(candidate)).toString('base64url'),
         '1',
+        String(NOW.getTime()),
       ])))
       assert.equal(results.filter((result) => result.ok).length, 1)
       assert.equal(results.filter((result) => !result.ok).every((result) => /maximum/.test(result.error ?? '')), true)
@@ -714,6 +715,7 @@ describe('PublicationStore claims and events', () => {
         startAt,
         created.artifact.artifact_id,
         created.artifact_sha256,
+        String(NOW.getTime()),
       ])))
       assert.equal(results.every((result) => result.ok), true, JSON.stringify(results))
       assert.equal(results.filter((result) => result.result?.created).length, 1)

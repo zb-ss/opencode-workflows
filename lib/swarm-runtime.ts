@@ -404,7 +404,6 @@ export class SwarmRuntime {
         const control = this.control(taskKey(key, task.id))
         const observed = await new Promise<boolean>((resolve) => {
           const timer = setTimeout(() => resolve(false), positiveInteger(confirmationTimeoutMs, DEFAULT_AWAIT_TIMEOUT_MS))
-          timer.unref?.()
           control.promise.then(() => {
             clearTimeout(timer)
             resolve(true)

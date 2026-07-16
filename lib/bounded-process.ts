@@ -70,7 +70,6 @@ export class BoundedProcessRunner<Reason extends string> {
       () => this.completeUncertainTermination(),
       this.options.termination_grace_ms,
     )
-    this.terminationWatchdog.unref?.()
   }
 
   async run(signal: AbortSignal): Promise<BoundedProcessResult<Reason>> {
@@ -83,7 +82,6 @@ export class BoundedProcessRunner<Reason extends string> {
       () => this.terminate(this.options.timeout_reason),
       this.options.timeout_ms,
     )
-    timer.unref?.()
     try {
       const completion = await this.completion
       return Object.freeze({

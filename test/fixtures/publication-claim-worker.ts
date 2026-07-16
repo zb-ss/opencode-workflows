@@ -33,12 +33,14 @@ function requiredArgument(value: string | undefined, label: string): string {
 }
 
 async function main(): Promise<unknown> {
-  const [mode, configDirectory, rootSessionId, startAtText, first, second] = process.argv.slice(2)
+  const [mode, configDirectory, rootSessionId, startAtText, first, second, nowText] = process.argv.slice(2)
   const env = { ...process.env, OPENCODE_CONFIG_DIR: requiredArgument(configDirectory, 'config directory') }
+  const currentTime = Number(requiredArgument(nowText, 'current timestamp'))
+  if (!Number.isSafeInteger(currentTime)) throw new Error('invalid current timestamp')
   const store = new PublicationStore(
     requiredArgument(rootSessionId, 'root session ID'),
     env,
-    () => new Date(),
+    () => new Date(currentTime),
     STORE_OPTIONS,
   )
   const startAt = Number(requiredArgument(startAtText, 'start timestamp'))

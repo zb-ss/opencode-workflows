@@ -272,12 +272,13 @@ describe('publication Git snapshot integration', { concurrency: false, skip: !HA
   it('bounds a Git command that does not complete', async () => {
     const repository = createRepository()
     const child = fakeGitChild()
-    setTimeout(() => child.emit('close', null, 'SIGKILL'), 30)
-
-    await rejectsWithCode(buildPublicationGitSnapshot(input(repository.root, {
+    const pending = buildPublicationGitSnapshot(input(repository.root, {
       command_timeout_ms: 20,
       spawnProcess: (() => child) as unknown as typeof spawn,
-    })), 'command_timeout')
+    }))
+    setTimeout(() => child.emit('close', null, 'SIGKILL'), 30)
+
+    await rejectsWithCode(pending, 'command_timeout')
   })
 
   it('requires an operator-owned Git executable and normalizes synchronous spawn failures', async () => {
