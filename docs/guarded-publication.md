@@ -45,6 +45,50 @@ Each target defines:
 
 The publisher is an operator-controlled security boundary. `argv[0]` must resolve to a root-owned native ELF or Mach-O executable outside the worktree that is not group/world-writable. Scripts and shebang interpreters are rejected because pinning a script descriptor does not pin the interpreter selected by the kernel. The executable is opened, identity-checked, inherited, and invoked through its pinned descriptor rather than its pathname. Environment values are inherited only for configured names and are never written into artifacts, returned requests, or audit events. Loader and interpreter control variables are prohibited. The inherited `PATH` contains only canonical directories whose complete path is root-owned and not group/world-writable. Restart OpenCode after changing publication configuration or installed commands/plugins.
 
+## Publisher Adapter Contract
+
+The adapter receives exactly one argument after its executable: the inherited fd3 request path. It must read that path to EOF without reopening a mutable configured pathname. The bytes are canonical UTF-8 JSON with this exact shape:
+
+```json
+{
+  "protocol": "opencode-workflows-publication-request-v1",
+  "idempotency_key": "<artifact-sha256>",
+  "artifact_id": "<artifact-uuid>",
+  "artifact_sha256": "<artifact-sha256>",
+  "workflow_id": "<workflow-id>",
+  "worktree": "/absolute/canonical/worktree",
+  "source": {
+    "git_executable_identity_sha256": "<sha256>",
+    "repository_identity_sha256": "<sha256>",
+    "git_common_dir_sha256": "<sha256>",
+    "object_format": "sha1",
+    "base_ref": "refs/heads/base",
+    "base_oid": "<git-object-id>",
+    "head_ref": "refs/heads/review",
+    "head_oid": "<git-object-id>",
+    "tree_oid": "<git-object-id>",
+    "remote": "upstream",
+    "remote_url": "https://example.invalid/organization/repository.git"
+  },
+  "target": {
+    "id": "example-target",
+    "protection": "approval_required",
+    "destination_ref": "refs/heads/destination"
+  },
+  "publisher": {
+    "argv_sha256": "<sha256>",
+    "environment_sha256": "<sha256>",
+    "executable_identity_sha256": "<sha256>",
+    "working_directory_identity_sha256": "<sha256>",
+    "descriptor_sha256": "<sha256>"
+  }
+}
+```
+
+`object_format` is either `sha1` or `sha256`, and every object ID uses that repository's format. The adapter must validate the protocol and required identities, use `idempotency_key` for target-side duplicate suppression, enforce target protections that are at least as strict as the request, perform the external operation, and reconcile the resulting destination state. It then computes SHA-256 over the exact request bytes and writes exactly `opencode-workflows-publication-ack-v1 <request-sha256>\n` to fd5. It must write no other fd5 bytes. Exit `0` without that exact acknowledgment is ambiguous, not successful.
+
+Because scripts are rejected, build the adapter as a native executable using a memory-safe compiled language appropriate for the target API. Keep credentials in the adapter's operator-managed environment or credential store; never add credential values to `workflows.json`, argv, output, or the acknowledgment.
+
 ## Preview Gates
 
 The preview artifact records explicit gates:
