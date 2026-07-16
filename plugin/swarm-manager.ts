@@ -1,4 +1,5 @@
-import type { Plugin, ToolContext } from '@opencode-ai/plugin'
+import { tool, type Plugin, type ToolContext } from '@opencode-ai/plugin'
+import { createOpencodeClient as createOpencodeClientV2 } from '@opencode-ai/sdk/v2/client'
 import path from 'node:path'
 
 import { log } from '../lib/logger.ts'
@@ -80,8 +81,6 @@ function validationTasks(summary: string, changedFiles: string): SwarmTask[] {
 }
 
 export const SwarmManager: Plugin = async ({ client, directory, serverUrl }) => {
-  const { tool } = await import('@opencode-ai/plugin')
-  const { createOpencodeClient: createOpencodeClientV2 } = await import('@opencode-ai/sdk/v2/client')
   const workflowConfig = loadWorkflowConfig()
   const swarmConfig = workflowConfig.swarm_config
   const autonomyClient = serverUrl

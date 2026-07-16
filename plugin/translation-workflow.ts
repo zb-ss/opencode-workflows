@@ -5,7 +5,7 @@
  * atomic state below the OpenCode configuration directory.
  */
 
-import type { Plugin, ToolContext } from "@opencode-ai/plugin"
+import { tool, type Plugin, type ToolContext } from "@opencode-ai/plugin"
 import { createHash, randomUUID } from "node:crypto"
 import {
   chmodSync,
@@ -488,8 +488,6 @@ function viewCounts(state: TranslationWorkflowState, context: ToolContext): Reco
 }
 
 export const TranslationWorkflowPlugin: Plugin = async () => {
-  const { tool } = await import("@opencode-ai/plugin")
-
   return {
     tool: {
     workflow_translate_init: tool({

@@ -1,4 +1,5 @@
-import type { Plugin, ToolContext } from '@opencode-ai/plugin'
+import { tool, type Plugin, type ToolContext } from '@opencode-ai/plugin'
+import { createOpencodeClient as createOpencodeClientV2 } from '@opencode-ai/sdk/v2/client'
 import fs from 'node:fs'
 import path from 'node:path'
 
@@ -174,10 +175,6 @@ function stateSummary(state: AutomaticWorkflowState) {
 }
 
 export const AutoWorkflow: Plugin = async ({ client, directory, serverUrl }) => {
-  const [{ tool }, { createOpencodeClient: createOpencodeClientV2 }] = await Promise.all([
-    import('@opencode-ai/plugin'),
-    import('@opencode-ai/sdk/v2/client'),
-  ])
   const engines = new Map<string, WorkflowEngine>()
   const pluginDirectory = path.resolve(directory)
   const autonomyClient = createOpencodeClientV2({ baseUrl: serverUrl.toString(), directory: pluginDirectory })

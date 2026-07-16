@@ -5,7 +5,7 @@
  * processes, re-delegation, merging, and cleanup.
  */
 
-import type { Plugin, ToolContext } from '@opencode-ai/plugin'
+import { tool as pluginTool, type Plugin, type ToolContext } from '@opencode-ai/plugin'
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
@@ -805,7 +805,6 @@ function normalizeTaskInputs(tasks: DelegationTaskInput[]): DelegationTaskInput[
 }
 
 export const DelegationOrchestrator: Plugin = async ({ client }) => {
-  const { tool: pluginTool } = await import('@opencode-ai/plugin')
   const z = pluginTool.schema
   const config = loadDelegationConfig()
   const processQueue = new FifoProcessQueue<QueuedExecution>(config.max_parallel)
