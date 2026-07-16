@@ -22,9 +22,117 @@
 
   "default_mode": "standard",
 
-  "_comment_automation": "Automatic workflow driving is opt-in. Limits are optional and should be configured before enabling automation.",
+  "_comment_automation": "Automatic workflow driving is opt-in. Autonomy configures automatic-stage permission handling only and does not enable automation. Limits are optional and should be configured before enabling automation.",
+  "_example_automation": {
+    "enabled": true,
+    "autonomy": "bounded",
+    "max_parallel_sessions": 2,
+    "max_sessions": 12,
+    "max_attempts_per_stage": 3,
+    "max_wall_time_ms": 3600000,
+    "max_input_tokens": 200000,
+    "max_output_tokens": 100000,
+    "max_bounded_read_bytes": 16777216,
+    "max_bounded_write_bytes": 16777216,
+    "max_cost_usd": null
+  },
   "automation": {
-    "enabled": false
+    "enabled": false,
+    "autonomy": "interactive"
+  },
+
+  "_comment_validation_broker": "Optional named validation operations for attended interactive automatic stages. Bounded autonomy rejects executable validation because it is not OS-sandboxed. argv[0] is an operator-configured absolute executable path; commands are fixed argv arrays, never shell text. Configure explicit limits before enabling.",
+  "_example_validation_operation": {
+    "argv": ["/absolute/path/to/package-manager", "run", "check"],
+    "working_directory": ".",
+    "permission_pattern": "package-manager run check",
+    "environment": [],
+    "timeout_ms": 300000,
+    "max_output_bytes": 1048576,
+    "success_exit_codes": [0]
+  },
+  "validation_broker": {
+    "enabled": false,
+    "max_runs_per_workflow": 10,
+    "operations": {}
+  },
+
+  "_comment_review_loop": "Optional structured swarm review and correction loop. Reviewer selection is driven by always plus risk_tags; all limits and agents are operator-configured.",
+  "_example_review_loop": {
+    "enabled": true,
+    "max_iterations": 3,
+    "batch_timeout_ms": 300000,
+    "max_result_bytes": 1048576,
+    "correction_agent": "wf-executor",
+    "correction_focus": "Propose complete scoped file replacements for every reported issue, and report blockers without claiming success.",
+    "reviewers": [
+      {
+        "id": "functional",
+        "agent": "wf-reviewer-deep",
+        "always": true,
+        "risk_tags": [],
+        "focus": "Review functional correctness and requirement completeness."
+      },
+      {
+        "id": "security",
+        "agent": "wf-security-deep",
+        "always": false,
+        "risk_tags": ["security"],
+        "focus": "Review authorization, injection, data exposure, and unsafe execution risks."
+      }
+    ]
+  },
+  "review_loop": {
+    "enabled": false,
+    "reviewers": []
+  },
+
+  "_comment_publication": "Guarded publication is disabled by default. Before enabling it, choose all scan, artifact, and Git command limits, internal markers, and at least one complete target. Git and publisher executables must be root-owned native binaries and not group/world-writable; scripts and shebang interpreters are rejected. Source refs must be refs/heads/...; publisher argv must be exactly [absolute executable, {request_file}], success_exit_codes must be [0], and the adapter must return the documented request-bound acknowledgment on fd5.",
+  "_example_publication": {
+    "enabled": false,
+    "artifact_ttl_ms": 900000,
+    "git_timeout_ms": 300000,
+    "max_artifacts_per_workflow": 10,
+    "max_commits": 1000,
+    "max_objects": 10000,
+    "max_blob_bytes": 10485760,
+    "max_total_scan_bytes": 104857600,
+    "max_findings": 100,
+    "record_settle_attempts": 200,
+    "record_settle_delay_ms": 5,
+    "record_settle_timeout_ms": 1000,
+    "internal_markers": [
+      {
+        "id": "internal-example",
+        "literal": "internal-example",
+        "case_sensitive": false
+      }
+    ],
+    "targets": {
+      "example-target": {
+        "display_name": "Example destination",
+        "git_executable": "/absolute/path/to/git",
+        "base_ref": "refs/heads/base",
+        "head_ref": "refs/heads/review",
+        "remote": "upstream",
+        "expected_remote_url": "https://example.invalid/organization/repository.git",
+        "destination_ref": "refs/heads/destination",
+        "protection": "approval_required",
+        "publisher": {
+          "argv": ["/absolute/path/to/publisher", "{request_file}"],
+          "working_directory": ".",
+          "environment": [],
+          "timeout_ms": 300000,
+          "max_output_bytes": 1048576,
+          "success_exit_codes": [0]
+        }
+      }
+    }
+  },
+  "publication": {
+    "enabled": false,
+    "internal_markers": [],
+    "targets": {}
   },
 
   "_comment_capabilities": "Capability values are disabled, auto, or required. Auto uses a capability when runtime support is detected. Required also stops automatic workflow start or resume when support is unavailable. These settings are never copied as unknown opencode.json keys.",

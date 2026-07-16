@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
+import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, it } from 'node:test'
@@ -30,12 +31,19 @@ function fakeSdk(): FakeSdk {
   const calls: SdkCall[] = []
   const sessionIds: string[] = []
   const messages = new Map<string, any[]>()
+  const aborted = new Set<string>()
   const sdk: FakeSdk = {
     calls,
     sessionIds,
     messages,
     statusCalls: 0,
     client: {
+      file: {
+        status: async (input: any) => {
+          calls.push({ name: 'file.status', input })
+          return { data: [{ path: 'src/example.ts', added: 1, removed: 0, status: 'modified' }] }
+        },
+      },
       session: {
         create: async (input: any) => {
           calls.push({ name: 'create', input })
@@ -49,12 +57,15 @@ function fakeSdk(): FakeSdk {
         },
         abort: async (input: any) => {
           calls.push({ name: 'abort', input })
+          aborted.add(input.path.id)
           return { data: true }
         },
         status: async (input: any) => {
           calls.push({ name: 'status', input })
           sdk.statusCalls++
-          return { data: Object.fromEntries(sessionIds.map((id) => [id, { type: 'busy' }])) }
+          return { data: Object.fromEntries(sessionIds
+            .filter((id) => !aborted.has(id))
+            .map((id) => [id, { type: 'busy' }])) }
         },
         messages: async (input: any) => {
           calls.push({ name: 'messages', input })
@@ -205,6 +216,55 @@ describe('SwarmRuntime', () => {
     assert.deepEqual(abort.query, { directory: '/project' })
   })
 
+  it('does not declare cancellation terminal until session termination is observed', async () => {
+    const sdk = fakeSdk()
+    sdk.client.session.status = async () => ({ data: { 'session-1': { type: 'busy' } } })
+    const runtime = createRuntime(sdk)
+    spawn(runtime, 'stubborn-cancel', [task('stubborn')])
+    await waitFor(() => sdk.calls.some((call) => call.name === 'promptAsync'), 'task was not prompted')
+
+    const cancelled = await runtime.cancelTask('caller-session', 'stubborn-cancel', 'stubborn', 10)
+
+    assert.equal(cancelled.cancelled, false)
+    assert.equal(cancelled.terminal, false)
+    assert.match(cancelled.error ?? '', /termination was not observed/)
+    await idle(runtime, 'session-1')
+  })
+
+  it('uses the v2 client for tasks with explicit session permissions', async () => {
+    const sdk = fakeSdk()
+    const configDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'swarm-runtime-restricted-'))
+    temporaryDirectories.push(configDirectory)
+    let createInput: any
+    const runtime = new SwarmRuntime(sdk.client, {}, {
+      autonomyClient: {
+        session: {
+          create: async (input: any) => {
+            createInput = input
+            sdk.sessionIds.push('restricted-session')
+            return { data: { id: 'restricted-session' } }
+          },
+        },
+      } as any,
+      env: runtimeEnvironment(configDirectory),
+      restore: false,
+      scopeDirectory: '/project',
+    })
+    runtimes.push(runtime)
+    const permission = [
+      { permission: '*', pattern: '*', action: 'deny' as const },
+      { permission: 'read', pattern: '*', action: 'allow' as const },
+    ]
+
+    spawn(runtime, 'restricted', [{ ...task('correction'), permission }])
+    await waitFor(() => sdk.calls.some((call) => call.name === 'promptAsync'), 'restricted task was not prompted')
+
+    assert.equal(sdk.calls.some((call) => call.name === 'create'), false)
+    assert.deepEqual(createInput.permission, permission)
+    assert.equal(createInput.agent, 'test-agent')
+    assert.equal(createInput.parentID, 'caller-session')
+  })
+
   it('cancels queued work without later creating its session', async () => {
     const sdk = fakeSdk()
     const runtime = createRuntime(sdk, { default_concurrency: 1 })
@@ -237,6 +297,21 @@ describe('SwarmRuntime', () => {
     assert.equal(sdk.statusCalls, 1, 'await polled status after its one-time reconciliation')
     await idle(runtime, 'session-2')
     assert.equal((await completion).completed, true)
+  })
+
+  it('honors caller cancellation while initial status reconciliation is pending', async () => {
+    const sdk = fakeSdk()
+    sdk.client.session.status = async () => new Promise(() => {})
+    const runtime = createRuntime(sdk)
+    spawn(runtime, 'reconcile-abort', [task('active')])
+    await waitFor(() => sdk.calls.some((call) => call.name === 'promptAsync'), 'task was not prompted')
+    const controller = new AbortController()
+    const reason = new Error('deadline reached')
+    const pending = runtime.awaitBatch('caller-session', 'reconcile-abort', 1000, controller.signal)
+    setTimeout(() => controller.abort(reason), 10)
+
+    await assert.rejects(pending, /deadline reached/)
+    assert.equal(reason.name, 'Error')
   })
 
   it('restores running and queued work from the caller session runtime', async () => {
@@ -364,6 +439,83 @@ describe('SwarmRuntime', () => {
       assert.equal(requests[0].metadata.subagent_type, 'test-agent')
       await hooks.dispose?.()
     } finally {
+      if (previousConfigDirectory === undefined) delete process.env.OPENCODE_CONFIG_DIR
+      else process.env.OPENCODE_CONFIG_DIR = previousConfigDirectory
+    }
+  })
+
+  it('runs the configured fixed-point review tool through the swarm runtime', async () => {
+    const sdk = fakeSdk()
+    const configDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'swarm-fixed-review-plugin-'))
+    temporaryDirectories.push(configDirectory)
+    const projectDirectory = path.join(configDirectory, 'project')
+    fs.mkdirSync(path.join(projectDirectory, 'src'), { recursive: true })
+    fs.writeFileSync(path.join(projectDirectory, 'src', 'example.ts'), 'export const value = true\n')
+    const previousConfigDirectory = process.env.OPENCODE_CONFIG_DIR
+    process.env.OPENCODE_CONFIG_DIR = configDirectory
+    fs.writeFileSync(path.join(configDirectory, 'workflows.json'), JSON.stringify({
+      review_loop: {
+        enabled: true,
+        max_iterations: 2,
+        batch_timeout_ms: 1000,
+        max_result_bytes: 10_000,
+        correction_agent: 'wf-executor',
+        correction_focus: 'Correct every issue.',
+        reviewers: [{
+          id: 'functional',
+          agent: 'wf-reviewer-deep',
+          always: true,
+          risk_tags: [],
+          focus: 'Review functional correctness.',
+        }],
+      },
+    }))
+    const server = http.createServer((request, response) => {
+      request.resume()
+      response.writeHead(200, { 'content-type': 'application/json' })
+      response.end(JSON.stringify({ id: 'session-1' }))
+    })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const address = server.address()
+    assert.ok(address && typeof address === 'object')
+    const serverUrl = new URL(`http://127.0.0.1:${address.port}`)
+
+    try {
+      const hooks = await SwarmManager({ client: sdk.client, directory: projectDirectory, serverUrl } as any)
+      const requestedPatterns: string[] = []
+      const context: ToolContext = {
+        sessionID: 'caller-session',
+        messageID: 'message-1',
+        agent: 'supervisor',
+        directory: projectDirectory,
+        worktree: projectDirectory,
+        abort: new AbortController().signal,
+        metadata() {},
+        async ask(request) { requestedPatterns.push(...request.patterns) },
+      }
+      const resultPromise = hooks.tool!.swarm_review_fixed_point.execute({
+        summary: 'Review the implementation.',
+        changedFiles: ['src/example.ts'],
+        riskTags: [],
+      }, context)
+      await waitFor(() => sdk.calls.some((call) => call.name === 'promptAsync'), 'review task was not prompted')
+      sdk.messages.set('session-1', [{
+        info: { role: 'assistant' },
+        parts: [{ type: 'text', text: JSON.stringify({
+          verdict: 'pass',
+          summary: 'Accepted',
+          issues: [],
+          resolved_issue_ids: [],
+        }) }],
+      }])
+      await hooks.event!({ event: { type: 'session.idle', properties: { sessionID: 'session-1' } } } as any)
+
+      const result = JSON.parse(await resultPromise as string)
+      assert.equal(result.status, 'accepted')
+      assert.deepEqual(requestedPatterns, ['src/example.ts', 'wf-reviewer-deep'])
+      await hooks.dispose?.()
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
       if (previousConfigDirectory === undefined) delete process.env.OPENCODE_CONFIG_DIR
       else process.env.OPENCODE_CONFIG_DIR = previousConfigDirectory
     }

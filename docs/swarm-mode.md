@@ -11,6 +11,7 @@ Swarm runs independent OpenCode subagent sessions concurrently through `@opencod
 | `swarm_collect_results` | Reads the last assistant text from every batch session |
 | `swarm_cancel_task` | Aborts one running session or cancels one queued task |
 | `swarm_spawn_validation` | Starts functional, security, and quality validation tasks |
+| `swarm_review_fixed_point` | Selects configured reviewers by risk tag and runs structured review/correction rounds |
 
 A batch task contains an ID, installed agent name, complete prompt, and optional OpenCode provider/model ID. The caller's bound manual workflow context is prepended when available.
 
@@ -70,8 +71,11 @@ For isolated external edits, use [Delegated Workflows](./delegated-workflows.md)
 
 The validation helper creates separate functional, security, and quality sessions. Its tool description requires all validation results to pass; it does not implement majority voting.
 
+The fixed-point helper is configured under `review_loop` in `workflows.json`. It always reviews the plugin project root and does not accept a subtree working directory. Caller-supplied risk tags select from configured reviewers; callers cannot supply agents, prompts, limits, or iteration counts, and caller-declared project-relative changed paths must exactly match the repository-wide worktree-status snapshot. Every selected reviewer must pass in one fresh round. After a review batch completes, a tool-denied correction agent may propose complete replacements only from bounded, secret-scanned source snapshots. The coordinator rechecks content, requests per-file edit authority, and applies approved source or documentation replacements before re-review, so no model session receives correction write authority. Individual batches retain normal swarm persistence, while automatic restart of the multi-batch coordinator is reserved for the durable queue roadmap phase.
+
 ## Related Documentation
 
 - [Workflow System](../WORKFLOWS.md#swarm-runtime)
 - [Agent Reference](./agents.md)
 - [Review System](./review-system.md)
+- [Validation And Fixed-Point Review](./validation-and-fixed-point-review.md)

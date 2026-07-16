@@ -5,7 +5,15 @@ import os from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, it } from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { configuredCandidates, transformModelMetadata } from '../install.mjs'
+import { MAX_BOUNDED_IO_BYTES, configuredCandidates, transformModelMetadata } from '../install.mjs'
+import {
+  MAX_BOUNDED_IO_BYTES as RUNTIME_MAX_BOUNDED_IO_BYTES,
+  MAX_REVIEW_ITERATIONS,
+  MAX_REVIEW_RESULT_BYTES,
+  MAX_VALIDATION_OUTPUT_BYTES,
+  MAX_VALIDATION_RUNS_PER_WORKFLOW,
+  MAX_VALIDATION_TIMEOUT_MS,
+} from '../lib/workflow-config.ts'
 
 const REPO_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 const INSTALLER = path.join(REPO_ROOT, 'install.mjs')
@@ -101,6 +109,159 @@ describe('production model materialization helpers', () => {
 })
 
 describe('installer subprocess', () => {
+  it('updates only autonomy with private writes, numbered backups, and dry-run support', () => {
+    const fixture = createFixture()
+    const config = workflowConfig()
+    config.custom_preserved_data = { nested: ['unchanged'] }
+    const original = `${JSON.stringify(config, null, 2)}\n`
+    const configPath = path.join(fixture.configDir, 'workflows.json')
+    fs.writeFileSync(configPath, original, { mode: 0o644 })
+
+    const dryRun = runInstaller(fixture, ['--autonomy', 'bounded', '--dry-run'])
+    assert.equal(dryRun.status, 0, dryRun.stderr || dryRun.stdout)
+    assert.match(dryRun.stdout, /automatic-stage permission handling only/)
+    assert.equal(fs.readFileSync(configPath, 'utf8'), original)
+    assert.equal(fs.existsSync(`${configPath}.backup`), false)
+
+    const applied = runInstaller(fixture, ['--autonomy', 'bounded'])
+    assert.equal(applied.status, 0, applied.stderr || applied.stdout)
+    assert.match(applied.stdout, /does not enable automation|automation and budgets are unchanged/)
+    const updated = JSON.parse(fs.readFileSync(configPath, 'utf8'))
+    assert.equal(updated.automation.autonomy, 'bounded')
+    assert.equal(updated.automation.enabled, false)
+    assert.equal(Object.hasOwn(updated.automation, 'max_sessions'), false)
+    assert.deepEqual(updated.custom_preserved_data, config.custom_preserved_data)
+    assert.equal(fs.readFileSync(`${configPath}.backup`, 'utf8'), original)
+    assert.equal(fs.statSync(configPath).mode & 0o777, 0o600)
+    assert.equal(fs.statSync(`${configPath}.backup`).mode & 0o777, 0o600)
+
+    const second = runInstaller(fixture, ['--autonomy', 'interactive'])
+    assert.equal(second.status, 0, second.stderr || second.stdout)
+    assert.equal(fs.existsSync(`${configPath}.backup.1`), true)
+    assert.equal(fs.statSync(`${configPath}.backup.1`).mode & 0o777, 0o600)
+    assert.equal(JSON.parse(fs.readFileSync(configPath, 'utf8')).automation.autonomy, 'interactive')
+  })
+
+  it('rejects invalid autonomy profiles and missing or malformed installed configs', () => {
+    const missingFixture = createFixture()
+    const missing = runInstaller(missingFixture, ['--autonomy', 'bounded'])
+    assert.notEqual(missing.status, 0)
+    assert.match(missing.stderr, /No workflows\.json found/)
+
+    const malformedFixture = createFixture()
+    fs.writeFileSync(path.join(malformedFixture.configDir, 'workflows.json'), '{not-json')
+    const malformed = runInstaller(malformedFixture, ['--autonomy', 'bounded'])
+    assert.notEqual(malformed.status, 0)
+    assert.match(malformed.stderr, /Cannot parse workflows\.json/)
+
+    const invalidFixture = createFixture()
+    fs.writeFileSync(path.join(invalidFixture.configDir, 'workflows.json'), `${JSON.stringify(workflowConfig())}\n`)
+    const invalid = runInstaller(invalidFixture, ['--autonomy', 'unrestricted'])
+    assert.notEqual(invalid.status, 0)
+    assert.match(invalid.stderr, /Invalid autonomy profile/)
+  })
+
+  it('adds safe autonomy and publication defaults only when migration is already changing the config', () => {
+    const currentFixture = createFixture()
+    const currentPath = path.join(currentFixture.configDir, 'workflows.json')
+    const current = workflowConfig()
+    current.model_tiers.mid = [{ model: 'provider/primary' }]
+    current.fallback_order = [{ model: 'provider/fallback' }]
+    const currentContent = `${JSON.stringify(current, null, 2)}\n`
+    fs.writeFileSync(currentPath, currentContent)
+    const unchanged = runInstaller(currentFixture, ['--migrate'])
+    assert.equal(unchanged.status, 0, unchanged.stderr || unchanged.stdout)
+    assert.match(unchanged.stdout, /already current/)
+    assert.equal(fs.readFileSync(currentPath, 'utf8'), currentContent)
+    assert.equal(fs.existsSync(`${currentPath}.backup`), false)
+    assert.equal(Object.hasOwn(JSON.parse(currentContent), 'publication'), false)
+
+    const legacyFixture = createFixture()
+    const legacyPath = path.join(legacyFixture.configDir, 'workflows.json')
+    fs.writeFileSync(legacyPath, `${JSON.stringify(workflowConfig(), null, 2)}\n`)
+    const preview = runInstaller(legacyFixture, ['--migrate', '--dry-run'])
+    assert.equal(preview.status, 0, preview.stderr || preview.stdout)
+    assert.match(preview.stdout, /initialize disabled publication defaults/)
+    assert.equal(Object.hasOwn(JSON.parse(fs.readFileSync(legacyPath, 'utf8')), 'publication'), false)
+    const migrated = runInstaller(legacyFixture, ['--migrate'])
+    assert.equal(migrated.status, 0, migrated.stderr || migrated.stdout)
+    const migratedLegacy = JSON.parse(fs.readFileSync(legacyPath, 'utf8'))
+    assert.equal(migratedLegacy.automation.autonomy, 'interactive')
+    assert.deepEqual(migratedLegacy.publication, { enabled: false, internal_markers: [], targets: {} })
+
+    const preservedFixture = createFixture()
+    const preservedPath = path.join(preservedFixture.configDir, 'workflows.json')
+    const preservedConfig = workflowConfig()
+    preservedConfig.publication = {
+      enabled: false,
+      internal_markers: [{ id: 'internal', literal: 'internal-only', case_sensitive: false }],
+      targets: { draft: { display_name: 'Draft destination' } },
+    }
+    fs.writeFileSync(preservedPath, `${JSON.stringify(preservedConfig, null, 2)}\n`)
+    const preservedMigration = runInstaller(preservedFixture, ['--migrate'])
+    assert.equal(preservedMigration.status, 0, preservedMigration.stderr || preservedMigration.stdout)
+    assert.deepEqual(
+      JSON.parse(fs.readFileSync(preservedPath, 'utf8')).publication,
+      preservedConfig.publication,
+    )
+
+    const budgetFixture = createFixture()
+    const budgetPath = path.join(budgetFixture.configDir, 'workflows.json')
+    const budgetConfig = workflowConfig()
+    budgetConfig.model_tiers.mid = [{ model: 'provider/primary' }]
+    budgetConfig.fallback_order = [{ model: 'provider/fallback' }]
+    budgetConfig.automation = {
+      enabled: true,
+      autonomy: 'interactive',
+      max_parallel_sessions: 1,
+      max_sessions: 2,
+      max_attempts_per_stage: 2,
+      max_wall_time_ms: 1000,
+      max_input_tokens: 500,
+      max_output_tokens: 250,
+      max_cost_usd: null,
+    }
+    fs.writeFileSync(budgetPath, `${JSON.stringify(budgetConfig, null, 2)}\n`)
+    const budgetMigration = runInstaller(budgetFixture, ['--migrate'])
+    assert.equal(budgetMigration.status, 0, budgetMigration.stderr || budgetMigration.stdout)
+    const migratedBudget = JSON.parse(fs.readFileSync(budgetPath, 'utf8')).automation
+    assert.equal(migratedBudget.max_bounded_read_bytes, 0)
+    assert.equal(migratedBudget.max_bounded_write_bytes, 0)
+    assert.deepEqual(
+      JSON.parse(fs.readFileSync(budgetPath, 'utf8')).publication,
+      { enabled: false, internal_markers: [], targets: {} },
+    )
+  })
+
+  it('keeps bounded I/O safety caps consistent across runtime and schemas', () => {
+    assert.equal(MAX_BOUNDED_IO_BYTES, RUNTIME_MAX_BOUNDED_IO_BYTES)
+    const workflowSchema = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'schema', 'workflows.schema.json'), 'utf8'))
+    const stateSchema = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'schema', 'workflow-state.schema.json'), 'utf8'))
+    const configured = workflowSchema.properties.automation.properties
+    const persisted = stateSchema.properties.budget.properties.limits.properties
+    for (const field of ['max_bounded_read_bytes', 'max_bounded_write_bytes']) {
+      assert.equal(configured[field].maximum, MAX_BOUNDED_IO_BYTES)
+      assert.equal(persisted[field].maximum, MAX_BOUNDED_IO_BYTES)
+    }
+    const validationOperation = workflowSchema.$defs.validationOperation.properties
+    assert.equal(validationOperation.timeout_ms.maximum, MAX_VALIDATION_TIMEOUT_MS)
+    assert.equal(validationOperation.max_output_bytes.maximum, MAX_VALIDATION_OUTPUT_BYTES)
+    assert.equal(workflowSchema.properties.validation_broker.properties.max_runs_per_workflow.maximum, MAX_VALIDATION_RUNS_PER_WORKFLOW)
+    assert.equal(persisted.max_validation_runs.maximum, MAX_VALIDATION_RUNS_PER_WORKFLOW)
+    assert.equal(workflowSchema.properties.review_loop.properties.max_iterations.maximum, MAX_REVIEW_ITERATIONS)
+    assert.equal(workflowSchema.properties.review_loop.properties.batch_timeout_ms.maximum, MAX_VALIDATION_TIMEOUT_MS)
+    assert.equal(workflowSchema.properties.review_loop.properties.max_result_bytes.maximum, MAX_REVIEW_RESULT_BYTES)
+  })
+
+  it('describes autonomy as automatic-stage permission handling only in help output', () => {
+    const fixture = createFixture()
+    const result = runInstaller(fixture, ['--help'])
+    assert.equal(result.status, 0, result.stderr || result.stdout)
+    assert.match(result.stdout, /--autonomy <profile>/)
+    assert.match(result.stdout, /automatic-stage permission handling/)
+    assert.match(result.stdout, /does not\s+enable automation/)
+  })
+
   it('installs, diagnoses, migrates, reinstalls, and safely uninstalls in isolation', () => {
     const fixture = createFixture()
     const opencodeConfig = `${JSON.stringify({ $schema: 'https://opencode.ai/config.json', username: 'Example User' }, null, 2)}\n`
@@ -171,6 +332,7 @@ describe('installer subprocess', () => {
       claude: { timeout_ms: 10000 },
       gemini: { timeout_ms: 10000 },
     })
+    assert.deepEqual(migratedConfig.publication, { enabled: false, internal_markers: [], targets: {} })
     assert.equal(fs.existsSync(path.join(fixture.configDir, 'workflows.json.backup')), true)
     assert.equal(fs.statSync(path.join(fixture.configDir, 'workflows.json')).mode & 0o777, 0o600)
 

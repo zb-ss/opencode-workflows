@@ -36,12 +36,18 @@
       "type": "object",
       "properties": {
         "enabled": { "type": "boolean", "default": false },
+        "autonomy": {
+          "enum": ["interactive", "bounded"],
+          "default": "interactive"
+        },
         "max_parallel_sessions": { "type": "integer", "minimum": 1 },
         "max_sessions": { "type": "integer", "minimum": 1 },
         "max_attempts_per_stage": { "type": "integer", "minimum": 1 },
         "max_wall_time_ms": { "type": "integer", "minimum": 1 },
         "max_input_tokens": { "type": "integer", "minimum": 0 },
         "max_output_tokens": { "type": "integer", "minimum": 0 },
+        "max_bounded_read_bytes": { "type": "integer", "minimum": 0, "maximum": 16777216 },
+        "max_bounded_write_bytes": { "type": "integer", "minimum": 0, "maximum": 16777216 },
         "max_cost_usd": { "type": ["number", "null"], "minimum": 0 }
       },
       "required": ["enabled"],
@@ -60,6 +66,8 @@
               "max_wall_time_ms",
               "max_input_tokens",
               "max_output_tokens",
+              "max_bounded_read_bytes",
+              "max_bounded_write_bytes",
               "max_cost_usd"
             ]
           }
@@ -107,6 +115,125 @@
       },
       "additionalProperties": false
     },
+    "validation_broker": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean", "default": false },
+        "max_runs_per_workflow": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "operations": {
+          "type": "object",
+          "propertyNames": { "$ref": "#/$defs/safeIdentifier" },
+          "additionalProperties": { "$ref": "#/$defs/validationOperation" }
+        }
+      },
+      "required": [],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": { "properties": { "enabled": { "const": true } }, "required": ["enabled"] },
+          "then": {
+            "required": ["max_runs_per_workflow", "operations"],
+            "properties": { "operations": { "type": "object", "minProperties": 1 } }
+          }
+        }
+      ]
+    },
+    "review_loop": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean", "default": false },
+        "max_iterations": { "type": "integer", "minimum": 1, "maximum": 10 },
+        "batch_timeout_ms": { "type": "integer", "minimum": 1, "maximum": 3600000 },
+        "max_result_bytes": { "type": "integer", "minimum": 1, "maximum": 1048576 },
+        "correction_agent": { "$ref": "#/$defs/safeIdentifier" },
+        "correction_focus": { "type": "string", "minLength": 1, "maxLength": 4000 },
+        "reviewers": {
+          "type": "array",
+          "maxItems": 16,
+          "items": { "$ref": "#/$defs/reviewLoopReviewer" }
+        }
+      },
+      "required": [],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": { "properties": { "enabled": { "const": true } }, "required": ["enabled"] },
+          "then": {
+            "required": [
+              "max_iterations",
+              "batch_timeout_ms",
+              "max_result_bytes",
+              "correction_agent",
+              "correction_focus",
+              "reviewers"
+            ],
+            "properties": { "reviewers": { "type": "array", "minItems": 1, "contains": { "type": "object", "properties": { "always": { "const": true } } } } }
+          }
+        }
+      ]
+    },
+    "publication": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean", "default": false },
+        "artifact_ttl_ms": { "type": "integer", "minimum": 1, "maximum": 604800000 },
+        "git_timeout_ms": { "type": "integer", "minimum": 1, "maximum": 3600000 },
+        "max_artifacts_per_workflow": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "max_commits": { "type": "integer", "minimum": 1, "maximum": 10000 },
+        "max_objects": { "type": "integer", "minimum": 1, "maximum": 100000 },
+        "max_blob_bytes": { "type": "integer", "minimum": 1, "maximum": 16777216 },
+        "max_total_scan_bytes": { "type": "integer", "minimum": 1, "maximum": 268435456 },
+        "max_findings": { "type": "integer", "minimum": 1, "maximum": 1000 },
+        "record_settle_attempts": { "type": "integer", "minimum": 1, "maximum": 10000 },
+        "record_settle_delay_ms": { "type": "integer", "minimum": 1, "maximum": 60000 },
+        "record_settle_timeout_ms": { "type": "integer", "minimum": 1, "maximum": 60000 },
+        "internal_markers": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/publicationMarker" }
+        },
+        "targets": {
+          "type": "object",
+          "propertyNames": { "$ref": "#/$defs/safeIdentifier" },
+          "additionalProperties": { "$ref": "#/$defs/publicationTarget" }
+        }
+      },
+      "required": [],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": { "properties": { "enabled": { "const": true } }, "required": ["enabled"] },
+          "then": {
+            "required": [
+              "artifact_ttl_ms",
+              "git_timeout_ms",
+              "max_artifacts_per_workflow",
+              "max_commits",
+              "max_objects",
+              "max_blob_bytes",
+              "max_total_scan_bytes",
+              "max_findings",
+              "record_settle_attempts",
+              "record_settle_delay_ms",
+              "record_settle_timeout_ms",
+              "internal_markers",
+              "targets"
+            ],
+            "properties": {
+              "internal_markers": {
+                "type": "array",
+                "minItems": 1
+              },
+              "targets": {
+                "type": "object",
+                "minProperties": 1,
+                "additionalProperties": { "$ref": "#/$defs/enabledPublicationTarget" }
+              }
+            }
+          }
+        }
+      ]
+    },
     "swarm_config": {
       "type": "object",
       "properties": {
@@ -134,6 +261,265 @@
   ],
   "additionalProperties": false,
   "$defs": {
+    "safeIdentifier": {
+      "type": "string",
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+    },
+    "validationOperation": {
+      "type": "object",
+      "properties": {
+        "argv": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "prefixItems": [{ "type": "string", "minLength": 1, "maxLength": 1024, "pattern": "^/[^\\u0000]*$" }],
+          "items": { "type": "string", "minLength": 1, "maxLength": 1024, "pattern": "^[^\\u0000]+$" }
+        },
+        "working_directory": { "type": "string", "minLength": 1, "maxLength": 1024, "allOf": [{ "not": { "pattern": "^(?:/|[A-Za-z]:[\\\\/]|\\\\)" } }, { "not": { "pattern": "\\u0000" } }] },
+        "permission_pattern": { "type": "string", "minLength": 1, "maxLength": 1024, "not": { "pattern": "\\u0000" } },
+        "environment": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": { "type": "string", "maxLength": 1024, "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" }
+        },
+        "timeout_ms": { "type": "integer", "minimum": 1, "maximum": 3600000 },
+        "max_output_bytes": { "type": "integer", "minimum": 1, "maximum": 16777216 },
+        "success_exit_codes": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": { "type": "integer", "minimum": 0, "maximum": 255 }
+        }
+      },
+      "required": ["argv", "working_directory", "permission_pattern", "environment", "timeout_ms", "max_output_bytes", "success_exit_codes"],
+      "additionalProperties": false
+    },
+    "reviewLoopReviewer": {
+      "type": "object",
+      "properties": {
+        "id": { "$ref": "#/$defs/safeIdentifier" },
+        "agent": { "$ref": "#/$defs/safeIdentifier" },
+        "always": { "type": "boolean" },
+        "risk_tags": {
+          "type": "array",
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/safeIdentifier" }
+        },
+        "focus": { "type": "string", "minLength": 1, "maxLength": 4000 }
+      },
+      "required": ["id", "agent", "always", "risk_tags", "focus"],
+      "allOf": [
+        {
+          "if": { "properties": { "always": { "const": false } }, "required": ["always"] },
+          "then": { "properties": { "risk_tags": { "type": "array", "minItems": 1 } } }
+        }
+      ],
+      "additionalProperties": false
+    },
+    "publicationMarker": {
+      "type": "object",
+      "properties": {
+        "id": { "$ref": "#/$defs/safeIdentifier" },
+        "literal": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 256,
+          "not": { "pattern": "\\u0000" }
+        },
+        "case_sensitive": { "type": "boolean" }
+      },
+      "required": ["id", "literal", "case_sensitive"],
+      "additionalProperties": false
+    },
+    "publicationExecutable": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "allOf": [
+        { "type": "string", "pattern": "^(?:/|[A-Za-z]:[\\\\/]|\\\\)" },
+        { "type": "string", "not": { "pattern": "\\u0000" } }
+      ]
+    },
+    "publicationPublisherExecutable": {
+      "allOf": [
+        { "$ref": "#/$defs/publicationExecutable" },
+        { "type": "string", "not": { "pattern": "[{}]" } }
+      ]
+    },
+    "publicationGitRef": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "allOf": [
+        { "type": "string", "pattern": "^refs/" },
+        { "type": "string", "not": { "pattern": "[\\u0000-\\u0020\\u007F]" } },
+        { "type": "string", "not": { "pattern": "[~^:?*]" } },
+        { "type": "string", "not": { "pattern": "\\[" } },
+        { "type": "string", "not": { "pattern": "\\\\" } },
+        { "type": "string", "not": { "pattern": "\\.\\.|@\\{|//" } },
+        { "type": "string", "not": { "pattern": "(?:^|/)[.-]" } },
+        { "type": "string", "not": { "pattern": "(?:^|/)[^/]*\\.lock(?:/|$)" } },
+        { "type": "string", "not": { "pattern": "[./]$" } }
+      ]
+    },
+    "publicationSourceGitRef": {
+      "allOf": [
+        { "$ref": "#/$defs/publicationGitRef" },
+        { "type": "string", "pattern": "^refs/heads/" }
+      ]
+    },
+    "publicationPublisher": {
+      "type": "object",
+      "properties": {
+        "argv": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "prefixItems": [
+            { "$ref": "#/$defs/publicationPublisherExecutable" },
+            { "const": "{request_file}" }
+          ],
+          "items": false
+        },
+        "working_directory": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024,
+          "allOf": [
+            { "type": "string", "not": { "pattern": "^(?:/|[A-Za-z]:[\\\\/]|\\\\)" } },
+            { "type": "string", "not": { "pattern": "(?:^|[\\\\/])\\.\\.(?:[\\\\/]|$)" } },
+            { "type": "string", "not": { "pattern": "\\u0000" } }
+          ]
+        },
+        "environment": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+            "allOf": [
+              {
+                "not": {
+                  "enum": [
+                    "BASH_ENV",
+                    "BASHOPTS",
+                    "CDPATH",
+                    "CLASSPATH",
+                    "ENV",
+                    "GCONV_PATH",
+                    "GLIBC_TUNABLES",
+                    "HOME",
+                    "IFS",
+                    "JAVA_TOOL_OPTIONS",
+                    "JDK_JAVA_OPTIONS",
+                    "LUA_CPATH",
+                    "LUA_PATH",
+                    "NODE_OPTIONS",
+                    "NODE_PATH",
+                    "PERL5LIB",
+                    "PERL5OPT",
+                    "PHPRC",
+                    "PHP_INI_SCAN_DIR",
+                    "PYTHONHOME",
+                    "PYTHONPATH",
+                    "PYTHONSTARTUP",
+                    "RUBYLIB",
+                    "RUBYOPT",
+                    "SHELLOPTS",
+                    "SSH_ASKPASS",
+                    "SSH_ASKPASS_REQUIRE",
+                    "TCLLIBPATH",
+                    "ZDOTDIR",
+                    "_JAVA_OPTIONS"
+                  ]
+                }
+              },
+              { "not": { "pattern": "^(?:DYLD_|GIT_|LD_)" } }
+            ]
+          }
+        },
+        "timeout_ms": { "type": "integer", "minimum": 1, "maximum": 3600000 },
+        "max_output_bytes": { "type": "integer", "minimum": 1, "maximum": 16777216 },
+        "success_exit_codes": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "uniqueItems": true,
+          "items": { "const": 0 }
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "enabledPublicationPublisher": {
+      "allOf": [
+        { "$ref": "#/$defs/publicationPublisher" },
+        {
+          "type": "object",
+          "required": [
+            "argv",
+            "working_directory",
+            "environment",
+            "timeout_ms",
+            "max_output_bytes",
+            "success_exit_codes"
+          ]
+        }
+      ]
+    },
+    "publicationTarget": {
+      "type": "object",
+      "properties": {
+        "display_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "not": { "pattern": "\\u0000" }
+        },
+        "git_executable": { "$ref": "#/$defs/publicationExecutable" },
+        "base_ref": { "$ref": "#/$defs/publicationSourceGitRef" },
+        "head_ref": { "$ref": "#/$defs/publicationSourceGitRef" },
+        "remote": { "$ref": "#/$defs/safeIdentifier" },
+        "expected_remote_url": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048,
+          "pattern": "^(?:https|ssh):\\/\\/[^\\s\\u0000\\\\/?#@]+(?::[0-9]+)?\\/[^\\s\\u0000\\\\?#]+$"
+        },
+        "destination_ref": { "$ref": "#/$defs/publicationGitRef" },
+        "protection": { "enum": ["deny", "approval_required", "unprotected"] },
+        "publisher": { "$ref": "#/$defs/publicationPublisher" }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "enabledPublicationTarget": {
+      "allOf": [
+        { "$ref": "#/$defs/publicationTarget" },
+        {
+          "type": "object",
+          "properties": {
+            "publisher": { "$ref": "#/$defs/enabledPublicationPublisher" }
+          },
+          "required": [
+            "display_name",
+            "git_executable",
+            "base_ref",
+            "head_ref",
+            "remote",
+            "expected_remote_url",
+            "destination_ref",
+            "protection",
+            "publisher"
+          ]
+        }
+      ]
+    },
     "modelId": {
       "type": "string",
       "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*/\\S+$"

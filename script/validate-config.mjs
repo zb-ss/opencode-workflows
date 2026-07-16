@@ -4,6 +4,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import Ajv2020 from 'ajv/dist/2020.js'
+import { publicationMarkerIssues } from '../lib/publication-marker-policy.mjs'
 
 const REPO_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 
@@ -32,6 +33,23 @@ function formatErrors(errors) {
   }).join('\n')
 }
 
+function validateWorkflowSemantics(value, filePath) {
+  const reviewers = value?.review_loop?.reviewers
+  if (Array.isArray(reviewers)) {
+    const ids = new Set()
+    for (const reviewer of reviewers) {
+      if (ids.has(reviewer.id)) throw new Error(`${filePath} is invalid:\n  duplicate review_loop reviewer ID: ${reviewer.id}`)
+      ids.add(reviewer.id)
+    }
+  }
+
+  const markers = value?.publication?.internal_markers
+  if (Array.isArray(markers)) {
+    const issue = publicationMarkerIssues(markers, { requireNonEmpty: value.publication.enabled })[0]
+    if (issue) throw new Error(`${filePath} is invalid:\n  ${issue.message}`)
+  }
+}
+
 function validatorFor(schemaPath) {
   const ajv = new Ajv2020({ allErrors: true, strict: false })
   ajv.addFormat('date-time', true)
@@ -54,6 +72,7 @@ export function validateFile(filePath, schemaPath, options = {}) {
   if (!validate(value)) {
     throw new Error(`${filePath} is invalid:\n${formatErrors(validate.errors)}`)
   }
+  if (path.basename(schemaPath) === 'workflows.schema.json') validateWorkflowSemantics(value, filePath)
 }
 
 function parseArgs(args) {

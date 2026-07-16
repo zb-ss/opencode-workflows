@@ -3,6 +3,8 @@
  * All plugins and lib modules import from here.
  */
 
+import type { PermissionRule } from './autonomy-policy.ts'
+
 // Gate status lifecycle: pending -> in_progress -> passed|failed|skipped
 export type GateStatus = 'pending' | 'in_progress' | 'passed' | 'failed' | 'skipped';
 
@@ -227,6 +229,7 @@ export interface SwarmTask {
   agent: string;
   prompt: string;
   model?: string;
+  permission?: PermissionRule[];
 }
 
 /**

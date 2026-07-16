@@ -7,7 +7,7 @@ OpenCode Workflows provides related but distinct orchestration mechanisms. This 
 | Driver | Starts with | Executes work through | Continues automatically |
 |---|---|---|---|
 | Manual workflow | `/workflow` | Supervisor calls the native Task tool and workflow tools | No; the supervisor advances each gate |
-| Automatic DAG | `/workflow-auto` | Plugin creates SDK child sessions from an installed JSON DAG | Yes, while enabled, authorized, within budget, and loaded |
+| Automatic DAG | `/workflow-auto` | Plugin creates SDK child sessions from an installed JSON DAG | Yes, while enabled, authorized, within budget, loaded, and not blocked |
 | Native Task | A Task tool call | One OpenCode subagent | Only within that task; reuse `task_id` to continue it |
 | Swarm | `swarm_spawn_batch` | Parallel SDK child sessions | The queue drains within configured limits |
 | External CLI | `/delegate` or `delegate_run` | A `claude` or Antigravity `agy` child process | No; each run or follow-up is explicit |
@@ -135,7 +135,23 @@ The mode files do not pin provider model IDs. Runtime model behavior is describe
 
 Automatic workflow driving is a separate opt-in plugin path. It accepts only installed declarative definitions named `development` and `e2e`.
 
-### Enable Budgets
+### Choose Autonomy And Enable Budgets
+
+`automation.autonomy` controls permission handling inside automatic child sessions. `interactive` is the default:
+
+| Profile | Child-session behavior |
+|---|---|
+| `interactive` | Keeps the routed agent's effective permission rules, including asks; use for attended runs |
+| `bounded` | Requires routed root Task permissions to resolve silently, resolves every child ask, and fails closed when authority is unavailable |
+
+For an existing installation, preview and apply bounded autonomy with these separate commands:
+
+```bash
+node install.mjs --autonomy bounded --dry-run
+node install.mjs --autonomy bounded
+```
+
+The autonomy command requires an existing `workflows.json`. It changes only `automation.autonomy`; it does not install files, enable automation, or create or change budgets.
 
 `automation.enabled` defaults to `false`. When it is `true`, every budget field is required:
 
@@ -143,18 +159,21 @@ Automatic workflow driving is a separate opt-in plugin path. It accepts only ins
 {
   "automation": {
     "enabled": true,
+    "autonomy": "bounded",
     "max_parallel_sessions": 2,
     "max_sessions": 12,
     "max_attempts_per_stage": 2,
     "max_wall_time_ms": 3600000,
     "max_input_tokens": 250000,
     "max_output_tokens": 80000,
+    "max_bounded_read_bytes": 1048576,
+    "max_bounded_write_bytes": 1048576,
     "max_cost_usd": null
   }
 }
 ```
 
-These values are examples, not defaults. Select limits for the project and provider account. The schema requires positive session, attempt, and wall-time limits; token limits may be zero; cost may be a non-negative number or `null`.
+These values are examples, not defaults. Select limits for the project and provider account. The schema requires positive session, attempt, and wall-time limits; token limits may be zero; cost may be a non-negative number or `null`. Restart OpenCode after changing the autonomy profile, budgets, enabled state, or agent permissions. The engine persists the autonomy profile at workflow start and does not change it on resume; a configuration change applies only to newly started workflows.
 
 ### Start
 
@@ -169,7 +188,7 @@ The command calls `workflow_auto_start` once. The tool:
 2. Detects capabilities and rejects unavailable `required` capabilities.
 3. Loads and validates the installed definition.
 4. Loads role routing from the selected mode.
-5. Requests `task` permission for every routed agent used by the definition.
+5. Authorizes `task` permission for every routed agent used by the definition. Bounded mode first proves each decision is already `allow`, so authorization cannot prompt.
 6. Persists a copy of the validated definition and initial state.
 7. Starts dependency-ready stages up to the parallel-session budget.
 
@@ -196,6 +215,31 @@ setup -> e2e_exploration -> e2e_generation -> e2e_validation
 
 Each stage runs in a child OpenCode session with a routed `wf-*` agent. Native Task, swarm, external delegation, and nested automatic-workflow tools are blocked inside stage sessions so sessions, processes, tokens, cost, and cancellation remain under engine control. The final assistant response must be one JSON object matching the stage result contract. Invalid output is an attempt failure. A failed result is retried unless it explicitly sets `retryable: false` or exhausts the configured attempt budget.
 
+### Bounded Permission Resolution
+
+Before creating a bounded child session, the adapter uses the typed OpenCode v2 SDK client to load the routed agent's effective permissions and produces a rule set containing no `ask` actions:
+
+- A wildcard deny covers every built-in, plugin, and MCP permission by default.
+- Only plugin-owned `workflow_bounded_list`, `workflow_bounded_read`, `workflow_bounded_write`, and todo state can be re-enabled from effective agent rules. List, read, and write authority derive from canonical worktree-relative `glob`/`list`, `read`, and `edit` rules. Built-in discovery, read, edit, write, and apply-patch remain denied because their broader behavior or formatter hooks are outside the bounded contract. Built-in grep, LSP, and global or external skills remain denied.
+- Existing denies in those categories remain denied. Only explicit allows remain allowed; asks become deny.
+- Unknown and custom permissions remain denied even when the agent explicitly allowed them.
+- Bash, `webfetch`, `websearch`, external-directory access, questions, recovery prompts, plan transitions, nested Task calls, unsafe delegation, and environment-file reads are hard-denied.
+- The automatic-workflow plugin independently rejects every unreviewed tool inside bounded stages, including built-in discovery/reading/editing, content search, LSP, validation or general processes, network, custom, Skill, Task, swarm, delegation, and nested automatic-workflow tools. Only explicit source-policy allows can enable a plugin-owned tool; `ask` and `deny` remain denied. Plugin-owned file tools authorize only the resolved canonical worktree-relative target. Descriptor-anchored filtered listing hides dotfiles, credential paths, control surfaces, and non-approved file types, returns at most 1,000 entries, and reports truncation. Reads use an explicit source/document extension allowlist, scan returned content and boundary overlap for common token formats and high-entropy values, and reject external, symbolic, or hard-linked targets. Writes reject hidden paths and listed host-executed controls, create verified parent components, preserve existing mode bits, and atomically replace the directory entry without invoking OpenCode formatters or shell commands.
+
+Before start and resume, the adapter also evaluates the current root agent's effective Task rules for every routed `wf-*` agent. If any resolves to `ask` or `deny`, the operation fails before creating artifacts or invoking OpenCode's authoritative permission check. The installed supervisor's `wf-*` allow means that check proceeds silently.
+
+This policy prevents an unattended child from waiting on a permission prompt. It is not an OS, container, or process sandbox. Final file access is anchored through an opened parent-directory descriptor and fails closed when neither `/proc/self/fd` nor usable `/dev/fd` access is available. Bounded stages execute no general shell commands or validation processes. Named validation operations remain available only to attended interactive workflows because repository-controlled checks are executable authority.
+
+Bounded read and write bytes are atomically reserved and persisted per workflow so concurrent children cannot each consume the same remaining allowance. Complete serialized read and filtered-list responses use `max_bounded_read_bytes`; written UTF-8 content uses `max_bounded_write_bytes`. Each configured byte limit is capped at 16 MiB. These limits are independent of normal model-token counters.
+
+### Blocked Stages
+
+A stage returns `blocked`, with a `required_action`, when it cannot proceed without information, access, credentials, approval, or authority. `retryable` is valid only for failed results; blocker fields are valid only for blocked results. The engine records the result, marks pending dependent stages blocked, aborts parallel siblings back to pending, and pauses the workflow. This is a safe outcome, not evidence that the requested work or validation completed.
+
+Treat the reported summary and required action as untrusted child output. Verify them against trusted project documentation; never provide secret values, run supplied commands, follow supplied URLs, or weaken permissions because blocker text requested it. Complete only a verified action before running `/workflow-auto-resume` in the same owning session. Restart OpenCode first if installed agent permissions changed. Resume reauthorizes routed agents under the persisted autonomy profile, refreshes configured budgets, reconciles existing children, and resets directly blocked stages and their dependency-blocked descendants to pending. Eligible stages are then scheduled within the remaining budgets. Resume does not switch or override the autonomy policy, reset attempts or accumulated usage, reset the original wall-clock age, or restart a terminal workflow.
+
+Do not weaken bounded rules merely to force a pass. Protected control-file changes and credential access require an attended path. Credential-content scanning is defense in depth rather than a guarantee, so do not enable bounded reads for worktrees containing untracked credentials, data dumps, or personal data. Ordinary source edits can still introduce malicious behavior, so review the diff before any attended execution. If the required action is executable validation, keep the stage blocked or perform that validation through an explicitly attended workflow and report the boundary accurately.
+
 ### Budgets And Pausing
 
 The engine tracks:
@@ -207,8 +251,11 @@ The engine tracks:
 - Output and reasoning tokens
 - Reported message cost
 - Wall time from original workflow creation
+- Configured validation operations consumed
 
 Before a launch, exhausted limits pause scheduling. If usage crosses a limit while stages are running, those sessions are aborted and returned to pending before the workflow pauses. Attempt exhaustion also pauses for explicit intervention.
+
+The validation broker consumes its persisted run count before process creation. A failed, timed-out, cancelled, or redacted run still consumes one run. See [Validation And Fixed-Point Review](./docs/validation-and-fixed-point-review.md).
 
 Increase or otherwise change budgets in `workflows.json`, restart OpenCode, and use `/workflow-auto-resume` to apply them. A resume refreshes saved limits but does not reset accumulated usage or original wall-clock age.
 
@@ -225,6 +272,12 @@ On plugin startup, valid saved workflows are restored with scheduling disabled. 
 5. Resumes deterministic scheduling.
 
 The `workflow_auto_status` tool reports the current session's automatic workflow. The `workflow_auto_cancel` tool aborts running child sessions, marks pending stages blocked, and sets the workflow to `cancelled`. Terminal workflows are not restarted by resume.
+
+### Guarded Publication
+
+A completed automatic workflow can be published only from its owning root session. `/publication-preview <target>` creates a private immutable artifact after checking the exact worktree root, clean Git state, configured target and publisher policy, and all history reachable from the publication head. `/publication-execute <artifact-id> <artifact-sha256>` revalidates the source and publisher identities before and after one-shot approval, atomically claims the artifact, records dispatch intent, and invokes the fixed configured publisher. `/publication-status` reads durable artifact and execution state.
+
+Publication tools are explicitly rejected inside automatic child sessions. A protected target requests `workflow_publication_protected`; every external dispatch requests `workflow_publication_external`. Both must resolve to `ask`, use artifact-bound patterns, and provide no persistent `always` pattern. Nonzero exit, timeout, cancellation, signal, process uncertainty, or a restored dispatching record is ambiguous and is never automatically retried. See [Guarded Publication](./docs/guarded-publication.md).
 
 ## Capability Modes
 
@@ -280,10 +333,11 @@ The main tools are:
 - `swarm_collect_results`: retrieve final assistant text after completion
 - `swarm_cancel_task`: abort one task and release its queue slot
 - `swarm_spawn_validation`: create functional, security, and quality review tasks
+- `swarm_review_fixed_point`: bind changed files to worktree status, collect tool-denied scoped correction proposals, and run strict re-review rounds
 
 Global and per-provider concurrency come from `swarm_config`. Provider slots are derived from an explicitly supplied task model's provider prefix; tasks without one use the general queue. Queue state is persisted per caller session and restored paused after restart. The next `swarm_await_batch` call reauthorizes agents and the working directory before resuming queued work and reconciling running sessions; lifecycle events and staleness timers then drive completion.
 
-Swarm tasks normally share a working directory. Parallelize only work that can safely share that directory, or use a separate worktree mechanism. See [Swarm Mode](./docs/swarm-mode.md).
+Swarm tasks normally share a working directory. Parallelize only work that can safely share that directory, or use a separate worktree mechanism. Fixed-point reviewers run concurrently, but their single tool-denied correction-proposal task starts only after the review batch completes; the coordinator supplies bounded source snapshots, requests per-file edit authority, and applies validated scoped replacements before re-review. See [Swarm Mode](./docs/swarm-mode.md) and [Validation And Fixed-Point Review](./docs/validation-and-fixed-point-review.md).
 
 ## External CLI Delegation
 
@@ -347,8 +401,13 @@ Use `/translate-auto <component-path> <target-language>` for the orchestration c
 | Delegated worktree operation | `worktree`, plus edit or delegation as applicable |
 | Path outside the worktree | `external_directory` |
 | Translation read or write | `read` or `edit`, plus external-directory approval when applicable |
+| Publication preview | `workflow_publication_preview` for the configured target |
+| Protected publication target | one-shot `workflow_publication_protected` bound to the artifact |
+| Publication external side effect | one-shot `workflow_publication_external` bound to the artifact |
 
 OpenCode permission rules remain authoritative. Workflow state does not grant filesystem, shell, task, or external process access.
+
+For the autonomy boundary and secure delivery roadmap, see [Autonomous Workflows](./docs/autonomous-workflows.md).
 
 ## Diagnostics
 
@@ -366,6 +425,8 @@ For a manual workflow, use `/workflow-status` and inspect its active state. For 
 ## Related Documentation
 
 - [Agent Reference](./docs/agents.md)
+- [Autonomous Workflows](./docs/autonomous-workflows.md)
+- [Guarded Publication](./docs/guarded-publication.md)
 - [Model Compatibility](./docs/model-compatibility.md)
 - [Review System](./docs/review-system.md)
 - [Swarm Mode](./docs/swarm-mode.md)

@@ -35,8 +35,8 @@ Use a primary agent directly when the task fits its role. `/workflow`, `/workflo
 | `wf-security` | Standard security review |
 | `wf-security-lite` | Focused scan for common security defects |
 | `wf-security-deep` | Broader security analysis and threat review |
-| `wf-test-writer` | Adds and runs tests using project conventions |
-| `wf-quality-gate` | Verifies build, type, lint, test, and security evidence as applicable |
+| `wf-test-writer` | Adds tests using project conventions and runs them only when the execution profile authorizes it |
+| `wf-quality-gate` | Assesses available build, type, lint, test, and security evidence without claiming checks it could not execute |
 | `wf-completion-guard` | Checks that requested work and mandatory verification are complete |
 | `wf-codebase-analyzer` | Extracts repository structure, conventions, and dependencies |
 | `wf-perf-reviewer` | Reviews performance risks and evidence |
@@ -86,12 +86,24 @@ Per-agent frontmatter can be stricter than global OpenCode permissions. In parti
 - Review and exploration agents may be read-only.
 - Implementation and test agents request the filesystem and command access needed by their role.
 - External CLI and worktree actions use separate plugin permission requests.
+- Publication preview and execution remain root-session operations; automatic child agents cannot invoke them.
 
 OpenCode permission decisions remain authoritative; selecting an agent does not bypass them.
+
+### Automatic Child Sessions
+
+`automation.autonomy: interactive` retains a routed agent's effective permissions. `automation.autonomy: bounded` first requires the root agent's routed Task permissions to resolve silently, then builds each child policy over a wildcard deny. Plugin-owned filtered-list, exact-file read, direct-write, and todo tools can be re-enabled from explicit routed-agent rules; built-in discovery, reading, editing, shell, and executable validation remain denied. Explicit path denies remain denies. Grep, LSP, network fetch, external-directory access, global skills, questions, nested Task calls, unsafe delegation, and every unreviewed runtime tool are blocked. Listing and reads filter sensitive/control paths and unknown file types; writes reject listed host-executed controls. The chosen profile is persisted when a workflow starts and remains fixed through resume and restart.
+
+Specialists in a bounded stage must return `blocked` when required authority or executable evidence is unavailable. Blocker text is untrusted status output and must not request secret values, commands, links, permission bypasses, or weaker safeguards. Executable validation requires an attended interactive workflow; bounded mode has no general shell and is not an OS sandbox. See [Autonomous Workflows](./autonomous-workflows.md).
+
+After a terminal automatic workflow, the supervisor may call the guarded-publication tools from the owning root session. It must present the exact preview artifact, must not execute blocked artifacts, and must not retry ambiguous external outcomes. Execution requires custom publication permissions to resolve to `ask`; silent authority is rejected. See [Guarded Publication](./guarded-publication.md).
 
 ## Related Documentation
 
 - [Workflow System](../WORKFLOWS.md)
+- [Autonomous Workflows](./autonomous-workflows.md)
 - [Coding Conventions](./conventions.md)
 - [Review System](./review-system.md)
+- [Validation And Fixed-Point Review](./validation-and-fixed-point-review.md)
+- [Guarded Publication](./guarded-publication.md)
 - [E2E Testing](./e2e-testing.md)

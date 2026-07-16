@@ -8,7 +8,7 @@
   "properties": {
     "status": {
       "type": "string",
-      "enum": ["passed", "failed"]
+      "enum": ["passed", "failed", "blocked"]
     },
     "summary": {
       "type": "string",
@@ -20,11 +20,45 @@
       "maxItems": 100,
       "items": {
         "type": "string",
+        "minLength": 1,
         "maxLength": 4000
       }
     },
     "retryable": {
       "type": "boolean"
+    },
+    "blocker_code": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+    },
+    "required_action": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4000
     }
-  }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "status": { "const": "passed" },
+        "retryable": false,
+        "blocker_code": false,
+        "required_action": false
+      }
+    },
+    {
+      "properties": {
+        "status": { "const": "failed" },
+        "blocker_code": false,
+        "required_action": false
+      }
+    },
+    {
+      "properties": {
+        "status": { "const": "blocked" },
+        "retryable": false
+      },
+      "required": ["required_action"]
+    }
+  ]
 }
