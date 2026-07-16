@@ -33,11 +33,11 @@ jobs:
           cache: npm
       - run: npm ci
       - name: Install trusted Node test fixture
-        run: sudo install -o root -g root -m 0755 "$(command -v node)" /opt/opencode-workflows-test-node
+        run: sudo install -o root -g root -m 0755 "$(command -v node)" /usr/bin/opencode-workflows-test-node
       - name: Verify
         run: npm run verify
         env:
-          OPENCODE_WORKFLOWS_TEST_NODE: /opt/opencode-workflows-test-node
+          OPENCODE_WORKFLOWS_TEST_NODE: /usr/bin/opencode-workflows-test-node
 
   audit:
     name: Production dependency audit
