@@ -307,9 +307,13 @@ describe('installer subprocess', () => {
     assert.match(doctor.stdout, /PASS workflows.json schema/)
     assert.match(doctor.stdout, /SKIP capability background_subagents is disabled/)
 
+    const conventionsPath = path.join(fixture.configDir, 'CONVENTIONS.md')
+    fs.appendFileSync(conventionsPath, '\nLocal conventions remain active.\n')
     const secondInstall = runInstaller(fixture)
     assert.equal(secondInstall.status, 0, secondInstall.stderr || secondInstall.stdout)
     assert.equal(fs.existsSync(`${executorPath}.backup`), false, 'owned files should update without backups')
+    assert.match(fs.readFileSync(conventionsPath, 'utf8'), /Local conventions remain active/)
+    assert.equal(fs.existsSync(`${conventionsPath}.backup`), false, 'modified user guidance should remain active')
     assert.equal(fs.readFileSync(path.join(fixture.configDir, 'opencode.json'), 'utf8'), opencodeConfig)
     assert.equal(fs.readFileSync(path.join(fixture.configDir, 'workflows.json'), 'utf8'), workflowsConfig)
 

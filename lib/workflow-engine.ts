@@ -3,6 +3,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 import type { Message, Part, Session, SessionStatus } from '@opencode-ai/sdk'
+import type { OutputFormat } from '@opencode-ai/sdk/v2'
 
 import type { AutonomyProfile } from './autonomy-policy.ts'
 import {
@@ -128,14 +129,15 @@ export interface WorkflowSessionAdapter {
     parentID?: string,
     options?: { agent?: string; autonomy?: AutonomyProfile },
   ): Promise<Pick<Session, 'id'>>
-  promptAsync(
+  prompt(
     sessionID: string,
     prompt: string,
-    options?: { agent?: string; model?: ModelCandidate },
-  ): Promise<void>
+    options?: { agent?: string; model?: ModelCandidate; format?: OutputFormat },
+  ): Promise<{ info: Message; parts: Part[] }>
   abort(sessionID: string): Promise<void>
   statuses(): Promise<Record<string, SessionStatus>>
   messages(sessionID: string): Promise<Array<{ info: Message; parts: Part[] }>>
+  message(sessionID: string, messageID: string): Promise<{ info: Message; parts: Part[] }>
 }
 
 export interface WorkflowEngineOptions {
@@ -146,6 +148,7 @@ export interface WorkflowEngineOptions {
   modeRouting: Record<string, string>
   modelCandidates: (agent: string, tier: WorkflowModelTier) => ModelCandidate[]
   limits: AutomationLimits
+  validationOperations?: string[]
   state?: AutomaticWorkflowState
   schedulingEnabled?: boolean
   autonomy?: AutonomyProfile
@@ -164,10 +167,106 @@ export interface StartAutomaticWorkflowInput {
 const IDENTIFIER = /^[a-z][a-z0-9_-]{0,63}$/
 const TERMINAL_STAGE_STATUSES = new Set<AutomaticStageStatus>(['passed', 'failed', 'blocked'])
 const TERMINAL_WORKFLOW_STATUSES = new Set<AutomaticWorkflowStatus>(['completed', 'failed', 'cancelled'])
+const DEFINITIVE_REQUEST_REJECTION_STATUSES = new Set([400, 401, 403, 404, 405, 413, 415, 422])
+
+let cachedStageResultOutputFormat: OutputFormat | null = null
+
+function stageResultOutputFormat(): OutputFormat {
+  if (cachedStageResultOutputFormat) return cachedStageResultOutputFormat
+  try {
+    const input = objectValue(
+      JSON.parse(fs.readFileSync(new URL('../schema/stage-result.schema.json', import.meta.url), 'utf8')),
+      'stage result schema',
+    )
+    // Providers enforce the common object shape; status-specific combinations remain
+    // authoritative in validateStageResult because provider schema dialects vary.
+    const { $schema: _schema, $id: _id, title: _title, oneOf: _oneOf, ...schema } = input
+    cachedStageResultOutputFormat = { type: 'json_schema', schema }
+    return cachedStageResultOutputFormat
+  } catch (error) {
+    throw new Error(`cannot load automatic stage result schema: ${errorText(error)}`)
+  }
+}
 
 function objectValue(value: unknown, label: string): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${label} must be an object`)
   return value as Record<string, unknown>
+}
+
+function structuredMessage(input: unknown): Record<string, unknown> | null {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return null
+  const message = input as Record<string, unknown>
+  return message.structured === undefined ? null : message
+}
+
+function completedAssistantErrorMessage(input: unknown): Record<string, unknown> | null {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return null
+  const message = input as Record<string, unknown>
+  const time = message.time
+  return message.role === 'assistant'
+    && message.error !== undefined
+    && Boolean(time && typeof time === 'object' && Number.isInteger((time as { completed?: unknown }).completed))
+    ? message
+    : null
+}
+
+function validateCompletedMessageUsage(message: Record<string, unknown>, sessionId: string): void {
+  if (message.role !== 'assistant') throw new Error('structured completion must be an assistant message')
+  if (nonEmptyString(message.id, 'structured completion message ID', 256).includes(':')) {
+    throw new Error('structured completion message ID must not contain a colon')
+  }
+  if (message.sessionID !== sessionId) throw new Error('structured completion session does not match the active attempt')
+  const tokens = objectValue(message.tokens, 'structured completion tokens')
+  nonNegativeInteger(tokens.input, 'structured completion tokens.input')
+  nonNegativeInteger(tokens.output, 'structured completion tokens.output')
+  nonNegativeInteger(tokens.reasoning, 'structured completion tokens.reasoning')
+  const cache = objectValue(tokens.cache, 'structured completion tokens.cache')
+  nonNegativeInteger(cache.read, 'structured completion tokens.cache.read')
+  nonNegativeInteger(cache.write, 'structured completion tokens.cache.write')
+  if (!Number.isFinite(message.cost) || Number(message.cost) < 0) {
+    throw new Error('structured completion cost must be a non-negative number')
+  }
+}
+
+function validateCompletedAssistant(
+  message: Record<string, unknown>,
+  stage: AutomaticStageState,
+  state: AutomaticWorkflowState,
+  sessionId: string,
+  receivedAt: number,
+  allowError = false,
+): void {
+  validateCompletedMessageUsage(message, sessionId)
+  if (message.agent !== stage.agent) throw new Error('structured completion agent does not match the active attempt')
+  if (!allowError && message.error !== undefined) throw new Error('structured completion contains an assistant error')
+  nonEmptyString(message.mode, 'structured completion mode', 256)
+  nonEmptyString(message.parentID, 'structured completion parent message ID', 256)
+
+  const time = objectValue(message.time, 'structured completion time')
+  const created = nonNegativeInteger(time.created, 'structured completion time.created')
+  const completed = nonNegativeInteger(time.completed, 'structured completion time.completed')
+  const started = stage.started_at ? Date.parse(stage.started_at) : Number.NaN
+  if (!Number.isFinite(started) || created < started || completed < created || completed > receivedAt) {
+    throw new Error('structured completion time is outside the active attempt')
+  }
+
+  const provider = nonEmptyString(message.providerID, 'structured completion provider ID', 256)
+  const model = nonEmptyString(message.modelID, 'structured completion model ID', 512)
+  if (stage.model) {
+    const separator = stage.model.indexOf('/')
+    const expectedProvider = stage.model.slice(0, separator)
+    const expectedModel = stage.model.slice(separator + 1)
+    if (separator <= 0 || provider !== expectedProvider || model !== expectedModel) {
+      throw new Error('structured completion model does not match the active attempt')
+    }
+  }
+  const messagePath = objectValue(message.path, 'structured completion path')
+  if (typeof messagePath.cwd !== 'string' || path.resolve(messagePath.cwd) !== path.resolve(state.directory)) {
+    throw new Error('structured completion path does not match the workflow directory')
+  }
+  if (typeof messagePath.root !== 'string' || path.resolve(messagePath.root) !== path.resolve(state.worktree)) {
+    throw new Error('structured completion root does not match the workflow worktree')
+  }
 }
 
 function nonEmptyString(value: unknown, label: string, maximum = 20_000): string {
@@ -538,6 +637,12 @@ function errorText(error: unknown): string {
   }
 }
 
+function promptHttpStatus(error: unknown): number | null {
+  if (!(error instanceof Error) || !error.cause || typeof error.cause !== 'object') return null
+  const status = (error.cause as { status?: unknown }).status
+  return Number.isInteger(status) && Number(status) >= 100 && Number(status) <= 599 ? Number(status) : null
+}
+
 function eventSessionId(event: unknown): string | null {
   if (!event || typeof event !== 'object') return null
   const input = event as { type?: string; properties?: any }
@@ -558,6 +663,7 @@ export class WorkflowEngine {
   private readonly modeRouting: Record<string, string>
   private readonly modelCandidates: WorkflowEngineOptions['modelCandidates']
   private readonly configuredLimits: AutomationLimits
+  private readonly validationOperations: string[]
   private readonly autonomy: AutonomyProfile
   private readonly now: () => number
   private readonly topologicalOrder: string[]
@@ -566,6 +672,8 @@ export class WorkflowEngine {
   private operation: Promise<void> = Promise.resolve()
   private wallTimer: ReturnType<typeof setTimeout> | null = null
   private wallAbortAttempted = false
+  private readonly directPromptSessions = new Set<string>()
+  private disposed = false
   private readonly boundedIoLedger: BoundedIoLedger
 
   constructor(options: WorkflowEngineOptions) {
@@ -576,6 +684,9 @@ export class WorkflowEngine {
     this.modeRouting = { ...options.modeRouting }
     this.modelCandidates = options.modelCandidates
     this.configuredLimits = validateAutomationLimits(options.limits)
+    this.validationOperations = [...new Set(options.validationOperations ?? [])].map((operation, index) =>
+      identifier(operation, `validation operation ${index}`),
+    ).sort()
     this.now = options.now ?? Date.now
     this.topologicalOrder = topologicalStageIds(this.definition)
     this.schedulingEnabled = options.schedulingEnabled ?? true
@@ -585,6 +696,7 @@ export class WorkflowEngine {
       () => this.requiredState().budget,
       () => this.persist(),
       () => {
+        this.assertNotDisposed()
         if (this.requiredState().status !== 'running') {
           throw new Error('bounded file tools are disabled while the automatic workflow is paused')
         }
@@ -608,6 +720,7 @@ export class WorkflowEngine {
 
   start(input: StartAutomaticWorkflowInput): Promise<AutomaticWorkflowState> {
     return this.serial(async () => {
+      this.assertNotDisposed()
       if (this.state) throw new Error('an automatic workflow already exists in this engine')
       const task = nonEmptyString(input.task.trim(), 'automatic workflow task', 20_000)
       const now = new Date(this.now()).toISOString()
@@ -669,6 +782,7 @@ export class WorkflowEngine {
 
   resume(limits?: AutomationLimits): Promise<AutomaticWorkflowState> {
     return this.serial(async () => {
+      this.assertNotDisposed()
       const state = this.requiredState()
       if (TERMINAL_WORKFLOW_STATUSES.has(state.status)) return cloneState(state)
       if (limits) state.budget.limits = validateAutomationLimits(limits)
@@ -687,6 +801,7 @@ export class WorkflowEngine {
 
   reconcile(): Promise<AutomaticWorkflowState> {
     return this.serial(async () => {
+      this.assertNotDisposed()
       await this.reconcileInternal()
       await this.schedule()
       return cloneState(this.requiredState())
@@ -695,6 +810,7 @@ export class WorkflowEngine {
 
   handleEvent(event: unknown): Promise<void> {
     return this.serial(async () => {
+      if (this.disposed) return
       const state = this.state
       const sessionId = eventSessionId(event)
       if (!state || !sessionId || TERMINAL_WORKFLOW_STATUSES.has(state.status)) return
@@ -703,14 +819,56 @@ export class WorkflowEngine {
       const input = event as { type?: string; properties?: any }
 
       if (input.type === 'message.updated') {
-        if (this.accountMessage(input.properties?.info)) {
+        const message = input.properties?.info
+        const structured = structuredMessage(message)
+        const assistantError = completedAssistantErrorMessage(message)
+        if (structured) {
+          try {
+            validateCompletedMessageUsage(structured, sessionId)
+          } catch (error) {
+            await this.pauseInternal(`Invalid structured completion event: ${errorText(error)}`, false)
+            return
+          }
+        }
+        if (this.accountMessage(message)) {
           this.persist()
-          const reason = this.exceededUsageReason()
-          if (reason) await this.pauseInternal(reason, true)
+        }
+        const reason = this.exceededUsageReason()
+        if (reason) {
+          await this.pauseInternal(reason, true)
+          return
+        }
+        if (assistantError) {
+          try {
+            validateCompletedAssistant(assistantError, stage.state, state, sessionId, this.now(), true)
+          } catch (error) {
+            await this.pauseInternal(`Invalid child-session error envelope: ${errorText(error)}`, false)
+            return
+          }
+          this.directPromptSessions.delete(sessionId)
+          await this.finishAttempt(stage.id, null, `child session failed: ${errorText(assistantError.error)}`)
+          await this.schedule()
+          return
+        }
+        if (structured !== null) {
+          try {
+            validateCompletedAssistant(structured, stage.state, state, sessionId, this.now())
+          } catch (error) {
+            await this.pauseInternal(`Invalid structured completion event: ${errorText(error)}`, false)
+            return
+          }
+          try {
+            this.directPromptSessions.delete(sessionId)
+            await this.finishAttempt(stage.id, validateStageResult(structured.structured))
+          } catch (error) {
+            await this.finishAttempt(stage.id, null, `invalid structured stage result: ${errorText(error)}`)
+          }
+          await this.schedule()
         }
         return
       }
       if (input.type === 'session.error') {
+        this.directPromptSessions.delete(sessionId)
         await this.finishAttempt(stage.id, null, `child session failed: ${errorText(input.properties?.error ?? 'unknown error')}`)
         await this.schedule()
         return
@@ -718,6 +876,7 @@ export class WorkflowEngine {
       const isIdle = input.type === 'session.idle'
         || (input.type === 'session.status' && input.properties?.status?.type === 'idle')
       if (isIdle) {
+        if (this.directPromptSessions.has(sessionId)) return
         await this.completeSession(stage.id, sessionId)
         await this.schedule()
       }
@@ -726,6 +885,7 @@ export class WorkflowEngine {
 
   cancel(): Promise<AutomaticWorkflowState> {
     return this.serial(async () => {
+      this.assertNotDisposed()
       const state = this.requiredState()
       if (TERMINAL_WORKFLOW_STATUSES.has(state.status)) return cloneState(state)
       const running = Object.values(state.stages).filter((stage) => stage.status === 'running' && stage.session_id)
@@ -763,6 +923,7 @@ export class WorkflowEngine {
   }
 
   reserveBoundedIo(kind: BoundedIoKind, requestedBytes?: number): Promise<BoundedIoReservation> {
+    if (this.disposed) return Promise.reject(new Error('automatic workflow engine is disposed'))
     if (this.requiredState().status !== 'running') {
       return Promise.reject(new Error('bounded file access requires a running workflow'))
     }
@@ -771,6 +932,7 @@ export class WorkflowEngine {
 
   consumeValidationRun(sessionId: string): Promise<number> {
     return this.serial(async () => {
+      this.assertNotDisposed()
       const state = this.requiredState()
       if (state.status !== 'running') {
         throw new Error('validation operations require a running workflow')
@@ -789,6 +951,8 @@ export class WorkflowEngine {
   }
 
   dispose(): void {
+    this.disposed = true
+    this.directPromptSessions.clear()
     this.clearWallTimer()
   }
 
@@ -799,6 +963,7 @@ export class WorkflowEngine {
   }
 
   private async schedule(): Promise<void> {
+    if (this.disposed) return
     const state = this.requiredState()
     if (state.status !== 'running') return
     this.applyDependencyBlocks()
@@ -817,7 +982,7 @@ export class WorkflowEngine {
     }
     let available = state.budget.limits.max_parallel_sessions - this.runningCount()
     for (const stageId of this.readyStageIds()) {
-      if (available <= 0 || state.status !== 'running') break
+      if (available <= 0 || state.status !== 'running' || this.disposed) break
       const stage = state.stages[stageId]
       if (stage.attempt >= state.budget.limits.max_attempts_per_stage) {
         await this.pauseInternal(`Attempt budget exhausted for stage ${stageId}`, true)
@@ -829,6 +994,7 @@ export class WorkflowEngine {
         break
       }
       await this.launch(stageId)
+      if (this.disposed) return
       available = state.budget.limits.max_parallel_sessions - this.runningCount()
     }
     this.evaluateTerminalState()
@@ -838,6 +1004,7 @@ export class WorkflowEngine {
   }
 
   private async launch(stageId: string): Promise<void> {
+    if (this.disposed) return
     const state = this.requiredState()
     const stageDefinition = this.definition.stages.find((stage) => stage.id === stageId)!
     const stage = state.stages[stageId]
@@ -848,6 +1015,7 @@ export class WorkflowEngine {
     stage.result = null
     stage.error = null
     state.budget.usage.attempts++
+    state.budget.usage.sessions++
     const candidates = this.modelCandidates(stage.agent, stageDefinition.model_tier)
     const candidate = candidates.length > 0 ? candidates[(stage.attempt - 1) % candidates.length] : undefined
     stage.model = candidate?.model ?? null
@@ -859,25 +1027,89 @@ export class WorkflowEngine {
         state.root_session_id,
         { agent: stage.agent, autonomy: this.autonomy },
       )
+      if (this.disposed) {
+        await this.adapter.abort(session.id).catch(() => undefined)
+        return
+      }
       stage.session_id = session.id
-      state.budget.usage.sessions++
       this.persist()
-      await this.adapter.promptAsync(session.id, this.stagePrompt(stageDefinition), {
+      this.directPromptSessions.add(session.id)
+      void this.adapter.prompt(session.id, this.stagePrompt(stageDefinition), {
         agent: stage.agent,
         ...(candidate ? { model: candidate } : {}),
-      })
+        format: stageResultOutputFormat(),
+      }).then(
+        message => this.serial(async () => {
+          this.directPromptSessions.delete(session.id)
+          if (this.disposed) return
+          await this.completePromptResponse(stageId, session.id, message)
+          await this.schedule()
+        }),
+        error => this.serial(async () => {
+          this.directPromptSessions.delete(session.id)
+          if (this.disposed) return
+          const current = this.requiredState().stages[stageId]
+          if (current.status !== 'running' || current.session_id !== session.id) return
+          const status = promptHttpStatus(error)
+          if (status !== null && DEFINITIVE_REQUEST_REJECTION_STATUSES.has(status)) {
+            try {
+              await this.adapter.abort(session.id)
+            } catch (abortError) {
+              if (this.disposed) return
+              await this.pauseInternal(
+                `Child-session cleanup failed after HTTP ${status} rejection: ${errorText(abortError)}`,
+                false,
+              )
+              return
+            }
+            if (this.disposed) return
+            await this.finishAttempt(stageId, null, `structured prompt rejected with HTTP ${status}: ${errorText(error)}`)
+            await this.schedule()
+            return
+          }
+          await this.pauseInternal(`Child-session structured prompt failed: ${errorText(error)}`, false)
+        }),
+      ).catch(error => this.handleBackgroundFailure(error))
     } catch (error) {
-      if (stage.session_id) await this.adapter.abort(stage.session_id).catch(() => undefined)
+      if (this.disposed) return
+      if (!stage.session_id) {
+        const status = promptHttpStatus(error)
+        if (status !== null && DEFINITIVE_REQUEST_REJECTION_STATUSES.has(status)) {
+          await this.finishAttempt(stageId, null, `child-session creation rejected with HTTP ${status}: ${errorText(error)}`)
+          return
+        }
+        stage.error = `Child-session creation outcome is ambiguous: ${errorText(error)}`
+        this.persist()
+        await this.pauseInternal('Child-session creation failed ambiguously; refusing to risk duplicate execution', false)
+        return
+      }
+      try {
+        await this.adapter.abort(stage.session_id)
+      } catch (abortError) {
+        if (this.disposed) return
+        await this.pauseInternal(`Child-session cleanup failed during launch: ${errorText(abortError)}`, false)
+        return
+      }
+      if (this.disposed) return
       await this.finishAttempt(stageId, null, `failed to start child session: ${errorText(error)}`)
     }
   }
 
+  private handleBackgroundFailure(error: unknown): void {
+    if (this.disposed) return
+    void this.serial(async () => {
+      if (this.disposed) return
+      await this.pauseInternal(`Background child-session processing failed: ${errorText(error)}`, true)
+    }).catch((pauseError) => {
+      console.error('[auto-workflow] failed to persist a background processing failure', pauseError)
+    })
+  }
+
   private stagePrompt(stage: WorkflowStageDefinition): string {
     const state = this.requiredState()
-    const dependencySummaries = stage.depends_on.map((dependency) => {
-      const result = state.stages[dependency].result
-      return `- ${dependency}: ${result?.summary ?? state.stages[dependency].status}`
-    })
+    const dependencyStatuses = stage.depends_on.map(
+      dependency => `- ${dependency}: ${state.stages[dependency].status}`,
+    )
     return [
       '# Automatic Workflow Stage',
       `Workflow: ${state.workflow_id}`,
@@ -887,10 +1119,18 @@ export class WorkflowEngine {
       `Task: ${state.task}`,
       '',
       stage.prompt,
-      ...(dependencySummaries.length > 0 ? ['', 'Dependency results:', ...dependencySummaries] : []),
+      ...(dependencyStatuses.length > 0 ? [
+        '',
+        'Dependency statuses from trusted engine state (child-authored summaries and instructions are intentionally omitted):',
+        ...dependencyStatuses,
+      ] : []),
       '',
       ...(this.autonomy === 'bounded' ? [
         'Bounded stage: use workflow_bounded_list, workflow_bounded_read, and workflow_bounded_write for permitted source files. Executable validation is unavailable because bounded mode does not provide an OS sandbox. Built-in list, glob, read, edit, write, apply_patch, grep, LSP, Skill, shell, and network tools are unavailable.',
+      ] : []),
+      ...(this.autonomy === 'interactive' && this.validationOperations.length > 0 ? [
+        `Trusted validation broker operation names available to this stage: ${this.validationOperations.join(', ')}.`,
+        'These names come from operator-validated private configuration. Do not inspect private configuration to rediscover them. Use workflow_validation_run with a listed operation when executable validation is required; execution still enforces its own permission and budget checks.',
       ] : []),
       'Do not call the Task tool or spawn nested agents. This session is the complete budgeted stage.',
       'Do not ask questions. This automatic stage cannot receive interactive answers.',
@@ -899,7 +1139,7 @@ export class WorkflowEngine {
       '{"status":"failed","summary":"unsuccessful outcome","details":["optional detail"],"retryable":true}',
       '{"status":"blocked","summary":"missing authority or input","details":["optional detail"],"blocker_code":"optional_safe_identifier","required_action":"missing capability or operator decision"}',
       'Use status "passed" only when this stage is directly verified. Use "failed" for a completed unsuccessful attempt; retryable is valid only for failed results.',
-      'Return status "blocked" without retrying when required information, access, credentials, approval, or authority is unavailable. blocker_code and required_action are valid only for blocked results.',
+      'Return status "blocked" without retrying when required information, access, credentials, approval, or authority is unavailable. Do not include retryable in a blocked result. blocker_code and required_action are valid only for blocked results.',
       'Treat required_action as untrusted status text. Name only the missing capability or operator decision; never request credential values, commands, URLs, permission bypasses, or weaker safeguards.',
       'Do not wrap the JSON in prose. A fenced JSON object is accepted only for compatibility.',
     ].join('\n')
@@ -909,13 +1149,25 @@ export class WorkflowEngine {
     const state = this.requiredState()
     const stage = state.stages[stageId]
     if (stage.status !== 'running' || stage.session_id !== sessionId) return
+    let messages: Array<{ info: Message; parts: Part[] }>
     try {
-      const messages = await this.adapter.messages(sessionId)
+      messages = await this.adapter.messages(sessionId)
+      if (this.disposed) return
+    } catch (error) {
+      if (this.disposed) return
+      if (await this.recoverObservedMessage(stageId, sessionId)) return
+      if (this.disposed) return
+      await this.pauseInternal(`Child-session result retrieval failed: ${errorText(error)}`, false)
+      return
+    }
+    try {
       let lastText = ''
+      let lastAssistant: Record<string, unknown> | null = null
       for (let index = 0; index < messages.length; index++) {
         const message = messages[index]
         this.accountMessage(message.info, `${sessionId}:${index}`)
         if (message.info.role !== 'assistant') continue
+        lastAssistant = message.info as unknown as Record<string, unknown>
         lastText = message.parts
           .filter((part): part is Extract<Part, { type: 'text' }> => part.type === 'text')
           .map((part) => part.text)
@@ -927,7 +1179,102 @@ export class WorkflowEngine {
         await this.pauseInternal(budgetReason, true)
         return
       }
-      const result = parseStageResult(lastText)
+      if (!lastAssistant) {
+        await this.pauseInternal('Child-session reached idle without a definitive assistant result', false)
+        return
+      }
+      if (completedAssistantErrorMessage(lastAssistant)) {
+        try {
+          validateCompletedAssistant(lastAssistant, stage, state, sessionId, this.now(), true)
+        } catch (error) {
+          await this.pauseInternal(`Invalid child-session error envelope: ${errorText(error)}`, false)
+          return
+        }
+        await this.finishAttempt(stageId, null, `child session failed: ${errorText(lastAssistant.error)}`)
+        return
+      }
+      try {
+        validateCompletedAssistant(lastAssistant, stage, state, sessionId, this.now())
+      } catch (error) {
+        await this.pauseInternal(`Invalid child-session result envelope: ${errorText(error)}`, false)
+        return
+      }
+      const result = lastAssistant.structured === undefined
+        ? parseStageResult(lastText)
+        : validateStageResult(lastAssistant.structured)
+      await this.finishAttempt(stageId, result)
+    } catch (error) {
+      await this.finishAttempt(stageId, null, `invalid structured stage result: ${errorText(error)}`)
+    }
+  }
+
+  private async recoverObservedMessage(stageId: string, sessionId: string): Promise<boolean> {
+    const prefix = `${sessionId}:`
+    const messageId = Object.keys(this.requiredState().budget.usage.messages)
+      .filter((key) => key.startsWith(prefix))
+      .map((key) => key.slice(prefix.length))
+      .filter((messageId) => messageId.length > 0 && messageId.length <= 256 && !messageId.includes(':'))
+      .at(-1)
+    if (!messageId) return false
+
+    let message: { info: Message; parts: Part[] }
+    try {
+      message = await this.adapter.message(sessionId, messageId)
+    } catch {
+      return false
+    }
+    if (this.disposed) return true
+    const info = message.info as unknown as Record<string, unknown>
+    const time = info.time
+    const isCompleted = info.role === 'assistant'
+      && Boolean(time && typeof time === 'object' && Number.isInteger((time as { completed?: unknown }).completed))
+    if (!isCompleted || (info.structured === undefined && info.error === undefined)) return false
+    if (info.id !== messageId) {
+      await this.pauseInternal('Single-message recovery returned an unexpected message ID', false)
+      return true
+    }
+    await this.completePromptResponse(stageId, sessionId, message)
+    return true
+  }
+
+  private async completePromptResponse(
+    stageId: string,
+    sessionId: string,
+    message: { info: Message; parts: Part[] },
+  ): Promise<void> {
+    const state = this.requiredState()
+    const stage = state.stages[stageId]
+    if (stage.status !== 'running' || stage.session_id !== sessionId) return
+    const info = message.info as unknown as Record<string, unknown>
+    this.accountMessage(message.info, `${sessionId}:response`)
+    this.persist()
+    const budgetReason = this.exceededUsageReason()
+    if (budgetReason) {
+      await this.pauseInternal(budgetReason, true)
+      return
+    }
+    if (completedAssistantErrorMessage(info)) {
+      try {
+        validateCompletedAssistant(info, stage, state, sessionId, this.now(), true)
+      } catch (error) {
+        await this.pauseInternal(`Invalid child-session error envelope: ${errorText(error)}`, false)
+        return
+      }
+      await this.finishAttempt(stageId, null, `child session failed: ${errorText(info.error)}`)
+      return
+    }
+    try {
+      validateCompletedAssistant(info, stage, state, sessionId, this.now())
+    } catch (error) {
+      await this.pauseInternal(`Invalid child-session result envelope: ${errorText(error)}`, false)
+      return
+    }
+    try {
+      const text = message.parts
+        .filter((part): part is Extract<Part, { type: 'text' }> => part.type === 'text')
+        .map((part) => part.text)
+        .join('\n')
+      const result = info.structured === undefined ? parseStageResult(text) : validateStageResult(info.structured)
       await this.finishAttempt(stageId, result)
     } catch (error) {
       await this.finishAttempt(stageId, null, `invalid structured stage result: ${errorText(error)}`)
@@ -980,25 +1327,29 @@ export class WorkflowEngine {
   private async reconcileInternal(): Promise<void> {
     const state = this.requiredState()
     if (TERMINAL_WORKFLOW_STATUSES.has(state.status)) return
-    let recovered = false
     for (const [stageId, stage] of Object.entries(state.stages)) {
       if (stage.status !== 'running' || stage.session_id) continue
-      stage.status = 'pending'
-      stage.error = `Recovered interrupted launch for stage ${stageId}`
-      stage.started_at = null
-      recovered = true
+      stage.error = `Child-session creation outcome is ambiguous for stage ${stageId}`
+      this.persist()
+      await this.pauseInternal(
+        `Stage ${stageId} has no recoverable child-session identity; refusing to risk duplicate execution`,
+        false,
+      )
+      return
     }
-    if (recovered) this.persist()
     const running = Object.entries(state.stages).filter(([, stage]) => stage.status === 'running' && stage.session_id)
     if (running.length === 0) return
     let statuses: Record<string, SessionStatus> = {}
     try {
       statuses = await this.adapter.statuses()
+      if (this.disposed) return
     } catch (error) {
+      if (this.disposed) return
       await this.pauseInternal(`Child-session reconciliation failed: ${errorText(error)}`, false)
       return
     }
     for (const [stageId, stage] of running) {
+      if (this.disposed) return
       if (stage.status !== 'running' || !stage.session_id) continue
       const sessionStatus = statuses[stage.session_id]
       if (sessionStatus?.type === 'busy' || sessionStatus?.type === 'retry') continue
@@ -1015,7 +1366,19 @@ export class WorkflowEngine {
       tokens?: { input?: unknown; output?: unknown; reasoning?: unknown }
     }
     if (message.role !== 'assistant') return false
-    const id = typeof message.id === 'string' ? message.id : fallbackId
+    const messageId = typeof message.id === 'string' ? message.id : null
+    const sessionId = typeof (message as { sessionID?: unknown }).sessionID === 'string'
+      ? (message as { sessionID: string }).sessionID
+      : null
+    const scopedId = messageId && sessionId ? `${sessionId}:${messageId}` : null
+    const stateUsage = this.requiredState().budget.usage
+    let migratedLegacyId = false
+    if (scopedId && messageId && !stateUsage.messages[scopedId] && stateUsage.messages[messageId]) {
+      stateUsage.messages[scopedId] = stateUsage.messages[messageId]
+      delete stateUsage.messages[messageId]
+      migratedLegacyId = true
+    }
+    const id = scopedId ?? fallbackId ?? messageId
     if (!id) return false
     const observed: MessageUsage = {
       input_tokens: Math.floor(Math.max(0, Number.isFinite(message.tokens?.input) ? Number(message.tokens?.input) : 0)),
@@ -1025,7 +1388,7 @@ export class WorkflowEngine {
       )),
       cost_usd: Math.max(0, Number.isFinite(message.cost) ? Number(message.cost) : 0),
     }
-    const stateUsage = this.requiredState().budget.usage
+    const isNewMessage = !Object.hasOwn(stateUsage.messages, id)
     const previous = stateUsage.messages[id] ?? { input_tokens: 0, output_tokens: 0, cost_usd: 0 }
     const usage: MessageUsage = {
       input_tokens: Math.max(previous.input_tokens, observed.input_tokens),
@@ -1036,7 +1399,9 @@ export class WorkflowEngine {
     stateUsage.output_tokens += usage.output_tokens - previous.output_tokens
     stateUsage.cost_usd += usage.cost_usd - previous.cost_usd
     stateUsage.messages[id] = usage
-    return usage.input_tokens !== previous.input_tokens
+    return migratedLegacyId
+      || isNewMessage
+      || usage.input_tokens !== previous.input_tokens
       || usage.output_tokens !== previous.output_tokens
       || usage.cost_usd !== previous.cost_usd
   }
@@ -1140,6 +1505,7 @@ export class WorkflowEngine {
   }
 
   private async pauseInternal(reason: string, abortRunning: boolean): Promise<void> {
+    if (this.disposed) return
     const state = this.requiredState()
     if (TERMINAL_WORKFLOW_STATUSES.has(state.status)) return
     const runningSessions: Array<{ stage: AutomaticStageState; sessionId: string }> = []
@@ -1169,6 +1535,7 @@ export class WorkflowEngine {
         return { stage, sessionId, error }
       }
     }))
+    if (this.disposed) return
     for (const result of results) {
       if (result.stage.status !== 'running' || result.stage.session_id !== result.sessionId) continue
       if (result.error) {
@@ -1203,11 +1570,13 @@ export class WorkflowEngine {
   }
 
   private persistDefinition(): void {
+    if (this.disposed) return
     fs.mkdirSync(path.dirname(this.definitionPath), { recursive: true, mode: 0o700 })
     this.atomicWrite(this.definitionPath, this.definition)
   }
 
   private persist(): void {
+    if (this.disposed) return
     const state = this.requiredState()
     state.updated_at = new Date(this.now()).toISOString()
     validateAutomaticWorkflowState(state)
@@ -1225,6 +1594,10 @@ export class WorkflowEngine {
       try { fs.unlinkSync(temporary) } catch {}
       throw error
     }
+  }
+
+  private assertNotDisposed(): void {
+    if (this.disposed) throw new Error('automatic workflow engine is disposed')
   }
 
   private assertStateStages(): void {

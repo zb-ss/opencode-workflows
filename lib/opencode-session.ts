@@ -1,5 +1,9 @@
 import type { Message, OpencodeClient, Part, Session, SessionStatus } from '@opencode-ai/sdk'
-import type { Agent as V2Agent, OpencodeClient as V2OpencodeClient } from '@opencode-ai/sdk/v2'
+import type {
+  Agent as V2Agent,
+  OpencodeClient as V2OpencodeClient,
+  OutputFormat,
+} from '@opencode-ai/sdk/v2'
 import {
   evaluatePermissionRules,
   parsePermissionRules,
@@ -16,6 +20,7 @@ export interface ModelSelection {
 export interface SessionPromptOptions {
   agent?: string
   model?: ModelSelection
+  format?: OutputFormat
 }
 
 export interface SessionCreateOptions {
@@ -194,11 +199,33 @@ export class OpenCodeSessionAdapter {
         ...(model ? { model } : {}),
         ...(options.model?.variant ? { variant: options.model.variant } : {}),
         ...(options.agent ? { agent: options.agent } : {}),
+        ...(options.format ? { format: options.format } : {}),
         parts: [{ type: 'text', text: prompt }],
       },
       throwOnError: true,
     })
     unwrapSdkResult<void>(result, 'session.promptAsync', true)
+  }
+
+  async prompt(
+    sessionID: string,
+    prompt: string,
+    options: SessionPromptOptions = {},
+  ): Promise<{ info: Message; parts: Part[] }> {
+    const model = options.model ? parseModel(options.model) : undefined
+    const result = await this.client.session.prompt({
+      path: { id: sessionID },
+      query: { directory: this.directory },
+      body: {
+        ...(model ? { model } : {}),
+        ...(options.model?.variant ? { variant: options.model.variant } : {}),
+        ...(options.agent ? { agent: options.agent } : {}),
+        ...(options.format ? { format: options.format } : {}),
+        parts: [{ type: 'text', text: prompt }],
+      },
+      throwOnError: true,
+    } as any)
+    return unwrapSdkResult<{ info: Message; parts: Part[] }>(result, 'session.prompt')
   }
 
   async abort(sessionID: string): Promise<void> {
@@ -225,6 +252,15 @@ export class OpenCodeSessionAdapter {
       throwOnError: true,
     })
     return unwrapSdkResult<Array<{ info: Message; parts: Part[] }>>(result, 'session.messages')
+  }
+
+  async message(sessionID: string, messageID: string): Promise<{ info: Message; parts: Part[] }> {
+    const result = await this.client.session.message({
+      path: { id: sessionID, messageID },
+      query: { directory: this.directory },
+      throwOnError: true,
+    })
+    return unwrapSdkResult<{ info: Message; parts: Part[] }>(result, 'session.message')
   }
 
   async lastAssistantText(sessionID: string, maximumBytes = Number.MAX_SAFE_INTEGER): Promise<string> {

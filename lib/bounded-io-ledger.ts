@@ -62,6 +62,7 @@ export class BoundedIoLedger {
 
   private adjust(active: ActiveReservation, bytes: number): Promise<void> {
     return this.serialize(async () => {
+      this.assertReservable()
       if (!Number.isInteger(bytes) || bytes < 0) throw new Error('bounded I/O adjustment must be a non-negative integer')
       const current = this.active(active)
       const budget = this.budget()
@@ -78,6 +79,7 @@ export class BoundedIoLedger {
 
   private cancel(active: ActiveReservation): Promise<void> {
     return this.serialize(async () => {
+      this.assertReservable()
       const current = this.reservations.get(active.id)
       if (!current || current.closed) return
       const budget = this.budget()
@@ -91,6 +93,7 @@ export class BoundedIoLedger {
 
   private commit(active: ActiveReservation): Promise<void> {
     return this.serialize(async () => {
+      this.assertReservable()
       const current = this.reservations.get(active.id)
       if (!current || current.closed) return
       current.closed = true

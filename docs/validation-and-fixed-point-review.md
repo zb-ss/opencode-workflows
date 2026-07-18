@@ -32,6 +32,7 @@ The broker:
 - Removes relative, missing, worktree-contained, group/world-writable, and foreign-owned entries from the child `PATH`, and passes only that sanitized path plus explicitly allowlisted environment-variable names. The canonical configured executable and its path components must likewise be root-owned or owned by the OpenCode process user without group/world write bits. `PATH` is child-process context, not executable selection authority.
 - Opens the configured working directory after permission with no symbolic-link following, verifies its canonical worktree location, and keeps that descriptor anchored through process creation.
 - Requires explicit `workflow_validation_run` authority from a routed interactive agent. Bounded stages cannot invoke executable validation because the broker does not provide an operating-system sandbox.
+- Tells interactive automatic stages only the configured operation names through their trusted stage prompt, so agents do not need access to private configuration. Command arguments, paths, and environment policy remain private and execution still performs its own permission and budget checks.
 - Enforces a persisted per-workflow run count before spawning the process.
 - Rechecks cancellation after run-budget consumption; cancellation in that window is audited and returned without spawning a process.
 - Kills the POSIX process group on timeout or caller cancellation. The broker fails closed on Windows because descendant termination cannot be guaranteed there.

@@ -165,7 +165,7 @@ These commands update only `automation.autonomy` in an existing `workflows.json`
 /workflow-auto-resume
 ```
 
-Before enabling automation, configure child-session, parallel-session, attempt, wall-time, input-token, output-token, bounded-read-byte, bounded-write-byte, and cost budgets in `workflows.json`. `max_cost_usd` may be `null`; the field is still required. Bounded file I/O atomically reserves complete serialized read/list responses against `max_bounded_read_bytes` and written UTF-8 content against `max_bounded_write_bytes`, independently of normal model-token accounting. Each bounded byte limit is capped at 16 MiB.
+Before enabling automation, configure child-session, parallel-session, attempt, wall-time, input-token, output-token, bounded-read-byte, bounded-write-byte, and cost budgets in `workflows.json`. `max_cost_usd` may be `null`; the field is still required. Input and output limits are cumulative workflow usage across every model turn and retry; they are not model context-window limits. A model with a 1M-token context can therefore consume more than 1M input tokens over a multi-stage workflow as its context is billed again on later turns. Bounded file I/O atomically reserves complete serialized read/list responses against `max_bounded_read_bytes` and written UTF-8 content against `max_bounded_write_bytes`, independently of normal model-token accounting. Each bounded byte limit is capped at 16 MiB.
 
 `workflows.json.template` includes a complete inactive `_example_automation` object. Replace the active `automation` object with reviewed values from that example rather than enabling automation with missing limits. The numbers are illustrative safety budgets, not defaults selected for a repository or provider account.
 
