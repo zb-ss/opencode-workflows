@@ -6,6 +6,9 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { MAX_BOUNDED_IO_BYTES } from './lib/workflow-limits.mjs'
+
+export { MAX_BOUNDED_IO_BYTES }
 
 const REPO_ROOT = path.dirname(fileURLToPath(import.meta.url))
 const PACKAGE_DATA = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8'))
@@ -16,7 +19,6 @@ const ENV_FILE_NAME = 'opencode-workflows.env'
 const MODEL_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*\/\S+$/
 const VARIANT_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
 const AUTONOMY_PROFILES = new Set(['interactive', 'bounded'])
-export const MAX_BOUNDED_IO_BYTES = 16 * 1024 * 1024
 const CAPABILITY_ENVIRONMENT = {
   background_subagents: 'OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS',
   native_workspaces: 'OPENCODE_EXPERIMENTAL_WORKSPACES',

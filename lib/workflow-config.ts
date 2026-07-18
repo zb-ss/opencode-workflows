@@ -9,6 +9,10 @@ import {
 } from './model-registry.ts'
 import { getConfigDir } from './paths.ts'
 import {
+  MAX_BOUNDED_IO_BYTES,
+  MAX_VALIDATION_RUNS_PER_WORKFLOW,
+} from './workflow-limits.mjs'
+import {
   MAX_PUBLICATION_MARKER_LITERAL_LENGTH as MARKER_LITERAL_LENGTH_LIMIT,
   publicationMarkerIssues,
 } from './publication-marker-policy.mjs'
@@ -33,10 +37,9 @@ const VARIANT_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
 export const SAFE_IDENTIFIER_SOURCE = '^[A-Za-z0-9][A-Za-z0-9._-]*$'
 export const SAFE_IDENTIFIER_PATTERN = new RegExp(SAFE_IDENTIFIER_SOURCE)
 export const MAX_SAFE_IDENTIFIER_LENGTH = 64
-export const MAX_BOUNDED_IO_BYTES = 16 * 1024 * 1024
 export const MAX_VALIDATION_TIMEOUT_MS = 60 * 60 * 1000
 export const MAX_VALIDATION_OUTPUT_BYTES = 16 * 1024 * 1024
-export const MAX_VALIDATION_RUNS_PER_WORKFLOW = 100
+export { MAX_BOUNDED_IO_BYTES, MAX_VALIDATION_RUNS_PER_WORKFLOW }
 export const MAX_VALIDATION_STRING_LENGTH = 1024
 export const MAX_REVIEW_ITERATIONS = 10
 export const MAX_REVIEW_RESULT_BYTES = 1024 * 1024

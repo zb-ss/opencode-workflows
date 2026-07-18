@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://opencode-workflows.example/schema/retry-policy.schema.json",
+  "title": "Automation Retry Policy",
+  "description": "Additive future retry contract; it does not alter current workflow-engine behavior.",
+  "$comment": "The semantic invariant initial_delay_ms <= maximum_delay_ms and resolved retry values against deployment-provided safety ceilings are intentionally checked at runtime, because standard JSON Schema cannot express those cross-property numeric comparisons.",
+  "type": "object",
+  "properties": {
+    "max_semantic_attempts": { "type": "integer", "exclusiveMinimum": 0, "maximum": 9007199254740991 },
+    "max_contract_attempts": { "type": "integer", "exclusiveMinimum": 0, "maximum": 9007199254740991 },
+    "max_transport_attempts": { "type": "integer", "exclusiveMinimum": 0, "maximum": 9007199254740991 },
+    "max_no_progress_attempts": {
+      "type": "integer",
+      "exclusiveMinimum": 0,
+      "maximum": 9007199254740991,
+      "description": "Consecutive attempts permitted without progress before retries stop, independently of failure class."
+    },
+    "transport_backoff": {
+      "type": "object",
+      "description": "Transport-only exponential backoff. Runtime validation additionally requires initial_delay_ms <= maximum_delay_ms.",
+      "properties": {
+        "strategy": { "type": "string", "const": "exponential" },
+        "initial_delay_ms": { "type": "integer", "exclusiveMinimum": 0, "maximum": 9007199254740991 },
+        "maximum_delay_ms": { "type": "integer", "exclusiveMinimum": 0, "maximum": 9007199254740991 },
+        "multiplier": { "type": "number", "exclusiveMinimum": 1, "maximum": 9007199254740991 }
+      },
+      "required": ["strategy", "initial_delay_ms", "maximum_delay_ms", "multiplier"],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "max_semantic_attempts",
+    "max_contract_attempts",
+    "max_transport_attempts",
+    "max_no_progress_attempts",
+    "transport_backoff"
+  ],
+  "additionalProperties": false
+}
