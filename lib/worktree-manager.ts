@@ -15,7 +15,7 @@ const WORKTREE_DIRECTORY = 'worktrees'
 const WORKTREE_PREFIX = 'delegate-'
 const BRANCH_PREFIX = 'delegate'
 const SLUG_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?$/
-const WORKTREE_NAME_PATTERN = /^delegate-[a-f0-9]{24}$/
+const WORKTREE_NAME_PATTERN = /^(?:delegate|epic)-[a-f0-9]{24}$/
 
 export interface MergeWorktreeOptions {
   allowNoop?: boolean
@@ -23,6 +23,22 @@ export interface MergeWorktreeOptions {
 
 export interface RemoveWorktreeOptions {
   force?: boolean
+}
+
+export interface ManagedWorktreeSnapshot {
+  name: string
+  path: string
+  branch: string
+  head_commit: string
+  directory_dev: string
+  directory_ino: string
+  git_common_directory: string
+  git_common_directory_dev: string
+  git_common_directory_ino: string
+  changed_files: string[]
+  diff_stat: string
+  has_changes: boolean
+  has_conflicts: boolean
 }
 
 // ---------------------------------------------------------------------------
@@ -53,6 +69,19 @@ function gitSucceeds(args: string[], cwd: string): boolean {
   })
 
   return !result.error && result.status === 0
+}
+
+function resolveGitPath(cwd: string, gitPath: string): string {
+  return fs.realpathSync(path.isAbsolute(gitPath) ? gitPath : path.resolve(cwd, gitPath))
+}
+
+function directoryIdentity(directory: string, label: string): { dev: string; ino: string } {
+  const stat = fs.statSync(directory, { bigint: true })
+  if (!stat.isDirectory()) throw new Error(`${label} is not a directory`)
+  if (typeof process.getuid === 'function' && Number(stat.uid) !== process.getuid()) {
+    throw new Error(`${label} is owned by another user`)
+  }
+  return { dev: stat.dev.toString(), ino: stat.ino.toString() }
 }
 
 function resolveProjectRoot(projectRoot: string): string {
@@ -155,7 +184,8 @@ function resolveManagedWorktree(projectRoot: string, worktreePath: string): stri
 
 function readWorktreeBranch(worktreePath: string): string {
   try {
-    return git(['symbolic-ref', '--quiet', '--short', 'HEAD'], worktreePath)
+    const fullRef = git(['symbolic-ref', '--quiet', 'HEAD'], worktreePath)
+    return fullRef.startsWith('refs/heads/') ? fullRef.slice('refs/heads/'.length) : ''
   } catch {
     return ''
   }
@@ -257,6 +287,127 @@ export function getWorktreeDir(projectRoot: string): string {
   const worktreeDirectory = resolveWorktreeDirectory(realProjectRoot, true)
   if (!worktreeDirectory) throw new Error('failed to create worktree directory')
   return worktreeDirectory
+}
+
+/** Create an isolated worktree with caller-derived, prevalidated identity. */
+export function createManagedWorktree(
+  projectRoot: string,
+  baseBranch: string,
+  branchName: string,
+  worktreeName: string,
+): ManagedWorktreeSnapshot {
+  const realProjectRoot = resolveProjectRoot(projectRoot)
+  validateLocalBranch(realProjectRoot, baseBranch, 'base branch')
+  validateRefSyntax(realProjectRoot, branchName, 'managed branch')
+  if (!WORKTREE_NAME_PATTERN.test(worktreeName)) throw new Error('managed worktree name is invalid')
+
+  const worktreePath = path.join(getWorktreeDir(realProjectRoot), worktreeName)
+  if (fs.existsSync(worktreePath)) throw new Error(`worktree path already exists: ${worktreePath}`)
+  git(['worktree', 'add', '-b', branchName, worktreePath, baseBranch], realProjectRoot)
+  try {
+    return inspectManagedWorktree(realProjectRoot, worktreePath, worktreeName, branchName)
+  } catch (error) {
+    try {
+      git(['worktree', 'remove', '--force', worktreePath], realProjectRoot)
+    } catch {
+      // Best-effort rollback retains the original inspection failure.
+    }
+    try {
+      git(['branch', '-D', branchName], realProjectRoot)
+    } catch {
+      // Best-effort rollback retains the original inspection failure.
+    }
+    throw error
+  }
+}
+
+/** Revalidate exact path, branch, HEAD, ownership, inode, status, and common Git directory. */
+export function inspectManagedWorktree(
+  projectRoot: string,
+  worktreePath: string,
+  expectedName: string,
+  expectedBranch: string,
+): ManagedWorktreeSnapshot {
+  const realProjectRoot = resolveProjectRoot(projectRoot)
+  if (!WORKTREE_NAME_PATTERN.test(expectedName)) throw new Error('managed worktree name is invalid')
+  validateRefSyntax(realProjectRoot, expectedBranch, 'managed branch')
+  const realWorktreePath = resolveManagedWorktree(realProjectRoot, worktreePath)
+  if (path.basename(realWorktreePath) !== expectedName) throw new Error('managed worktree name does not match expected identity')
+  const branch = readWorktreeBranch(realWorktreePath)
+  if (branch !== expectedBranch) throw new Error('managed worktree branch does not match expected identity')
+  validateLocalBranch(realProjectRoot, branch, 'managed branch')
+
+  const headCommit = git(['rev-parse', '--verify', 'HEAD^{commit}'], realWorktreePath)
+  const branchCommit = git(['rev-parse', '--verify', `refs/heads/${branch}^{commit}`], realProjectRoot)
+  if (headCommit !== branchCommit) throw new Error('managed worktree HEAD does not match its branch ref')
+
+  const projectCommonDirectory = resolveGitPath(realProjectRoot, git(['rev-parse', '--git-common-dir'], realProjectRoot))
+  const worktreeCommonDirectory = resolveGitPath(realWorktreePath, git(['rev-parse', '--git-common-dir'], realWorktreePath))
+  if (projectCommonDirectory !== worktreeCommonDirectory) throw new Error('managed worktree belongs to a different Git common directory')
+
+  const worktreeIdentity = directoryIdentity(realWorktreePath, 'managed worktree')
+  const commonIdentity = directoryIdentity(worktreeCommonDirectory, 'Git common directory')
+  const status = readStatus(realWorktreePath)
+  const hasConflicts = gitRaw(['diff', '--name-only', '--diff-filter=U', '-z'], realWorktreePath)
+    .split('\0')
+    .some(Boolean)
+  return {
+    name: expectedName,
+    path: realWorktreePath,
+    branch,
+    head_commit: headCommit,
+    directory_dev: worktreeIdentity.dev,
+    directory_ino: worktreeIdentity.ino,
+    git_common_directory: worktreeCommonDirectory,
+    git_common_directory_dev: commonIdentity.dev,
+    git_common_directory_ino: commonIdentity.ino,
+    changed_files: status.changed_files,
+    diff_stat: status.diff_stat,
+    has_changes: status.has_changes,
+    has_conflicts: hasConflicts,
+  }
+}
+
+/** Remove an exact clean managed worktree after its caller proves retention policy permits cleanup. */
+export function removeManagedWorktree(
+  projectRoot: string,
+  worktreePath: string,
+  expectedName: string,
+  expectedBranch: string,
+): void {
+  const snapshot = inspectManagedWorktree(projectRoot, worktreePath, expectedName, expectedBranch)
+  if (snapshot.has_changes || snapshot.has_conflicts) throw new Error('managed worktree with retained changes or conflicts cannot be removed')
+  const realProjectRoot = resolveProjectRoot(projectRoot)
+  git(['worktree', 'remove', snapshot.path], realProjectRoot)
+  git(['branch', '-D', snapshot.branch], realProjectRoot)
+}
+
+/** Check exact object IDs without accepting revision-expression syntax. */
+export function managedCommitIsAncestor(projectRoot: string, ancestorCommit: string, descendantCommit: string): boolean {
+  const oidPattern = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/
+  if (!oidPattern.test(ancestorCommit) || !oidPattern.test(descendantCommit)) return false
+  const realProjectRoot = resolveProjectRoot(projectRoot)
+  if (!gitSucceeds(['cat-file', '-e', `${ancestorCommit}^{commit}`], realProjectRoot)
+    || !gitSucceeds(['cat-file', '-e', `${descendantCommit}^{commit}`], realProjectRoot)) return false
+  return gitSucceeds(['merge-base', '--is-ancestor', ancestorCommit, descendantCommit], realProjectRoot)
+}
+
+/** Require integration evidence to remain reachable outside the attempt branch. */
+export function managedCommitIsRetainedByAnotherBranch(
+  projectRoot: string,
+  commit: string,
+  excludedBranch: string,
+): boolean {
+  const oidPattern = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/
+  if (!oidPattern.test(commit)) return false
+  const realProjectRoot = resolveProjectRoot(projectRoot)
+  validateRefSyntax(realProjectRoot, excludedBranch, 'excluded managed branch')
+  if (!gitSucceeds(['cat-file', '-e', `${commit}^{commit}`], realProjectRoot)) return false
+  const containingBranches = gitRaw(
+    ['for-each-ref', '--format=%(refname)', `--contains=${commit}`, 'refs/heads'],
+    realProjectRoot,
+  ).split('\n').filter(Boolean)
+  return containingBranches.some(branch => branch !== `refs/heads/${excludedBranch}`)
 }
 
 /**
@@ -428,7 +579,7 @@ export function mergeWorktree(
     realWorktreePath = resolveManagedWorktree(realProjectRoot, worktreePath)
     branch = assertManagedBranch(realProjectRoot, realWorktreePath)
 
-    const checkedOutBranch = git(['symbolic-ref', '--quiet', '--short', 'HEAD'], realProjectRoot)
+    const checkedOutBranch = readWorktreeBranch(realProjectRoot)
     if (checkedOutBranch !== targetBranch) {
       throw new Error(`target branch ${targetBranch} is not checked out in the target worktree`)
     }
