@@ -21,6 +21,12 @@ import {
   enabledPublication,
   modelCandidatesForAgent,
 } from '../../lib/workflow-config.ts'
+import {
+  MAX_ATTEMPTS_PER_ITEM,
+  MAX_EPIC_BUDGET_RECORDS,
+  MAX_EPIC_ITEMS,
+  MAX_ITEM_DEPENDENCIES,
+} from '../../lib/epic-policy.ts'
 
 function publicationTarget() {
   return {
@@ -95,6 +101,56 @@ function workflowSchemaInput(publication: unknown) {
 }
 
 describe('workflow config', () => {
+  it('defaults omitted epic configuration to disabled and preserves complete enabled limits', () => {
+    assert.deepEqual(WorkflowConfigSchema.parse({}).epic, { enabled: false })
+    const epic = {
+      enabled: true as const,
+      max_epic_items: 12,
+      max_item_dependencies: 4,
+      max_attempts_per_item: 3,
+      max_budget_records: 24,
+    }
+    assert.deepEqual(WorkflowConfigSchema.parse({ epic }).epic, epic)
+  })
+
+  it('requires complete enabled epic limits and rejects unknown fields or protocol ceiling violations', () => {
+    const valid = {
+      enabled: true,
+      max_epic_items: MAX_EPIC_ITEMS,
+      max_item_dependencies: MAX_ITEM_DEPENDENCIES,
+      max_attempts_per_item: MAX_ATTEMPTS_PER_ITEM,
+      max_budget_records: MAX_EPIC_BUDGET_RECORDS,
+    }
+    for (const field of ['max_epic_items', 'max_item_dependencies', 'max_attempts_per_item', 'max_budget_records'] as const) {
+      const incomplete: Record<string, unknown> = { ...valid }
+      delete incomplete[field]
+      assert.equal(WorkflowConfigSchema.safeParse({ epic: incomplete }).success, false)
+    }
+    assert.equal(WorkflowConfigSchema.safeParse({ epic: { enabled: false, max_epic_items: 1 } }).success, false)
+    assert.equal(WorkflowConfigSchema.safeParse({ epic: { ...valid, max_epic_items: MAX_EPIC_ITEMS + 1 } }).success, false)
+    assert.equal(WorkflowConfigSchema.safeParse({ epic: { ...valid, model: 'provider/model' } }).success, false)
+  })
+
+  it('keeps epic workflow JSON Schema parity for disabled and enabled candidates', () => {
+    const public_schema = JSON.parse(fs.readFileSync(path.resolve('schema/workflows.schema.json'), 'utf8'))
+    const AjvConstructor = Ajv2020 as unknown as new (options: object) => { compile(schema: object): (input: unknown) => boolean }
+    const validate = new AjvConstructor({ strict: true, strictRequired: false, strictTuples: false }).compile(public_schema)
+    const candidates = [
+      undefined,
+      { enabled: false },
+      { enabled: false, max_epic_items: 2 },
+      { enabled: true, max_epic_items: 12, max_item_dependencies: 4, max_attempts_per_item: 3, max_budget_records: 24 },
+      { enabled: true, max_epic_items: 12 },
+      { enabled: true, max_epic_items: 257, max_item_dependencies: 4, max_attempts_per_item: 3, max_budget_records: 24 },
+      { enabled: false, unknown: true },
+    ]
+    for (const epic of candidates) {
+      const input = workflowSchemaInput({ enabled: false, internal_markers: [], targets: {} }) as Record<string, unknown>
+      if (epic !== undefined) input.epic = epic
+      assert.equal(validate(input), WorkflowConfigSchema.safeParse(input).success, JSON.stringify(epic))
+    }
+  })
+
   it('defaults autonomy to interactive when it is omitted', () => {
     assert.equal(WorkflowConfigSchema.parse({ automation: { enabled: false } }).automation.autonomy, 'interactive')
     assert.equal(WorkflowConfigSchema.parse({}).automation.autonomy, 'interactive')

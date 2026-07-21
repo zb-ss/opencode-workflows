@@ -63,6 +63,32 @@ afterEach(() => {
 })
 
 describe('configuration validator semantics', () => {
+  it('accepts disabled epic configuration and requires complete strict enabled limits', () => {
+    const disabled = templateConfig()
+    assert.deepEqual(disabled.epic, { enabled: false })
+    assert.doesNotThrow(() => validateFile(writeConfig(disabled), path.resolve('schema/workflows.schema.json')))
+
+    const enabled = templateConfig()
+    enabled.epic = {
+      enabled: true,
+      max_epic_items: 12,
+      max_item_dependencies: 4,
+      max_attempts_per_item: 3,
+      max_budget_records: 24,
+    }
+    assert.doesNotThrow(() => validateFile(writeConfig(enabled), path.resolve('schema/workflows.schema.json')))
+
+    for (const epic of [
+      { enabled: true },
+      { ...enabled.epic, max_epic_items: 257 },
+      { ...enabled.epic, unknown: true },
+    ]) {
+      const invalid = templateConfig()
+      invalid.epic = epic
+      assert.throws(() => validateFile(writeConfig(invalid), path.resolve('schema/workflows.schema.json')), /workflows\.json is invalid/)
+    }
+  })
+
   it('rejects duplicate fixed-point reviewer IDs before runtime loading', () => {
     const source = templateConfig()
     source.review_loop = {

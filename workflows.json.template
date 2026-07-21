@@ -22,7 +22,7 @@
 
   "default_mode": "standard",
 
-  "_comment_automation": "Automatic workflow driving is opt-in. Autonomy configures automatic-stage permission handling only and does not enable automation. Limits are optional and should be configured before enabling automation.",
+  "_comment_automation": "Automatic workflow driving is opt-in. Autonomy configures automatic-stage permission handling only and does not enable automation. Token limits are cumulative workflow usage across every model turn, not per-request context-window limits. The inactive values below illustrate a large seven-stage workflow and must be reviewed for the selected models and provider account.",
   "_example_automation": {
     "enabled": true,
     "autonomy": "bounded",
@@ -30,8 +30,8 @@
     "max_sessions": 12,
     "max_attempts_per_stage": 3,
     "max_wall_time_ms": 3600000,
-    "max_input_tokens": 200000,
-    "max_output_tokens": 100000,
+    "max_input_tokens": 5000000,
+    "max_output_tokens": 500000,
     "max_bounded_read_bytes": 16777216,
     "max_bounded_write_bytes": 16777216,
     "max_cost_usd": null
@@ -39,6 +39,18 @@
   "automation": {
     "enabled": false,
     "autonomy": "interactive"
+  },
+
+  "_comment_epic": "Epic worktree orchestration is opt-in and disabled by default. Enabling requires explicit operator-selected operational limits; the protocol ceilings are not enabled defaults.",
+  "_example_epic": {
+    "enabled": true,
+    "max_epic_items": 24,
+    "max_item_dependencies": 8,
+    "max_attempts_per_item": 4,
+    "max_budget_records": 128
+  },
+  "epic": {
+    "enabled": false
   },
 
   "_comment_validation_broker": "Optional named validation operations for attended interactive automatic stages. Bounded autonomy rejects executable validation because it is not OS-sandboxed. argv[0] is an operator-configured absolute executable path; commands are fixed argv arrays, never shell text. Configure explicit limits before enabling.",

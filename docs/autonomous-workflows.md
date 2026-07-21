@@ -2,6 +2,8 @@
 
 Phase 1 adds bounded, session-owned execution to the existing declarative `development` and `e2e` DAGs. Phase 2 adds configured validation operations for attended interactive stages and structured fixed-point swarm review. Phase 3 adds post-completion guarded publication with immutable previews, complete-history scrub, pinned targets, and separate external-effect approval. Together they provide deterministic scheduling, explicit budgets, structured results, persistence, cancellation, bounded review/correction cycles, and attended publication. They do not provide full unattended software delivery.
 
+Automatic stages dispatch native JSON Schema prompts through OpenCode's response-bearing session endpoint. The engine tracks each request in the background so independent ready stages remain parallel, ignores premature idle events while that response is in flight, and serializes the eventual response against event-driven completion. Completed assistant errors are definitive failed attempts. If session-wide message retrieval fails during restart reconciliation, the engine may fetch only the newest message ID already observed and persisted for that exact child session, and accepts it only when it now contains completed structured output or a completed assistant error. Any retrieval or finality uncertainty pauses without releasing ownership. An ambiguous request failure pauses with the stage still owned rather than risking a duplicate model run.
+
 ## Autonomy Profiles
 
 Set `automation.autonomy` in `workflows.json` to one of the following. `interactive` is the default:
@@ -53,6 +55,8 @@ Choose limits for the repository and provider account; the installer does not ch
 ```text
 /workflow-auto development Implement the requested change --mode=standard
 ```
+
+Input and output limits account for cumulative usage across all workflow stages, model turns, and retries. They are separate from a model's per-request context window: repeated tool turns can bill the same growing context again, so a workflow using a 1M-context model may require a cumulative input budget greater than 1M. Child-session capacity is reserved and persisted before each create request; an interrupted or ambiguous create conservatively retains that reservation and remains paused across restart because no child identity exists to reconcile safely. Cancel that workflow rather than resuming it into possible duplicate execution. Size the envelope for the stage count and retry policy, then use persisted usage and pause reasons to tune later runs rather than treating the inactive template values as universal defaults.
 
 Bounded file I/O is cumulatively and atomically accounted in workflow state. Complete serialized read and filtered-list responses use `max_bounded_read_bytes`; written UTF-8 content uses `max_bounded_write_bytes`. Each configured limit is capped at 16 MiB. These byte limits are independent of normal model-token accounting.
 

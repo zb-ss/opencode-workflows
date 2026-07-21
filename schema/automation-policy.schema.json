@@ -1,0 +1,217 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://opencode-workflows.example/schema/automation-policy.schema.json",
+  "title": "Automation Policy Input",
+  "description": "Structural additive future optional workflow policy/config input contract. Deployment-resolved safety authority is intentionally excluded. It does not alter current live configuration or workflow-engine behavior.",
+  "$comment": "JSON Schema preserves structural parity. Authoritative runtime schemas layer cross-property semantic checks such as retry delay ordering and resolved retry values against trusted deployment safety ceilings.",
+  "type": "object",
+  "properties": {
+    "accounting": { "$ref": "#/$defs/accounting", "default": { "mode": "telemetry_only" } },
+    "budgets": { "$ref": "#/$defs/budgets" },
+    "retry_policy": { "$ref": "https://opencode-workflows.example/schema/retry-policy.schema.json" }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "accounting": {
+      "type": "object",
+      "properties": {
+        "mode": { "type": "string", "enum": ["telemetry_only", "metered"] }
+      },
+      "required": ["mode"],
+      "additionalProperties": false
+    },
+    "safety": {
+      "type": "object",
+      "description": "Trusted deployment-resolved operational ceilings. This authority is not accepted from workflow policy input.",
+      "properties": {
+        "max_parallel_sessions": { "$ref": "#/$defs/safePositiveInteger", "description": "Trusted effective deployment ceiling for concurrent sessions." },
+        "max_attempt_duration_ms": { "$ref": "#/$defs/safePositiveInteger", "description": "Trusted effective deployment ceiling for one attempt's duration." },
+        "max_selected_candidates": { "$ref": "#/$defs/safePositiveInteger" },
+        "max_retry_attempts_per_class": { "$ref": "#/$defs/safePositiveInteger" },
+        "max_consecutive_no_progress_attempts": { "$ref": "#/$defs/safePositiveInteger" },
+        "max_transport_backoff_delay_ms": { "$ref": "#/$defs/safePositiveInteger" },
+        "max_bounded_read_bytes": { "type": "integer", "minimum": 0, "maximum": 16777216 },
+        "max_bounded_write_bytes": { "type": "integer", "minimum": 0, "maximum": 16777216 }
+      },
+      "required": [
+        "max_parallel_sessions",
+        "max_attempt_duration_ms",
+        "max_selected_candidates",
+        "max_retry_attempts_per_class",
+        "max_consecutive_no_progress_attempts",
+        "max_transport_backoff_delay_ms",
+        "max_bounded_read_bytes",
+        "max_bounded_write_bytes"
+      ],
+      "additionalProperties": false
+    },
+    "budgets": {
+      "type": "object",
+      "properties": {
+        "max_sessions": { "$ref": "#/$defs/safeNonNegativeInteger" },
+        "max_input_tokens": { "$ref": "#/$defs/safeNonNegativeInteger" },
+        "max_output_tokens": { "$ref": "#/$defs/safeNonNegativeInteger" },
+        "max_cost_usd": { "$ref": "#/$defs/nonNegativeCost" },
+        "max_active_time_ms": { "$ref": "#/$defs/safeNonNegativeInteger" },
+        "max_calendar_age_ms": { "$ref": "#/$defs/safeNonNegativeInteger" }
+      },
+      "additionalProperties": false
+    },
+    "resolvedLimits": {
+      "type": "object",
+      "properties": {
+        "max_sessions": { "$ref": "#/$defs/nullableSafeNonNegativeInteger" },
+        "max_input_tokens": { "$ref": "#/$defs/nullableSafeNonNegativeInteger" },
+        "max_output_tokens": { "$ref": "#/$defs/nullableSafeNonNegativeInteger" },
+        "max_cost_usd": { "$ref": "#/$defs/nullableNonNegativeCost" },
+        "max_active_time_ms": { "$ref": "#/$defs/nullableSafeNonNegativeInteger" },
+        "max_calendar_age_ms": { "$ref": "#/$defs/nullableSafeNonNegativeInteger" }
+      },
+      "required": [
+        "max_sessions",
+        "max_input_tokens",
+        "max_output_tokens",
+        "max_cost_usd",
+        "max_active_time_ms",
+        "max_calendar_age_ms"
+      ],
+      "additionalProperties": false
+    },
+    "resolvedPolicy": {
+      "description": "Structural normalized policy with required trusted deployment-resolved safety. Authoritative runtime validation additionally enforces retry delay ordering and rejects retry attempts or transport delays above safety ceilings; structural JSON Schema cannot compare those properties.",
+      "type": "object",
+      "properties": {
+        "accounting": { "$ref": "#/$defs/accounting" },
+        "safety": { "$ref": "#/$defs/safety" },
+        "limits": { "$ref": "#/$defs/resolvedLimits" },
+        "retry_policy": { "$ref": "https://opencode-workflows.example/schema/retry-policy.schema.json" }
+      },
+      "required": ["accounting", "safety", "limits", "retry_policy"],
+      "additionalProperties": false
+    },
+    "costEvidence": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "type": "string", "const": "known" },
+            "cost_usd": { "$ref": "#/$defs/nonNegativeCost" }
+          },
+          "required": ["kind", "cost_usd"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": { "kind": { "type": "string", "const": "unknown" } },
+          "required": ["kind"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "costReportingCapability": {
+      "type": "object",
+      "description": "Preflight capability evidence for one selected candidate, distinct from observed usage cost evidence.",
+      "properties": {
+        "status": { "type": "string", "enum": ["trustworthy", "untrustworthy", "unknown"] }
+      },
+      "required": ["status"],
+      "additionalProperties": false
+    },
+    "failureClass": {
+      "type": "string",
+      "enum": ["transport", "contract", "semantic", "ambiguous_launch", "cancelled"]
+    },
+    "retryAttemptCounters": {
+      "type": "object",
+      "properties": {
+        "semantic_attempts": { "$ref": "#/$defs/safeNonNegativeInteger" },
+        "contract_attempts": { "$ref": "#/$defs/safeNonNegativeInteger" },
+        "transport_attempts": { "$ref": "#/$defs/safeNonNegativeInteger" },
+        "consecutive_no_progress_attempts": { "$ref": "#/$defs/safeNonNegativeInteger" }
+      },
+      "required": [
+        "semantic_attempts",
+        "contract_attempts",
+        "transport_attempts",
+        "consecutive_no_progress_attempts"
+      ],
+      "additionalProperties": false
+    },
+    "usageTelemetry": {
+      "type": "object",
+      "properties": {
+        "sessions": { "$ref": "#/$defs/safeNonNegativeInteger" },
+        "attempts": { "$ref": "#/$defs/safeNonNegativeInteger" },
+        "input_tokens": { "$ref": "#/$defs/safeNonNegativeInteger" },
+        "output_tokens": { "$ref": "#/$defs/safeNonNegativeInteger" },
+        "bounded_read_bytes": { "$ref": "#/$defs/safeNonNegativeInteger" },
+        "bounded_write_bytes": { "$ref": "#/$defs/safeNonNegativeInteger" },
+        "validation_runs": { "$ref": "#/$defs/safeNonNegativeInteger" },
+        "active_time_ms": { "$ref": "#/$defs/safeNonNegativeInteger" },
+        "cost_evidence": { "$ref": "#/$defs/costEvidence" },
+        "active_interval_started_at": { "$ref": "#/$defs/nullableTimestamp" },
+        "last_active_checkpoint_at": { "$ref": "#/$defs/nullableTimestamp" }
+      },
+      "required": [
+        "sessions",
+        "attempts",
+        "input_tokens",
+        "output_tokens",
+        "bounded_read_bytes",
+        "bounded_write_bytes",
+        "validation_runs",
+        "active_time_ms",
+        "cost_evidence",
+        "active_interval_started_at",
+        "last_active_checkpoint_at"
+      ],
+      "additionalProperties": false
+    },
+    "safePositiveInteger": {
+      "type": "integer",
+      "exclusiveMinimum": 0,
+      "maximum": 9007199254740991
+    },
+    "safeNonNegativeInteger": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "nonNegativeCost": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "nullableTimestamp": {
+      "description": "Structurally bounded RFC3339-like timestamp. The pattern is not calendar validation; authoritative state loading must retain semantic date-time validation.",
+      "anyOf": [
+        {
+          "type": "string",
+          "maxLength": 64,
+          "format": "date-time",
+          "allOf": [
+            {
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:\\d{2})$"
+            },
+            {
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            }
+          ]
+        },
+        { "type": "null" }
+      ]
+    },
+    "nullableSafeNonNegativeInteger": {
+      "anyOf": [
+        { "$ref": "#/$defs/safeNonNegativeInteger" },
+        { "type": "null" }
+      ]
+    },
+    "nullableNonNegativeCost": {
+      "anyOf": [
+        { "$ref": "#/$defs/nonNegativeCost" },
+        { "type": "null" }
+      ]
+    }
+  }
+}

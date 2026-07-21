@@ -1,7 +1,10 @@
-import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+
+import { hashIdentifier } from './identifier-hash.ts'
+
+export { hashIdentifier } from './identifier-hash.ts'
 
 function expandHome(input: string): string {
   if (input === '~') return os.homedir()
@@ -27,10 +30,6 @@ export function getWorkflowsDir(env: NodeJS.ProcessEnv = process.env): string {
 
 export function getRuntimeDir(env: NodeJS.ProcessEnv = process.env): string {
   return path.join(getWorkflowsDir(env), 'runtime')
-}
-
-export function hashIdentifier(value: string): string {
-  return createHash('sha256').update(value).digest('hex').slice(0, 24)
 }
 
 export function getSessionRuntimeDir(sessionId: string, env: NodeJS.ProcessEnv = process.env): string {

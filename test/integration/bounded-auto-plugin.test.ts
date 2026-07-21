@@ -135,7 +135,12 @@ describe('bounded automatic workflow plugin', () => {
   it('starts with pre-authorized Task access and writes through the side-effect-free bounded tool', async () => {
     const client = {
       session: {
-        promptAsync: async () => ({ data: undefined, error: undefined }),
+        prompt: async (input: any) => {
+          assert.equal(input.body.format?.type, 'json_schema')
+          assert.deepEqual(input.body.format?.schema?.required, ['status', 'summary'])
+          assert.equal(input.body.format?.schema?.oneOf, undefined)
+          return new Promise(() => {})
+        },
         abort: async () => ({ data: true }),
         status: async () => ({ data: {} }),
         messages: async () => ({ data: [] }),

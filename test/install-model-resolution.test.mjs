@@ -161,7 +161,7 @@ describe('installer subprocess', () => {
     assert.match(invalid.stderr, /Invalid autonomy profile/)
   })
 
-  it('adds safe autonomy and publication defaults only when migration is already changing the config', () => {
+  it('adds safe autonomy, publication, and epic defaults only when migration is already changing the config', () => {
     const currentFixture = createFixture()
     const currentPath = path.join(currentFixture.configDir, 'workflows.json')
     const current = workflowConfig()
@@ -175,19 +175,21 @@ describe('installer subprocess', () => {
     assert.equal(fs.readFileSync(currentPath, 'utf8'), currentContent)
     assert.equal(fs.existsSync(`${currentPath}.backup`), false)
     assert.equal(Object.hasOwn(JSON.parse(currentContent), 'publication'), false)
+    assert.equal(Object.hasOwn(JSON.parse(currentContent), 'epic'), false)
 
     const legacyFixture = createFixture()
     const legacyPath = path.join(legacyFixture.configDir, 'workflows.json')
     fs.writeFileSync(legacyPath, `${JSON.stringify(workflowConfig(), null, 2)}\n`)
     const preview = runInstaller(legacyFixture, ['--migrate', '--dry-run'])
     assert.equal(preview.status, 0, preview.stderr || preview.stdout)
-    assert.match(preview.stdout, /initialize disabled publication defaults/)
+    assert.match(preview.stdout, /initialize disabled publication and epic defaults/)
     assert.equal(Object.hasOwn(JSON.parse(fs.readFileSync(legacyPath, 'utf8')), 'publication'), false)
     const migrated = runInstaller(legacyFixture, ['--migrate'])
     assert.equal(migrated.status, 0, migrated.stderr || migrated.stdout)
     const migratedLegacy = JSON.parse(fs.readFileSync(legacyPath, 'utf8'))
     assert.equal(migratedLegacy.automation.autonomy, 'interactive')
     assert.deepEqual(migratedLegacy.publication, { enabled: false, internal_markers: [], targets: {} })
+    assert.deepEqual(migratedLegacy.epic, { enabled: false })
 
     const preservedFixture = createFixture()
     const preservedPath = path.join(preservedFixture.configDir, 'workflows.json')
@@ -307,9 +309,13 @@ describe('installer subprocess', () => {
     assert.match(doctor.stdout, /PASS workflows.json schema/)
     assert.match(doctor.stdout, /SKIP capability background_subagents is disabled/)
 
+    const conventionsPath = path.join(fixture.configDir, 'CONVENTIONS.md')
+    fs.appendFileSync(conventionsPath, '\nLocal conventions remain active.\n')
     const secondInstall = runInstaller(fixture)
     assert.equal(secondInstall.status, 0, secondInstall.stderr || secondInstall.stdout)
     assert.equal(fs.existsSync(`${executorPath}.backup`), false, 'owned files should update without backups')
+    assert.match(fs.readFileSync(conventionsPath, 'utf8'), /Local conventions remain active/)
+    assert.equal(fs.existsSync(`${conventionsPath}.backup`), false, 'modified user guidance should remain active')
     assert.equal(fs.readFileSync(path.join(fixture.configDir, 'opencode.json'), 'utf8'), opencodeConfig)
     assert.equal(fs.readFileSync(path.join(fixture.configDir, 'workflows.json'), 'utf8'), workflowsConfig)
 

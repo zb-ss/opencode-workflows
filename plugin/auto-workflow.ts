@@ -70,6 +70,11 @@ function limits(
   }
 }
 
+function validationOperationNames(config: WorkflowConfig['validation_broker']): string[] {
+  if (!config.enabled) return []
+  return Object.keys(enabledValidationBroker(config).operations).sort()
+}
+
 function loadModeRouting(mode: string): Record<string, string> {
   if (!MODES.has(mode)) throw new Error(`unsupported automatic workflow mode: ${mode}`)
   const modePath = path.join(getConfigDir(), 'mode', `${mode}.json`)
@@ -213,6 +218,7 @@ export const AutoWorkflow: Plugin = async ({ client, directory, serverUrl }) => 
       modeRouting: loadModeRouting(state.mode),
       modelCandidates: (agent, tier) => modelCandidatesForAgent(config, agent, tier),
       limits: limits(config, validationBrokerConfig),
+      validationOperations: validationOperationNames(validationBrokerConfig),
       autonomy: state.autonomy,
       schedulingEnabled,
     })
@@ -372,6 +378,7 @@ export const AutoWorkflow: Plugin = async ({ client, directory, serverUrl }) => 
             modeRouting: routing,
             modelCandidates: (agent, tier) => modelCandidatesForAgent(config, agent, tier),
             limits: limits(config, validationBrokerConfig),
+            validationOperations: validationOperationNames(validationBrokerConfig),
             autonomy: config.automation.autonomy,
           })
           engines.set(context.sessionID, engine)

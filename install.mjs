@@ -6,6 +6,9 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { MAX_BOUNDED_IO_BYTES } from './lib/workflow-limits.mjs'
+
+export { MAX_BOUNDED_IO_BYTES }
 
 const REPO_ROOT = path.dirname(fileURLToPath(import.meta.url))
 const PACKAGE_DATA = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8'))
@@ -16,7 +19,6 @@ const ENV_FILE_NAME = 'opencode-workflows.env'
 const MODEL_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*\/\S+$/
 const VARIANT_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
 const AUTONOMY_PROFILES = new Set(['interactive', 'bounded'])
-export const MAX_BOUNDED_IO_BYTES = 16 * 1024 * 1024
 const CAPABILITY_ENVIRONMENT = {
   background_subagents: 'OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS',
   native_workspaces: 'OPENCODE_EXPERIMENTAL_WORKSPACES',
@@ -235,7 +237,11 @@ export function buildFileList(modules, configDir = getConfigDir()) {
 
     const conventionsSource = path.join(REPO_ROOT, 'docs', 'conventions.md')
     if (fs.existsSync(conventionsSource)) {
-      files.push({ source: conventionsSource, target: path.join(configDir, 'CONVENTIONS.md') })
+      files.push({
+        source: conventionsSource,
+        target: path.join(configDir, 'CONVENTIONS.md'),
+        preserveModified: true,
+      })
     }
   }
 
@@ -533,6 +539,13 @@ function installManagedFile(file, options) {
     return null
   }
 
+  const previousRecord = previousByTarget.get(path.resolve(file.target))
+  if (file.preserveModified && pathExists(file.target)
+    && (!previousRecord || !isOwnedRecord(file.target, previousRecord))) {
+    actions.push({ action: 'skip', target: file.target, reason: 'modified user guidance preserved' })
+    return previousRecord ?? null
+  }
+
   let content = null
   let note = null
   if (file.modelMetadata) {
@@ -549,7 +562,7 @@ function installManagedFile(file, options) {
   if (dryRun) return null
 
   assertSafeManagedParent(configDir, file.target)
-  prepareTarget(file.target, previousByTarget.get(path.resolve(file.target)), false, actions)
+  prepareTarget(file.target, previousRecord, false, actions)
   ensurePrivateDirectory(path.dirname(file.target))
   if (content !== null) writeFileNoFollow(file.target, content)
   else if (effectiveMode === 'copy') writeFileNoFollow(file.target, fs.readFileSync(file.source))
@@ -975,13 +988,16 @@ export function migrateWorkflowConfig(dryRun = false) {
   if (changed && config.publication === undefined) {
     config.publication = { enabled: false, internal_markers: [], targets: {} }
   }
+  if (changed && config.epic === undefined) {
+    config.epic = { enabled: false }
+  }
 
   if (!changed) {
     console.log('workflows.json is already current; no migration needed.')
     return
   }
   if (dryRun) {
-    console.log('Migration would normalize workflow candidates, capability flags, bounded byte budgets, and delegation settings; when absent, it would also initialize disabled publication defaults.')
+    console.log('Migration would normalize workflow candidates, capability flags, bounded byte budgets, and delegation settings; when absent, it would also initialize disabled publication and epic defaults.')
     return
   }
 
