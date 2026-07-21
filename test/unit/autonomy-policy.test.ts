@@ -39,7 +39,7 @@ describe('bounded autonomy policy', () => {
     for (const permission of ['read', 'external_directory', 'question', 'custom_unsafe', 'doom_loop']) {
       assert.equal(evaluatePermissionRules(resolved, permission, '*'), 'deny')
     }
-    for (const permission of ['question', 'plan_enter', 'plan_exit', 'task', 'delegation_unsafe']) {
+    for (const permission of ['question', 'plan_enter', 'plan_exit', 'task', 'delegation_unsafe', 'epic_budget_update', 'epic_budget_extend', 'epic_resume']) {
       assert.equal(resolved.some((rule) => (
         rule.permission === permission && rule.pattern === '*' && rule.action === 'deny'
       )), true)

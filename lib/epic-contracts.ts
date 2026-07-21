@@ -1,5 +1,6 @@
 export { stableCanonicalJson } from './epic-canonical-json.ts'
 export {
+  EPIC_BUDGET_DIMENSIONS,
   EPIC_SCHEMA_VERSION,
   EPIC_STATE_SCHEMA_ID,
   EpicAttemptSchema,
@@ -37,8 +38,16 @@ export {
 } from './epic-worktree-contracts.ts'
 export type { EpicWorktreeEvidence, EpicWorktreeIdentity } from './epic-worktree-contracts.ts'
 export {
+  epicBudgetDecision,
   effectiveEpicItemLimit,
   emptyAutomationUsageTelemetry,
+  projectEpicBudgetStatus,
+} from './epic-budget-usage.ts'
+export type {
+  EpicBudgetDecision,
+  EpicBudgetDecisionCounts,
+  EpicBudgetDimensionStatus,
+  EpicBudgetStatus,
 } from './epic-budget-usage.ts'
 export {
   deterministicEpicOrder,

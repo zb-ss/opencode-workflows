@@ -152,7 +152,7 @@ describe('EpicStore secure append-only persistence', { skip: !supportsPosixStore
 
   it('returns only the operational status whitelist with immutable identity digest semantics', () => {
     const { state, store } = fixture(); store().append(state, 0, null, 1); const status = store().statusOnly()!
-    assert.deepEqual(Object.keys(status).sort(), ['conflicted_count', 'epic_id', 'failed_count', 'identity_digest', 'integrated_count', 'item_count', 'ownership_generation', 'pause_code', 'recovery_required', 'revision', 'running_count', 'state_sha256', 'status', 'updated_at'])
+    assert.deepEqual(Object.keys(status).sort(), ['budget_dimensions', 'conflicted_count', 'epic_id', 'failed_count', 'identity_digest', 'integrated_count', 'item_count', 'ownership_generation', 'pause_code', 'recovery_required', 'revision', 'running_count', 'state_sha256', 'status', 'updated_at'])
     for (const forbidden of ['root_session_id', 'attempts', 'model', 'child_session', 'checkpoint', 'commit', 'path', 'result']) assert.equal(JSON.stringify(status).includes(forbidden), false)
   })
 

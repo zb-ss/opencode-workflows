@@ -55,7 +55,8 @@ const ModelIdentifierSchema = z.string().max(MAX_TEXT_LENGTH).refine((model) => 
   }
 }, { message: 'must be a valid configured model identifier' })
 
-export const EpicBudgetDimensionSchema = z.enum(['sessions', 'input_tokens', 'output_tokens', 'cost_usd', 'active_time_ms', 'calendar_age_ms'])
+export const EPIC_BUDGET_DIMENSIONS = ['sessions', 'input_tokens', 'output_tokens', 'cost_usd', 'active_time_ms', 'calendar_age_ms'] as const
+export const EpicBudgetDimensionSchema = z.enum(EPIC_BUDGET_DIMENSIONS)
 export const EpicBudgetScopeSchema = z.enum(['item', 'epic', 'global'])
 export type EpicBudgetDimension = z.infer<typeof EpicBudgetDimensionSchema>
 export type EpicBudgetScope = z.infer<typeof EpicBudgetScopeSchema>

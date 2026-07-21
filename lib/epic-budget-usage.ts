@@ -1,6 +1,7 @@
 import type { AutomationUsageTelemetry } from './automation-policy-contracts.ts'
-import { evaluateCostBudget, isConfiguredIntegerLimitExceeded } from './automation-budget-policy.ts'
+import { evaluateCostBudget, isConfiguredIntegerLimitExceeded, type CostBudgetDecision } from './automation-budget-policy.ts'
 import {
+  EPIC_BUDGET_DIMENSIONS,
   type EpicBudgetDimension,
   type EpicBudgetExtension,
   type EpicBudgetRecord,
@@ -66,6 +67,46 @@ function isBudgetExhausted(state: EpicState, budget: EpicBudgetRecord, usage: Au
     return consumed === 'unknown' || evaluateCostBudget(budget.limit, { kind: 'known', cost_usd: consumed }).decision === 'exhausted'
   }
   return consumed !== 'unknown' && (consumed === budget.limit || isConfiguredIntegerLimitExceeded(consumed, budget.limit))
+}
+
+export type EpicBudgetDecision = CostBudgetDecision
+export type EpicBudgetDecisionCounts = Record<EpicBudgetDecision['decision'], number>
+export interface EpicBudgetDimensionStatus {
+  epic: EpicBudgetDecision
+  item_decision_counts: EpicBudgetDecisionCounts
+}
+export type EpicBudgetStatus = Record<EpicBudgetDimension, EpicBudgetDimensionStatus>
+
+export function epicBudgetDecision(
+  state: EpicState,
+  scope: 'epic' | 'item',
+  item_id: string | null,
+  dimension: EpicBudgetDimension,
+): EpicBudgetDecision {
+  if (scope === 'epic' && item_id !== null) throw new EpicValidationError('epic budget status requires item_id null')
+  if (scope === 'item' && (item_id === null || !Object.hasOwn(state.items, item_id))) throw new EpicValidationError(`unknown epic item: ${String(item_id)}`)
+  const budget = (state.budgets ?? []).find(record => record.scope === scope && record.item_id === item_id && record.dimension === dimension)
+  if (!budget || budget.limit === null) return { decision: 'not_configured' }
+  const scoped_usage = state.usage.find(record => record.scope === scope && record.item_id === item_id)
+  if (!scoped_usage) throw new EpicValidationError(`configured ${scope} budget lacks matching usage telemetry`)
+  const consumed = dimensionUsage(state, scoped_usage.usage, dimension)
+  if (dimension === 'cost_usd') {
+    return evaluateCostBudget(budget.limit, consumed === 'unknown' ? { kind: 'unknown' } : { kind: 'known', cost_usd: consumed })
+  }
+  return consumed !== 'unknown' && (consumed === budget.limit || isConfiguredIntegerLimitExceeded(consumed, budget.limit))
+    ? { decision: 'exhausted' }
+    : { decision: 'within_limit' }
+}
+
+export function projectEpicBudgetStatus(state: EpicState): EpicBudgetStatus {
+  return Object.fromEntries(EPIC_BUDGET_DIMENSIONS.map((dimension) => {
+    const item_decision_counts: EpicBudgetDecisionCounts = { not_configured: 0, blocked: 0, within_limit: 0, exhausted: 0 }
+    for (const item_id of Object.keys(state.items)) item_decision_counts[epicBudgetDecision(state, 'item', item_id, dimension).decision] += 1
+    return [dimension, {
+      epic: epicBudgetDecision(state, 'epic', null, dimension),
+      item_decision_counts,
+    }]
+  })) as EpicBudgetStatus
 }
 
 function validateRunningBudgetScopes(state: EpicState, issue: EpicIssueReporter): void {
