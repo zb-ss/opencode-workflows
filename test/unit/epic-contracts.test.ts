@@ -359,10 +359,10 @@ describe('budget update and extension evidence', () => {
     assert.doesNotThrow(() => validateEpicState({
       ...baseState(),
       state_revision: 4,
-      budgets: [budget({ limit: 3, extensions: [extension] })],
+      budgets: [budget({ limit: null, extensions: [extension] })],
       budget_updates: [
         policyRecord({ update_id: 'add', previous_limit: null, new_limit: 5, state_revision: 1 }),
-        policyRecord({ update_id: 'decrease', previous_limit: 5, new_limit: 3, state_revision: 2 }),
+        policyRecord({ update_id: 'decrease', previous_limit: 5, new_limit: 2, state_revision: 2 }),
         policyRecord({ update_id: 'extension-root', previous_limit: 2, new_limit: 3, state_revision: 3 }),
         policyRecord({ update_id: 'remove', previous_limit: 3, new_limit: null, state_revision: 4 }),
       ],
@@ -405,7 +405,7 @@ describe('budget update and extension evidence', () => {
     assert.throws(() => validateEpicTransition(withoutBudget, fabricated), /must start without extension history/)
   })
 
-  it('requires extension continuity and the final extension to equal the active limit', () => {
+  it('requires root update continuity and the active limit to equal the latest update', () => {
     const first = policyRecord({ update_id: 'first', previous_limit: 1, new_limit: 2, state_revision: 1 }) as EpicBudgetExtension
     const discontinuous = policyRecord({ update_id: 'second', previous_limit: 3, new_limit: 4, state_revision: 2 }) as EpicBudgetExtension
     const updates = [
@@ -413,7 +413,7 @@ describe('budget update and extension evidence', () => {
       policyRecord({ update_id: 'second-root', previous_limit: 3, new_limit: 4, state_revision: 2 }),
     ]
     assert.throws(() => validateEpicState({ ...baseState(), state_revision: 2, budgets: [budget({ limit: 4, extensions: [first, discontinuous] })], budget_updates: updates }), /continuity/)
-    assert.throws(() => validateEpicState({ ...baseState(), budgets: [budget({ limit: 3, extensions: [first] })], budget_updates: [updates[0]!] }), /final extension/)
+    assert.throws(() => validateEpicState({ ...baseState(), budgets: [budget({ limit: 3, extensions: [first] })], budget_updates: [updates[0]!] }), /latest root policy update/)
   })
 })
 

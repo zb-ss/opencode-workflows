@@ -221,6 +221,15 @@ describe('bounded automatic workflow plugin', () => {
       hooks.tool!.workflow_validation_run.execute(validationArgs, childContext),
       /requires interactive autonomy.*not OS-sandboxed/,
     )
+    for (const toolName of ['epic_budget_update', 'epic_budget_extend']) {
+      await assert.rejects(
+        hooks['tool.execute.before']!(
+          { tool: toolName, sessionID: childSessionId, callID: `${toolName}-call` },
+          { args: {} },
+        ),
+        /not allowed inside a bounded automatic workflow stage/,
+      )
+    }
     assert.ok(hooks.tool!.workflow_publication_preview)
     assert.ok(hooks.tool!.workflow_publication_execute)
     assert.ok(hooks.tool!.workflow_publication_status)

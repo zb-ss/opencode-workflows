@@ -141,32 +141,38 @@ export function validatePolicyHistory(state: EpicState, issue: EpicIssueReporter
   }
   for (const [budget_index, budget] of (state.budgets ?? []).entries()) {
     let previous_revision = 0
-    let previous_new_limit: number | null = null
     for (const [extension_index, extension] of budget.extensions.entries()) {
       const record_path = ['budgets', budget_index, 'extensions', extension_index]
       validate_record(extension, record_path)
       if (extension.dimension !== budget.dimension || extension.scope !== budget.scope || extension.item_id !== budget.item_id) issue(record_path, 'extension target and dimension must match its containing budget record')
       if (extension.state_revision <= previous_revision) issue([...record_path, 'state_revision'], 'extension revisions must be strictly increasing')
-      if (extension_index > 0 && extension.previous_limit !== previous_new_limit) issue([...record_path, 'previous_limit'], 'extension history must preserve previous/new limit continuity')
       if (extension_index > 0 && Date.parse(extension.recorded_at) < Date.parse(budget.extensions[extension_index - 1]!.recorded_at)) issue([...record_path, 'recorded_at'], 'extension timestamps must be monotonic')
       previous_revision = extension.state_revision
-      previous_new_limit = extension.new_limit
     }
-    if (budget.extensions.length > 0 && previous_new_limit !== budget.limit) issue(['budgets', budget_index, 'limit'], 'active budget limit must equal the final extension new_limit')
   }
   let previous_revision = 0
   const update_evidence_counts = new Map<string, number>()
+  const latest_limits = new Map<string, number | null>()
   for (const [index, update] of state.budget_updates.entries()) {
     validate_record(update, ['budget_updates', index])
     if (update.state_revision < previous_revision) issue(['budget_updates', index, 'state_revision'], 'budget update revisions must be monotonic')
     if (index > 0 && Date.parse(update.recorded_at) < Date.parse(state.budget_updates[index - 1]!.recorded_at)) issue(['budget_updates', index, 'recorded_at'], 'budget update timestamps must be monotonic')
     const evidence_key = budgetEvidenceKey(update)
     update_evidence_counts.set(evidence_key, (update_evidence_counts.get(evidence_key) ?? 0) + 1)
+    const target_key = budgetKey(update)
+    if (latest_limits.has(target_key) && update.previous_limit !== latest_limits.get(target_key)) {
+      issue(['budget_updates', index, 'previous_limit'], 'budget update history must preserve previous/new limit continuity')
+    }
+    latest_limits.set(target_key, update.new_limit)
     previous_revision = update.state_revision
   }
   for (const [budget_index, budget] of (state.budgets ?? []).entries()) {
     for (const [extension_index, extension] of budget.extensions.entries()) {
       if (update_evidence_counts.get(budgetEvidenceKey(extension)) !== 1) issue(['budgets', budget_index, 'extensions', extension_index], 'extension requires exactly one matching root budget update')
+    }
+    const latest_limit = latest_limits.get(budgetKey(budget))
+    if (latest_limit !== undefined && latest_limit !== budget.limit) {
+      issue(['budgets', budget_index, 'limit'], 'active budget limit must equal the latest root policy update')
     }
   }
 }

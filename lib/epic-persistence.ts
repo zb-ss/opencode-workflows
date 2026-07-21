@@ -27,6 +27,7 @@ import {
 } from './epic-persistence-codec.ts'
 import {
   encodeEpicRevision,
+  type EpicRevisionEvidence,
   type EpicRevisionChainContext,
   readEpicRevisionChain,
   writeEpicRevision,
@@ -105,6 +106,8 @@ export interface EpicLoadResult {
   ownership_generation: number
   recovery_required: boolean
   identity_digest: string
+  /** Present on persisted loads so owner tools can verify historical idempotency CAS evidence. */
+  revision_evidence?: EpicRevisionEvidence[]
 }
 
 export interface EpicStatusOnly {
@@ -388,6 +391,7 @@ class EpicStore implements EpicStoreHandle {
       ownership_generation: chain.ownershipGeneration,
       recovery_required: recoveryRequired,
       identity_digest: identity.identity_digest,
+      revision_evidence: chain.revisionEvidence,
     }
   }
 }
