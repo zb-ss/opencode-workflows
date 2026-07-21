@@ -41,6 +41,18 @@
     "autonomy": "interactive"
   },
 
+  "_comment_epic": "Epic worktree orchestration is opt-in and disabled by default. Enabling requires explicit operator-selected operational limits; the protocol ceilings are not enabled defaults.",
+  "_example_epic": {
+    "enabled": true,
+    "max_epic_items": 24,
+    "max_item_dependencies": 8,
+    "max_attempts_per_item": 4,
+    "max_budget_records": 128
+  },
+  "epic": {
+    "enabled": false
+  },
+
   "_comment_validation_broker": "Optional named validation operations for attended interactive automatic stages. Bounded autonomy rejects executable validation because it is not OS-sandboxed. argv[0] is an operator-configured absolute executable path; commands are fixed argv arrays, never shell text. Configure explicit limits before enabling.",
   "_example_validation_operation": {
     "argv": ["/absolute/path/to/package-manager", "run", "check"],

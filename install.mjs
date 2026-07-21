@@ -988,13 +988,16 @@ export function migrateWorkflowConfig(dryRun = false) {
   if (changed && config.publication === undefined) {
     config.publication = { enabled: false, internal_markers: [], targets: {} }
   }
+  if (changed && config.epic === undefined) {
+    config.epic = { enabled: false }
+  }
 
   if (!changed) {
     console.log('workflows.json is already current; no migration needed.')
     return
   }
   if (dryRun) {
-    console.log('Migration would normalize workflow candidates, capability flags, bounded byte budgets, and delegation settings; when absent, it would also initialize disabled publication defaults.')
+    console.log('Migration would normalize workflow candidates, capability flags, bounded byte budgets, and delegation settings; when absent, it would also initialize disabled publication and epic defaults.')
     return
   }
 

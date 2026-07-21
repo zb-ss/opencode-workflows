@@ -7,6 +7,7 @@ import {
   type ConfiguredModelCandidate,
   type ModelCandidate,
 } from './model-registry.ts'
+import { EpicConfigSchema } from './epic-policy.ts'
 import { getConfigDir } from './paths.ts'
 import {
   MAX_BOUNDED_IO_BYTES,
@@ -31,12 +32,16 @@ import {
   PUBLICATION_ENVIRONMENT_NAME_PATTERN,
   PUBLICATION_REQUEST_FILE_ARGUMENT,
 } from './publication-policy.ts'
+import {
+  MAX_SAFE_IDENTIFIER_LENGTH,
+  SAFE_IDENTIFIER_PATTERN,
+  SAFE_IDENTIFIER_SOURCE,
+  SafeIdentifierSchema,
+} from './safe-identifier.ts'
 
 const MODEL_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*\/\S+$/
 const VARIANT_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
-export const SAFE_IDENTIFIER_SOURCE = '^[A-Za-z0-9][A-Za-z0-9._-]*$'
-export const SAFE_IDENTIFIER_PATTERN = new RegExp(SAFE_IDENTIFIER_SOURCE)
-export const MAX_SAFE_IDENTIFIER_LENGTH = 64
+export { MAX_SAFE_IDENTIFIER_LENGTH, SAFE_IDENTIFIER_PATTERN, SAFE_IDENTIFIER_SOURCE }
 export const MAX_VALIDATION_TIMEOUT_MS = 60 * 60 * 1000
 export const MAX_VALIDATION_OUTPUT_BYTES = 16 * 1024 * 1024
 export { MAX_BOUNDED_IO_BYTES, MAX_VALIDATION_RUNS_PER_WORKFLOW }
@@ -59,8 +64,6 @@ export const MAX_PUBLICATION_STRING_LENGTH = MAX_PUBLICATION_PROTOCOL_STRING_LEN
 export { MAX_PUBLICATION_REMOTE_URL_LENGTH }
 export const MAX_PUBLICATION_TIMEOUT_MS = 60 * 60 * 1000
 export const MAX_PUBLICATION_OUTPUT_BYTES = 16 * 1024 * 1024
-
-const SafeIdentifierSchema = z.string().min(1).max(MAX_SAFE_IDENTIFIER_LENGTH).regex(SAFE_IDENTIFIER_PATTERN)
 
 export const ModelCandidateSchema = z.union([
   z.string().regex(MODEL_ID_PATTERN),
@@ -411,6 +414,7 @@ export const WorkflowConfigSchema = z.object({
   validation_broker: ValidationBrokerSchema,
   review_loop: ReviewLoopSchema,
   publication: PublicationConfigSchema,
+  epic: EpicConfigSchema,
   automation: z.object({
     enabled: z.boolean().default(false),
     autonomy: z.enum(['interactive', 'bounded']).default('interactive'),
