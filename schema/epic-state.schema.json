@@ -179,6 +179,89 @@
                   "maxLength": 64,
                   "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
                 },
+                "worktree_evidence": {
+                  "type": "object",
+                  "properties": {
+                    "epic_id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 64,
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+                    },
+                    "item_id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 64,
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+                    },
+                    "attempt_id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 64,
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+                    },
+                    "worktree_name": {
+                      "type": "string",
+                      "pattern": "^epic-[a-f0-9]{24}$"
+                    },
+                    "branch_name": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 199
+                    },
+                    "base_commit": {
+                      "type": "string",
+                      "pattern": "^(?:[a-f0-9]{40}|[a-f0-9]{64})$"
+                    },
+                    "worktree_path_sha256": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "worktree_directory_dev": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 20,
+                      "pattern": "^\\d+$"
+                    },
+                    "worktree_directory_ino": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 20,
+                      "pattern": "^\\d+$"
+                    },
+                    "git_common_directory_sha256": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "git_common_directory_dev": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 20,
+                      "pattern": "^\\d+$"
+                    },
+                    "git_common_directory_ino": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 20,
+                      "pattern": "^\\d+$"
+                    }
+                  },
+                  "required": [
+                    "epic_id",
+                    "item_id",
+                    "attempt_id",
+                    "worktree_name",
+                    "branch_name",
+                    "base_commit",
+                    "worktree_path_sha256",
+                    "worktree_directory_dev",
+                    "worktree_directory_ino",
+                    "git_common_directory_sha256",
+                    "git_common_directory_dev",
+                    "git_common_directory_ino"
+                  ],
+                  "additionalProperties": false
+                },
                 "agent": {
                   "type": "string",
                   "minLength": 1,
@@ -291,6 +374,7 @@
               },
               "required": [
                 "attempt_id",
+                "worktree_evidence",
                 "agent",
                 "model",
                 "child_session_id",

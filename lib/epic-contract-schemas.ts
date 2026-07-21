@@ -17,6 +17,7 @@ import {
   MAX_ITEM_DEPENDENCIES,
   type EpicOperationalLimits,
 } from './epic-policy.ts'
+import { EpicWorktreeEvidenceSchema, type EpicWorktreeEvidence } from './epic-worktree-contracts.ts'
 import { validateModelCandidate } from './model-registry.ts'
 import { isFullPublicationGitRef } from './publication-policy.ts'
 import { SafeIdentifierSchema } from './safe-identifier.ts'
@@ -129,6 +130,7 @@ export interface EpicIdentity {
 
 export interface EpicAttempt {
   attempt_id: string
+  worktree_evidence: EpicWorktreeEvidence
   agent: string
   model: string | null
   child_session_id: string | null
@@ -210,6 +212,7 @@ export class EpicSchemaVersionError extends EpicValidationError {
 
 export const EpicAttemptSchema = z.object({
   attempt_id: SafeIdentifierSchema,
+  worktree_evidence: EpicWorktreeEvidenceSchema,
   agent: SafeIdentifierSchema,
   model: ModelIdentifierSchema.nullable(),
   child_session_id: SafeIdentifierSchema.nullable(),

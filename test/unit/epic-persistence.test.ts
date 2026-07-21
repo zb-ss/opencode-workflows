@@ -5,7 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, it } from 'node:test'
 
-import { emptyAutomationUsageTelemetry, EPIC_SCHEMA_VERSION, projectIdentitySha256, type EpicState } from '../../lib/epic-contracts.ts'
+import { deriveEpicWorktreeIdentity, emptyAutomationUsageTelemetry, EPIC_SCHEMA_VERSION, projectIdentitySha256, type EpicState } from '../../lib/epic-contracts.ts'
 import {
   EpicBoundsExceededError,
   EpicCorruptError,
@@ -26,6 +26,14 @@ const OID = (character: string) => character.repeat(40)
 const CONFIG = { enabled: true, max_epic_items: 8, max_item_dependencies: 4, max_attempts_per_item: 3, max_budget_records: 16 } as const
 const temporaryDirectories: string[] = []
 const supportsPosixStore = process.platform !== 'win32' && typeof fs.constants.O_NOFOLLOW === 'number' && typeof fs.constants.O_DIRECTORY === 'number'
+
+function worktreeEvidence() {
+  return {
+    ...deriveEpicWorktreeIdentity('epic-1', 'item', 'attempt-1'),
+    base_commit: OID('0'), worktree_path_sha256: '1'.repeat(64), worktree_directory_dev: '1', worktree_directory_ino: '2',
+    git_common_directory_sha256: '2'.repeat(64), git_common_directory_dev: '3', git_common_directory_ino: '4',
+  }
+}
 
 afterEach(() => { for (const directory of temporaryDirectories.splice(0)) fs.rmSync(directory, { recursive: true, force: true }) })
 
@@ -60,9 +68,10 @@ function fixture(options: { max_revisions?: number, max_chain_bytes?: number, ma
 function rewrite(file: string, value: unknown): void { fs.writeFileSync(file, `${JSON.stringify(value)}\n`, { mode: 0o600 }); fs.chmodSync(file, 0o600) }
 
 function runningState(state: EpicState): EpicState {
+  const worktree_evidence = worktreeEvidence()
   return {
     ...state, status: 'running',
-    items: { item: { ...state.items.item!, status: 'running', attempts: [{ attempt_id: 'attempt-1', agent: 'executor', model: null, child_session_id: null, started_at: NOW, completed_at: null, checkpoint_commit: null, review_evidence_digest: null, result_summary: null, failure_classification: null, status: 'running' }] } },
+    items: { item: { ...state.items.item!, status: 'running', worktree_name: worktree_evidence.worktree_name, branch_name: worktree_evidence.branch_name, attempts: [{ attempt_id: 'attempt-1', worktree_evidence, agent: 'executor', model: null, child_session_id: null, started_at: NOW, completed_at: null, checkpoint_commit: null, review_evidence_digest: null, result_summary: null, failure_classification: null, status: 'running' }] } },
     usage: [
       { scope: 'epic', item_id: null, usage: { ...emptyAutomationUsageTelemetry(), active_interval_started_at: NOW, last_active_checkpoint_at: NOW } },
       { scope: 'item', item_id: 'item', usage: { ...emptyAutomationUsageTelemetry(), active_interval_started_at: NOW, last_active_checkpoint_at: NOW } },
@@ -130,6 +139,7 @@ describe('EpicStore secure append-only persistence', { skip: !supportsPosixStore
     assert.throws(() => restarted.append({ ...running, state_revision: 4 }, 3, third.state_sha256, 1), EpicRecoveryRequiredError)
     const reconciled = restarted.reconcile(recoveredState(running), 3, third.state_sha256, 1)!
     assert.equal(reconciled.ownership_generation, 2); assert.equal(reconciled.state.items.item!.attempts[0]!.status, 'cancelled')
+    assert.deepEqual(reconciled.state.items.item!.attempts[0]!.worktree_evidence, running.items.item!.attempts[0]!.worktree_evidence)
     assert.throws(() => restarted.append({ ...reconciled.state, state_revision: 5 }, 4, reconciled.state_sha256, 1), EpicStaleRevisionError)
   })
 

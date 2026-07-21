@@ -31,6 +31,12 @@ export type {
   EpicStatus,
 } from './epic-contract-schemas.ts'
 export {
+  deriveEpicWorktreeIdentity,
+  EpicWorktreeEvidenceSchema,
+  parseEpicWorktreeEvidence,
+} from './epic-worktree-contracts.ts'
+export type { EpicWorktreeEvidence, EpicWorktreeIdentity } from './epic-worktree-contracts.ts'
+export {
   effectiveEpicItemLimit,
   emptyAutomationUsageTelemetry,
 } from './epic-budget-usage.ts'

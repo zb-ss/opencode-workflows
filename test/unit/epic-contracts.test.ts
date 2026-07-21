@@ -13,6 +13,7 @@ import {
   EpicBudgetExtension,
   EpicBudgetRecord,
   EpicBudgetUpdate,
+  EpicAttempt,
   EpicConfigSchema,
   EpicItem,
   EpicSchemaVersionError,
@@ -21,6 +22,7 @@ import {
   computeDependencySnapshotDigest,
   computeEpicIdentityDigest,
   computeIntegrationEventDigest,
+  deriveEpicWorktreeIdentity,
   deterministicEpicOrder,
   effectiveEpicItemLimit,
   emptyAutomationUsageTelemetry,
@@ -50,6 +52,8 @@ afterEach(() => {
 })
 
 function item(overrides: Partial<EpicItem> & { item_id: string }): EpicItem {
+  const selected_attempt = overrides.attempts?.find(attempt => attempt.attempt_id === overrides.selected_attempt_id)
+  const current_attempt = overrides.status === 'running' ? overrides.attempts?.at(-1) : selected_attempt
   return {
     item_id: overrides.item_id,
     dependencies: overrides.dependencies ?? [],
@@ -57,13 +61,26 @@ function item(overrides: Partial<EpicItem> & { item_id: string }): EpicItem {
     status: overrides.status ?? 'pending',
     attempts: overrides.attempts ?? [],
     selected_attempt_id: overrides.selected_attempt_id ?? null,
-    worktree_name: overrides.worktree_name ?? null,
-    branch_name: overrides.branch_name ?? null,
+    worktree_name: overrides.worktree_name === undefined ? current_attempt?.worktree_evidence.worktree_name ?? null : overrides.worktree_name,
+    branch_name: overrides.branch_name === undefined ? current_attempt?.worktree_evidence.branch_name ?? null : overrides.branch_name,
     checkpoint_commit: overrides.checkpoint_commit ?? null,
     review_evidence_digest: overrides.review_evidence_digest ?? null,
     conflict_paths: overrides.conflict_paths ?? [],
     integration_commit: overrides.integration_commit ?? null,
     completed_at: overrides.completed_at ?? null,
+  }
+}
+
+function worktreeEvidence(item_id = 'item-a', attempt_id = 'attempt-1') {
+  return {
+    ...deriveEpicWorktreeIdentity('epic-1', item_id, attempt_id),
+    base_commit: OID('0'),
+    worktree_path_sha256: SHA('1'),
+    worktree_directory_dev: '1',
+    worktree_directory_ino: '2',
+    git_common_directory_sha256: SHA('2'),
+    git_common_directory_dev: '3',
+    git_common_directory_ino: '4',
   }
 }
 
@@ -124,9 +141,9 @@ function policyRecord(overrides: Partial<EpicBudgetUpdate> = {}): EpicBudgetUpda
   }
 }
 
-function reviewedAttempt(attempt_id = 'attempt-1') {
+function reviewedAttempt(attempt_id = 'attempt-1', item_id = 'item-a'): EpicAttempt {
   return {
-    attempt_id, agent: 'executor', model: null, child_session_id: null, started_at: NOW, completed_at: LATER,
+    attempt_id, worktree_evidence: worktreeEvidence(item_id, attempt_id), agent: 'executor', model: null, child_session_id: null, started_at: NOW, completed_at: LATER,
     checkpoint_commit: OID('1'), review_evidence_digest: SHA('b'), result_summary: 'Passed review.',
     failure_classification: null, status: 'passed' as const,
   }
@@ -317,7 +334,7 @@ describe('typed budgets and independent usage', () => {
 
   it('requires item budget telemetry and stops only the exhausted item scope', () => {
     const runningAttempt = {
-      attempt_id: 'attempt-1', agent: 'executor', model: null, child_session_id: null,
+      attempt_id: 'attempt-1', worktree_evidence: worktreeEvidence(), agent: 'executor', model: null, child_session_id: null,
       started_at: NOW, completed_at: null, checkpoint_commit: null, review_evidence_digest: null,
       result_summary: null, failure_classification: null, status: 'running' as const,
     }
@@ -404,7 +421,7 @@ describe('shared failures, DAG, transitions, and identity invariants', () => {
   it('uses the shared closed failure classification and enforces status coupling', () => {
     assert.equal(FailureClassSchema.parse('semantic'), 'semantic')
     const failed = {
-      attempt_id: 'attempt-1', agent: 'executor', model: 'provider/model', child_session_id: null,
+      attempt_id: 'attempt-1', worktree_evidence: worktreeEvidence(), agent: 'executor', model: 'provider/model', child_session_id: null,
       started_at: NOW, completed_at: LATER, checkpoint_commit: null, review_evidence_digest: null, result_summary: 'Failed.',
       failure_classification: 'semantic' as const, status: 'failed' as const,
     }
@@ -424,7 +441,7 @@ describe('shared failures, DAG, transitions, and identity invariants', () => {
   })
 
   it('allows one running-to-passed checkpoint binding and freezes reviewed attempt history', () => {
-    const runningAttempt = { attempt_id: 'attempt-1', agent: 'executor', model: null, child_session_id: null, started_at: NOW, completed_at: null, checkpoint_commit: null, review_evidence_digest: null, result_summary: null, failure_classification: null, status: 'running' as const }
+    const runningAttempt = { attempt_id: 'attempt-1', worktree_evidence: worktreeEvidence(), agent: 'executor', model: null, child_session_id: null, started_at: NOW, completed_at: null, checkpoint_commit: null, review_evidence_digest: null, result_summary: null, failure_classification: null, status: 'running' as const }
     const previous = baseState({ status: 'running', items: { 'item-a': item({ item_id: 'item-a', status: 'running', attempts: [runningAttempt] }), 'item-b': item({ item_id: 'item-b', dependencies: ['item-a'] }) } })
     const passedAttempt = { ...runningAttempt, status: 'passed' as const, completed_at: LATER, checkpoint_commit: OID('1'), review_evidence_digest: SHA('b'), result_summary: 'Passed review.' }
     const next = { ...previous, state_revision: 2, updated_at: LATER, items: { ...previous.items, 'item-a': { ...previous.items['item-a']!, status: 'passed' as const, attempts: [passedAttempt], selected_attempt_id: 'attempt-1', checkpoint_commit: OID('1'), review_evidence_digest: SHA('b'), completed_at: LATER } } }
@@ -435,7 +452,7 @@ describe('shared failures, DAG, transitions, and identity invariants', () => {
 
   it('retries failed items with fresh work while preserving prior attempt evidence', () => {
     const failedAttempt = {
-      attempt_id: 'attempt-1', agent: 'executor', model: null, child_session_id: 'child-1', started_at: NOW,
+      attempt_id: 'attempt-1', worktree_evidence: worktreeEvidence(), agent: 'executor', model: null, child_session_id: 'child-1', started_at: NOW,
       completed_at: LATER, checkpoint_commit: null, review_evidence_digest: null, result_summary: 'Contract failed.',
       failure_classification: 'contract' as const, status: 'failed' as const,
     }
@@ -446,11 +463,11 @@ describe('shared failures, DAG, transitions, and identity invariants', () => {
     assert.deepEqual(validatedQueued.items['item-a']!.attempts[0], failedAttempt)
 
     const freshAttempt = {
-      attempt_id: 'attempt-2', agent: 'executor', model: null, child_session_id: 'child-2', started_at: LATER,
+      attempt_id: 'attempt-2', worktree_evidence: worktreeEvidence('item-a', 'attempt-2'), agent: 'executor', model: null, child_session_id: 'child-2', started_at: LATER,
       completed_at: null, checkpoint_commit: null, review_evidence_digest: null, result_summary: null,
       failure_classification: null, status: 'running' as const,
     }
-    const running = { ...previous, state_revision: 2, updated_at: LATER, items: { 'item-a': { ...failedItem, status: 'running' as const, attempts: [failedAttempt, freshAttempt], completed_at: null } } }
+    const running = { ...previous, state_revision: 2, updated_at: LATER, items: { 'item-a': { ...failedItem, status: 'running' as const, attempts: [failedAttempt, freshAttempt], worktree_name: freshAttempt.worktree_evidence.worktree_name, branch_name: freshAttempt.worktree_evidence.branch_name, completed_at: null } } }
     const validatedRunning = validateEpicTransition(previous, running)
     assert.deepEqual(validatedRunning.items['item-a']!.attempts[0], failedAttempt)
     assert.equal(validatedRunning.items['item-a']!.attempts[1]!.status, 'running')
@@ -458,7 +475,7 @@ describe('shared failures, DAG, transitions, and identity invariants', () => {
 
   it('rejects fabricated attempt appends and requires settlement of the active attempt', () => {
     const fabricated = {
-      attempt_id: 'attempt-fabricated', agent: 'executor', model: null, child_session_id: null,
+      attempt_id: 'attempt-fabricated', worktree_evidence: worktreeEvidence('item-a', 'attempt-fabricated'), agent: 'executor', model: null, child_session_id: null,
       started_at: NOW, completed_at: LATER, checkpoint_commit: null, review_evidence_digest: null,
       result_summary: 'Fabricated.', failure_classification: 'contract' as const, status: 'failed' as const,
     }
@@ -494,7 +511,7 @@ describe('shared failures, DAG, transitions, and identity invariants', () => {
     const backdatedRetry = {
       ...failedPrevious,
       state_revision: 2,
-      items: { 'item-a': item({ item_id: 'item-a', status: 'running', attempts: [fabricated, { ...runningAttempt, attempt_id: 'attempt-retry', started_at: LATER }] }) },
+      items: { 'item-a': item({ item_id: 'item-a', status: 'running', attempts: [fabricated, { ...runningAttempt, attempt_id: 'attempt-retry', worktree_evidence: worktreeEvidence('item-a', 'attempt-retry'), started_at: LATER }] }) },
     }
     assert.throws(() => validateEpicTransition(failedPrevious, backdatedRetry), /start within the revision interval/)
 
@@ -510,11 +527,11 @@ describe('shared failures, DAG, transitions, and identity invariants', () => {
 
   it('requires a sole running attempt to be final and chronologically ordered', () => {
     const failed = {
-      attempt_id: 'attempt-1', agent: 'executor', model: null, child_session_id: null, started_at: NOW,
+      attempt_id: 'attempt-1', worktree_evidence: worktreeEvidence(), agent: 'executor', model: null, child_session_id: null, started_at: NOW,
       completed_at: LATER, checkpoint_commit: null, review_evidence_digest: null, result_summary: 'Failed.',
       failure_classification: 'semantic' as const, status: 'failed' as const,
     }
-    const running = { ...failed, attempt_id: 'attempt-2', started_at: LATER, completed_at: null, result_summary: null, failure_classification: null, status: 'running' as const }
+    const running = { ...failed, attempt_id: 'attempt-2', worktree_evidence: worktreeEvidence('item-a', 'attempt-2'), started_at: LATER, completed_at: null, result_summary: null, failure_classification: null, status: 'running' as const }
     assert.doesNotThrow(() => validateEpicState({ ...baseState(), status: 'running', items: { 'item-a': item({ item_id: 'item-a', status: 'running', attempts: [failed, running] }) } }))
     assert.throws(() => validateEpicState({ ...baseState(), status: 'running', items: { 'item-a': item({ item_id: 'item-a', status: 'running', attempts: [running, failed] }) } }), /final attempt/)
     assert.throws(() => validateEpicState({ ...baseState(), status: 'running', items: { 'item-a': item({ item_id: 'item-a', status: 'running', attempts: [failed, { ...running, started_at: NOW }] }) } }), /timestamps must be ordered/)
@@ -528,7 +545,7 @@ describe('shared failures, DAG, transitions, and identity invariants', () => {
   })
 
   it('enforces scoped usage interval accounting and conservative unknown cost evidence', () => {
-    const runningAttempt = { attempt_id: 'attempt-1', agent: 'executor', model: null, child_session_id: null, started_at: NOW, completed_at: null, checkpoint_commit: null, review_evidence_digest: null, result_summary: null, failure_classification: null, status: 'running' as const }
+    const runningAttempt = { attempt_id: 'attempt-1', worktree_evidence: worktreeEvidence(), agent: 'executor', model: null, child_session_id: null, started_at: NOW, completed_at: null, checkpoint_commit: null, review_evidence_digest: null, result_summary: null, failure_classification: null, status: 'running' as const }
     const active = { ...emptyAutomationUsageTelemetry(), active_interval_started_at: NOW, last_active_checkpoint_at: NOW }
     const previous = baseState({ status: 'running', items: { 'item-a': item({ item_id: 'item-a', status: 'running', attempts: [runningAttempt] }) }, usage: [{ scope: 'epic', item_id: null, usage: active }, { scope: 'item', item_id: 'item-a', usage: active }] })
     const cancelledAttempt = { ...runningAttempt, status: 'cancelled' as const, completed_at: LATER, result_summary: 'Cancelled.', failure_classification: 'cancelled' as const }
@@ -554,7 +571,7 @@ describe('shared failures, DAG, transitions, and identity invariants', () => {
   })
 
   it('rejects duplicate attempt IDs, multiple running attempts, and timestamp inversions', () => {
-    const running = { attempt_id: 'attempt-1', agent: 'executor', model: null, child_session_id: null, started_at: NOW, completed_at: null, checkpoint_commit: null, review_evidence_digest: null, result_summary: null, failure_classification: null, status: 'running' as const }
+    const running = { attempt_id: 'attempt-1', worktree_evidence: worktreeEvidence(), agent: 'executor', model: null, child_session_id: null, started_at: NOW, completed_at: null, checkpoint_commit: null, review_evidence_digest: null, result_summary: null, failure_classification: null, status: 'running' as const }
     assert.throws(() => validateEpicState({ ...baseState(), status: 'running', items: { 'item-a': item({ item_id: 'item-a', status: 'running', attempts: [running] }), 'item-b': item({ item_id: 'item-b', status: 'running', attempts: [running] }) } }), /duplicate attempt ID/)
     assert.throws(() => validateEpicState({ ...baseState(), status: 'running', items: { 'item-a': item({ item_id: 'item-a', status: 'running', attempts: [running, { ...running, attempt_id: 'attempt-2' }] }) } }), /at most one running/)
     assert.throws(() => validateEpicState({ ...baseState(), items: { 'item-a': item({ item_id: 'item-a', status: 'failed', completed_at: LATER, attempts: [{ ...running, completed_at: NOW, started_at: LATER, status: 'failed', result_summary: 'Failed', failure_classification: 'contract' }] }) } }), /must not precede/)
@@ -583,13 +600,13 @@ describe('shared failures, DAG, transitions, and identity invariants', () => {
     assert.throws(() => validateEpicState({ ...baseState(), operational_limits: { ...baseState().operational_limits, max_budget_records: 1 }, budgets: [budget(), budget({ dimension: 'input_tokens' })] }), /budget record count exceeds/)
     assert.throws(() => validateEpicState({ ...baseState(), operational_limits: { ...baseState().operational_limits, max_budget_records: 1 }, budgets: [budget({ extensions: [policyRecord({ update_id: 'nested' }) as EpicBudgetExtension] })] }), /aggregate budget record count exceeds/)
     assert.throws(() => validateEpicState({ ...baseState(), operational_limits: { ...baseState().operational_limits, max_budget_records: 1 }, budget_updates: [policyRecord()] , budgets: [budget()] }), /aggregate budget record count exceeds/)
-    const completed_attempt = { attempt_id: 'attempt-1', agent: 'executor', model: null, child_session_id: null, started_at: NOW, completed_at: LATER, checkpoint_commit: OID('1'), review_evidence_digest: SHA('b'), result_summary: 'Done.', failure_classification: null, status: 'passed' as const }
+    const completed_attempt = { attempt_id: 'attempt-1', worktree_evidence: worktreeEvidence(), agent: 'executor', model: null, child_session_id: null, started_at: NOW, completed_at: LATER, checkpoint_commit: OID('1'), review_evidence_digest: SHA('b'), result_summary: 'Done.', failure_classification: null, status: 'passed' as const }
     assert.throws(() => validateEpicState({ ...baseState(), operational_limits: { ...baseState().operational_limits, max_attempts_per_item: 1 }, items: { 'item-a': item({ item_id: 'item-a', status: 'passed', completed_at: LATER, attempts: [completed_attempt, { ...completed_attempt, attempt_id: 'attempt-2' }] }) } }), /attempt count exceeds/)
   })
 
   it('rejects incomplete item dispositions for completed epics and integration metadata on non-integrated items', () => {
     const failedAttempt = {
-      attempt_id: 'attempt-failed', agent: 'executor', model: null, child_session_id: null, started_at: NOW,
+      attempt_id: 'attempt-failed', worktree_evidence: worktreeEvidence('item-a', 'attempt-failed'), agent: 'executor', model: null, child_session_id: null, started_at: NOW,
       completed_at: LATER, checkpoint_commit: null, review_evidence_digest: null, result_summary: 'Failed.',
       failure_classification: 'contract' as const, status: 'failed' as const,
     }
@@ -606,7 +623,7 @@ describe('shared failures, DAG, transitions, and identity invariants', () => {
 
   it('binds integration digest, dependency snapshot, review evidence, and checkpoint identity', () => {
     const integrated_item = item({
-      item_id: 'item-a', status: 'integrated', worktree_name: 'wt-a', branch_name: 'epic/item-a',
+      item_id: 'item-a', status: 'integrated',
       attempts: [reviewedAttempt()], selected_attempt_id: 'attempt-1', checkpoint_commit: OID('1'), review_evidence_digest: SHA('b'), integration_commit: OID('2'), completed_at: LATER,
     })
     const draft = baseState({ items: { 'item-a': integrated_item } })
@@ -634,7 +651,7 @@ describe('shared failures, DAG, transitions, and identity invariants', () => {
     assert.throws(() => validateEpicTransition(previous, { ...next, epic_id: 'other' }), /identity is immutable/)
     assert.throws(() => validateEpicTransition(previous, { ...next, items: { ...next.items, 'item-a': { ...next.items['item-a']!, scope: 'changed' } } }), /DAG identity/)
 
-    const passedItem = item({ item_id: 'item-a', status: 'passed', attempts: [reviewedAttempt()], selected_attempt_id: 'attempt-1', worktree_name: 'wt-a', branch_name: 'epic/item-a', checkpoint_commit: OID('1'), review_evidence_digest: SHA('b'), completed_at: LATER })
+    const passedItem = item({ item_id: 'item-a', status: 'passed', attempts: [reviewedAttempt()], selected_attempt_id: 'attempt-1', checkpoint_commit: OID('1'), review_evidence_digest: SHA('b'), completed_at: LATER })
     const passed = baseState({ state_revision: 2, status: 'running', updated_at: LATER, items: { 'item-a': passedItem } })
     const integrated = transitionEpicItemToIntegrated(passed, 'item-a', {
       event_id: 'event-1', dependency_snapshot_sha256: computeDependencySnapshotDigest(passed, passedItem), source_commit: OID('1'), target_commit: OID('2'),
@@ -643,7 +660,7 @@ describe('shared failures, DAG, transitions, and identity invariants', () => {
     assert.equal(integrated.items['item-a']!.integration_commit, OID('2'))
     assert.equal(integrated.integration_log[0]!.source_commit, OID('1'))
     assert.throws(() => validateEpicTransition(passed, { ...integrated, items: { ...integrated.items, 'item-a': { ...integrated.items['item-a']!, completed_at: NOW } } }), /reviewed fields|precedes attempt completion/)
-    assert.throws(() => validateEpicTransition(passed, { ...integrated, items: { ...integrated.items, 'item-a': { ...integrated.items['item-a']!, worktree_name: 'different-worktree' } } }), /worktree_name is immutable|reviewed fields/)
+    assert.throws(() => validateEpicTransition(passed, { ...integrated, items: { ...integrated.items, 'item-a': { ...integrated.items['item-a']!, worktree_name: 'different-worktree' } } }), /worktree_name is immutable|reviewed fields|selected passed attempt/)
     assert.throws(() => validateEpicTransition(passed, { ...integrated, integration_log: [] }), /successful integration event|exactly one newly appended integration event/)
 
     const conflicted = transitionEpicItemToConflicted(passed, 'item-a', ['src/conflict.ts'], {
@@ -661,8 +678,8 @@ describe('shared failures, DAG, transitions, and identity invariants', () => {
 
   it('requires integrated dependencies before either integration outcome', () => {
     const dependent = item({
-      item_id: 'item-b', dependencies: ['item-a'], status: 'passed', attempts: [reviewedAttempt()],
-      selected_attempt_id: 'attempt-1', worktree_name: 'wt-b', branch_name: 'epic/item-b',
+      item_id: 'item-b', dependencies: ['item-a'], status: 'passed', attempts: [reviewedAttempt('attempt-1', 'item-b')],
+      selected_attempt_id: 'attempt-1',
       checkpoint_commit: OID('1'), review_evidence_digest: SHA('b'), completed_at: LATER,
     })
     const state = baseState({ status: 'running', items: { 'item-a': item({ item_id: 'item-a' }), 'item-b': dependent } })
@@ -693,12 +710,12 @@ describe('shared failures, DAG, transitions, and identity invariants', () => {
   it('permits only one causally ordered integration outcome per revision', () => {
     const first = item({
       item_id: 'item-a', status: 'passed', attempts: [reviewedAttempt('attempt-1')], selected_attempt_id: 'attempt-1',
-      worktree_name: 'wt-a', branch_name: 'epic/item-a', checkpoint_commit: OID('1'), review_evidence_digest: SHA('b'), completed_at: LATER,
+      checkpoint_commit: OID('1'), review_evidence_digest: SHA('b'), completed_at: LATER,
     })
-    const secondAttempt = { ...reviewedAttempt('attempt-2'), checkpoint_commit: OID('3'), review_evidence_digest: SHA('c') }
+    const secondAttempt = { ...reviewedAttempt('attempt-2', 'item-b'), checkpoint_commit: OID('3'), review_evidence_digest: SHA('c') }
     const second = item({
       item_id: 'item-b', status: 'passed', attempts: [secondAttempt], selected_attempt_id: 'attempt-2',
-      worktree_name: 'wt-b', branch_name: 'epic/item-b', checkpoint_commit: OID('3'), review_evidence_digest: SHA('c'), completed_at: LATER,
+      checkpoint_commit: OID('3'), review_evidence_digest: SHA('c'), completed_at: LATER,
     })
     const previous = baseState({ status: 'running', items: { 'item-a': first, 'item-b': second } })
     const firstEvent = {
@@ -727,7 +744,7 @@ describe('shared failures, DAG, transitions, and identity invariants', () => {
   it('preserves a failed integration event through retry and successful integration', () => {
     const firstItem = item({
       item_id: 'item-a', status: 'passed', attempts: [reviewedAttempt('attempt-1')], selected_attempt_id: 'attempt-1',
-      worktree_name: 'wt-a-1', branch_name: 'epic/item-a/attempt-1', checkpoint_commit: OID('1'),
+      checkpoint_commit: OID('1'),
       review_evidence_digest: SHA('b'), completed_at: LATER,
     })
     const passed = baseState({ status: 'running', items: { 'item-a': firstItem } })
@@ -736,7 +753,7 @@ describe('shared failures, DAG, transitions, and identity invariants', () => {
       source_commit: OID('1'), target_commit: OID('3'), review_evidence_digest: SHA('b'), recorded_at: LATER,
     })
     const runningAttempt = {
-      attempt_id: 'attempt-2', agent: 'executor', model: null, child_session_id: null, started_at: LATER,
+      attempt_id: 'attempt-2', worktree_evidence: worktreeEvidence('item-a', 'attempt-2'), agent: 'executor', model: null, child_session_id: null, started_at: LATER,
       completed_at: null, checkpoint_commit: null, review_evidence_digest: null, result_summary: null,
       failure_classification: null, status: 'running' as const,
     }
@@ -745,7 +762,7 @@ describe('shared failures, DAG, transitions, and identity invariants', () => {
       state_revision: conflicted.state_revision + 1,
       items: { 'item-a': {
         ...conflicted.items['item-a']!, status: 'running', attempts: [...conflicted.items['item-a']!.attempts, runningAttempt],
-        selected_attempt_id: null, worktree_name: 'wt-a-2', branch_name: 'epic/item-a/attempt-2', checkpoint_commit: null,
+        selected_attempt_id: null, worktree_name: runningAttempt.worktree_evidence.worktree_name, branch_name: runningAttempt.worktree_evidence.branch_name, checkpoint_commit: null,
         review_evidence_digest: null, conflict_paths: [], integration_commit: null, completed_at: null,
       } },
     })
@@ -784,7 +801,7 @@ describe('shared failures, DAG, transitions, and identity invariants', () => {
   })
 
   it('requeues conflicted work by clearing current selection while retaining failure history', () => {
-    const passedItem = item({ item_id: 'item-a', status: 'passed', attempts: [reviewedAttempt()], selected_attempt_id: 'attempt-1', worktree_name: 'wt-a', branch_name: 'epic/item-a', checkpoint_commit: OID('1'), review_evidence_digest: SHA('b'), completed_at: LATER })
+    const passedItem = item({ item_id: 'item-a', status: 'passed', attempts: [reviewedAttempt()], selected_attempt_id: 'attempt-1', checkpoint_commit: OID('1'), review_evidence_digest: SHA('b'), completed_at: LATER })
     const passed = baseState({ status: 'running', items: { 'item-a': passedItem } })
     const conflicted = transitionEpicItemToConflicted(passed, 'item-a', ['src/conflict.ts'], {
       event_id: 'event-failure', dependency_snapshot_sha256: computeDependencySnapshotDigest(passed, passedItem), source_commit: OID('1'), target_commit: OID('3'),

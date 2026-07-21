@@ -31,7 +31,7 @@ const ATTEMPT_STATUS_ADJACENCY: Record<EpicAttemptStatus, ReadonlySet<EpicAttemp
 }
 
 function validateAttemptTransition(previous: EpicAttempt, next: EpicAttempt, label: string): void {
-  for (const field of ['attempt_id', 'agent', 'model', 'child_session_id', 'started_at'] as const) assertEpicEqual(`${label}.${field}`, previous[field], next[field])
+  for (const field of ['attempt_id', 'worktree_evidence', 'agent', 'model', 'child_session_id', 'started_at'] as const) assertEpicEqual(`${label}.${field}`, previous[field], next[field])
   if (!ATTEMPT_STATUS_ADJACENCY[previous.status].has(next.status)) throw new EpicValidationError(`invalid attempt status transition ${previous.status} -> ${next.status}`)
   if (previous.status !== 'running') { assertEpicEqual(label, previous, next); return }
   if (next.status === 'running') assertEpicEqual(label, previous, next)

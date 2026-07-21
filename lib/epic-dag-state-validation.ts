@@ -44,6 +44,9 @@ function addStateIssues(state: EpicState, context: z.core.$RefinementCtx): void 
       if (attempt_ids.has(attempt.attempt_id)) issue(['items', key, 'attempts', index, 'attempt_id'], `duplicate attempt ID: ${attempt.attempt_id}`)
       attempt_ids.add(attempt.attempt_id)
       if (attempt.status === 'running') running_attempts += 1
+      if (attempt.worktree_evidence.epic_id !== state.epic_id) issue(['items', key, 'attempts', index, 'worktree_evidence', 'epic_id'], 'attempt worktree evidence must match the containing epic')
+      if (attempt.worktree_evidence.item_id !== item.item_id) issue(['items', key, 'attempts', index, 'worktree_evidence', 'item_id'], 'attempt worktree evidence must match the containing item')
+      if (attempt.worktree_evidence.attempt_id !== attempt.attempt_id) issue(['items', key, 'attempts', index, 'worktree_evidence', 'attempt_id'], 'attempt worktree evidence must match the containing attempt')
       if (index > 0 && previous_completed_at === null) issue(['items', key, 'attempts', index], 'a running attempt must be the final attempt')
       if (previous_completed_at !== null && Date.parse(attempt.started_at) < previous_completed_at) issue(['items', key, 'attempts', index, 'started_at'], 'attempt history timestamps must be ordered')
       if (Date.parse(attempt.started_at) > Date.parse(state.updated_at)) issue(['items', key, 'attempts', index, 'started_at'], 'attempt cannot start after state updated_at')
@@ -167,14 +170,25 @@ export function validateEpicTransitions(state: EpicState): void {
       if (item.attempts.length === 0 || item.selected_attempt_id === null || selectedAttempts.length !== 1 || selectedAttempts[0]!.status !== 'passed') throw new EpicValidationError(`${item.status} item ${item.item_id} requires exactly one selected passed attempt`)
       const selected = selectedAttempts[0]!
       if (selected.checkpoint_commit !== item.checkpoint_commit || selected.review_evidence_digest !== item.review_evidence_digest || item.checkpoint_commit === null || item.review_evidence_digest === null) throw new EpicValidationError(`${item.status} item ${item.item_id} checkpoint and review evidence must match its selected passed attempt`)
+      if (item.worktree_name !== selected.worktree_evidence.worktree_name || item.branch_name !== selected.worktree_evidence.branch_name) throw new EpicValidationError(`${item.status} item ${item.item_id} worktree selection must match its selected passed attempt`)
     } else if (item.selected_attempt_id !== null || item.checkpoint_commit !== null || item.review_evidence_digest !== null) {
       throw new EpicValidationError(`${item.status} item ${item.item_id} must not retain current selected checkpoint or review fields`)
     }
-    if (['pending', 'queued'].includes(item.status) && (item.worktree_name !== null || item.branch_name !== null)) throw new EpicValidationError(`${item.status} item ${item.item_id} must not have current worktree selection`)
+    if (item.status === 'running') {
+      const running = item.attempts.at(-1)!
+      if (item.worktree_name !== running.worktree_evidence.worktree_name || item.branch_name !== running.worktree_evidence.branch_name) throw new EpicValidationError(`running item ${item.item_id} worktree selection must match its running attempt`)
+    } else if (['pending', 'queued'].includes(item.status)) {
+      if (item.worktree_name !== null || item.branch_name !== null) throw new EpicValidationError(`${item.status} item ${item.item_id} must not have current worktree selection`)
+    } else if (!requiresSelection) {
+      const has_worktree = item.worktree_name !== null || item.branch_name !== null
+      if (has_worktree && (item.worktree_name === null || item.branch_name === null)) throw new EpicValidationError(`${item.status} item ${item.item_id} must retain both worktree fields or neither`)
+      const final_attempt = item.attempts.at(-1)
+      if (has_worktree && (!final_attempt || item.worktree_name !== final_attempt.worktree_evidence.worktree_name || item.branch_name !== final_attempt.worktree_evidence.branch_name)) throw new EpicValidationError(`${item.status} item ${item.item_id} retained worktree selection must match its final attempt`)
+    }
     if ((item.status === 'conflicted') !== (item.conflict_paths.length > 0)) throw new EpicValidationError(`${item.status === 'conflicted' ? 'conflicted' : 'non-conflicted'} item ${item.item_id} ${item.status === 'conflicted' ? 'must record' : 'must not have'} conflict paths`)
     if (item.status !== 'integrated' && item.integration_commit !== null) throw new EpicValidationError(`non-integrated item ${item.item_id} must not have an integration commit`)
     if (item.status === 'integrated') {
-      if (!item.integration_commit || !item.worktree_name || !item.checkpoint_commit || !item.review_evidence_digest) throw new EpicValidationError(`integrated item ${item.item_id} requires retained worktree, checkpoint, review evidence, and integration commit`)
+      if (!item.integration_commit || !item.worktree_name || !item.branch_name || !item.checkpoint_commit || !item.review_evidence_digest) throw new EpicValidationError(`integrated item ${item.item_id} requires retained worktree, branch, checkpoint, review evidence, and integration commit`)
       if (!state.integration_log.some(event => event.item_id === item.item_id && event.result === 'success')) throw new EpicValidationError(`integrated item ${item.item_id} requires a successful integration event`)
     }
     for (const dependency of item.dependencies) {
