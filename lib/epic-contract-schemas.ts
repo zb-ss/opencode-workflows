@@ -205,7 +205,8 @@ export interface EpicReviewRecord {
   review_id: string
   agent: string
   model: string
-  child_session_id: string
+  child_session_id: string | null
+  launch_state: EpicLaunchState
   checkpoint_commit: string
   checkpoint_tree_sha256: string
   started_at: string
@@ -333,7 +334,8 @@ export const EpicReviewRecordSchema = z.object({
   review_id: SafeIdentifierSchema,
   agent: SafeIdentifierSchema,
   model: ModelIdentifierSchema,
-  child_session_id: SafeIdentifierSchema,
+  child_session_id: SafeIdentifierSchema.nullable(),
+  launch_state: z.enum(['reserved', 'created', 'prompted', 'settled', 'ambiguous']),
   checkpoint_commit: GitOidSchema,
   checkpoint_tree_sha256: Sha256Schema,
   started_at: DateTimeSchema,
@@ -350,6 +352,18 @@ export const EpicReviewRecordSchema = z.object({
   }
   if (review.completed_at !== null && Date.parse(review.completed_at) < Date.parse(review.started_at)) {
     context.addIssue({ code: 'custom', path: ['completed_at'], message: 'review completion must not precede review start' })
+  }
+  if (review.launch_state === 'reserved' && review.child_session_id !== null) {
+    context.addIssue({ code: 'custom', path: ['child_session_id'], message: 'reserved review launch must not have a child session ID' })
+  }
+  if (['created', 'prompted'].includes(review.launch_state) && review.child_session_id === null) {
+    context.addIssue({ code: 'custom', path: ['child_session_id'], message: 'created or prompted review launch requires a child session ID' })
+  }
+  if (is_complete && (review.launch_state !== 'settled' || review.child_session_id === null)) {
+    context.addIssue({ code: 'custom', path: ['launch_state'], message: 'completed review requires a settled launch with its exact child session ID' })
+  }
+  if (review.launch_state === 'ambiguous' && is_complete) {
+    context.addIssue({ code: 'custom', path: ['launch_state'], message: 'ambiguous review launch cannot claim a completed review result' })
   }
 })
 
@@ -394,7 +408,8 @@ export const EpicAttemptSchema = z.object({
       context.addIssue({ code: 'custom', path: ['progress_tree_sha256'], message: 'progress commit and tree digest must be recorded together' })
     }
     if (attempt.launch_state === 'reserved' && attempt.child_session_id !== null) context.addIssue({ code: 'custom', path: ['child_session_id'], message: 'reserved launch must not have a child session ID' })
-    if (attempt.launch_state !== 'reserved' && attempt.launch_state !== 'ambiguous' && attempt.child_session_id === null) context.addIssue({ code: 'custom', path: ['child_session_id'], message: 'created launch requires a child session ID' })
+    if (attempt.launch_state !== 'reserved' && attempt.launch_state !== 'ambiguous' && attempt.child_session_id === null
+      && !(attempt.launch_state === 'settled' && attempt.status === 'cancelled')) context.addIssue({ code: 'custom', path: ['child_session_id'], message: 'created launch requires a child session ID' })
     if (attempt.launch_state === 'ambiguous') {
       if (attempt.status !== 'failed' || attempt.failure_classification !== 'ambiguous_launch') context.addIssue({ code: 'custom', path: ['launch_state'], message: 'ambiguous launch must be a failed ambiguous_launch attempt' })
     } else if (is_active && attempt.launch_state === 'settled') {
@@ -417,6 +432,10 @@ export const EpicAttemptSchema = z.object({
       }
       if (Date.parse(attempt.review.started_at) < Date.parse(attempt.started_at)) context.addIssue({ code: 'custom', path: ['review', 'started_at'], message: 'review cannot start before the attempt' })
       if (attempt.review.completed_at !== null && attempt.completed_at !== null && Date.parse(attempt.review.completed_at) > Date.parse(attempt.completed_at)) context.addIssue({ code: 'custom', path: ['review', 'completed_at'], message: 'review cannot complete after the attempt' })
+      if (attempt.review.launch_state === 'settled' && attempt.review.completed_at === null
+        && (attempt.status !== 'cancelled' || attempt.review.child_session_id !== null)) {
+        context.addIssue({ code: 'custom', path: ['review', 'launch_state'], message: 'incomplete settled review is allowed only for cancellation of a reserved no-child review launch' })
+      }
     }
     if (attempt.status === 'passed') {
       if (attempt.checkpoint_tree_sha256 === null || attempt.review === null || attempt.review?.verdict !== 'passed'
@@ -501,4 +520,9 @@ export const EpicStateStructuralSchema = z.object({
   budget_updates: z.array(EpicBudgetUpdateSchema).max(MAX_EPIC_BUDGET_RECORDS),
   coordination_policy: EpicCoordinationPolicySchema.optional(),
   integration_intent: EpicIntegrationIntentSchema.nullable().optional(),
-}).strict()
+}).strict().superRefine((state, context) => {
+  const has_ambiguous_review = Object.values(state.items).some(item => item.attempts.some(attempt => attempt.review?.launch_state === 'ambiguous'))
+  if (has_ambiguous_review && (state.status !== 'paused' || state.pause_code !== 'ambiguous_reviewer_launch')) {
+    context.addIssue({ code: 'custom', path: ['pause_code'], message: 'ambiguous reviewer launch requires an attended paused state' })
+  }
+})

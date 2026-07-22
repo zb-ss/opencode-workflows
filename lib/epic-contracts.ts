@@ -90,3 +90,44 @@ export type {
   EpicOperationalLimits,
   EpicRetryPolicy,
 } from './epic-policy.ts'
+export {
+  EpicUsageDeltaSchema,
+  EpicUsageDeltaInputSchema,
+  applyEpicUsageDelta,
+  reserveEpicAttempt,
+  reserveEpicReviewSession,
+} from './epic-accounting.ts'
+export type {
+  EpicAttemptReservationInput,
+  EpicReviewSessionReservation,
+  EpicReviewSessionReservationInput,
+  EpicReviewSessionReservationResult,
+  EpicUsageDelta,
+  EpicUsageDeltaInput,
+} from './epic-accounting.ts'
+export {
+  assessEpicRetry,
+  calculateEpicTransportRetryNotBefore,
+  deriveEpicRetryCounters,
+  deriveEpicRetryCounts,
+  epicTransportRetryNotBefore,
+} from './epic-retry.ts'
+export type { EpicRetryBlockReason, EpicRetryDecision } from './epic-retry.ts'
+export {
+  EpicExecutorResultSchema,
+  EpicReviewIssueSchema,
+  EpicReviewerResultSchema,
+  MAX_EPIC_RESULT_TEXT_LENGTH,
+  MAX_EPIC_REVIEW_ISSUES,
+  MAX_EPIC_REVIEW_ISSUE_PATH_LENGTH,
+  parseEpicExecutorResult,
+  parseEpicReviewerResult,
+} from './epic-attempt-result.ts'
+export type { EpicExecutorResult, EpicReviewIssue, EpicReviewerResult } from './epic-attempt-result.ts'
+export {
+  EPIC_REVIEW_EVIDENCE_CONTRACT_VERSION,
+  EpicReviewEvidenceInputSchema,
+  canonicalEpicReviewEvidence,
+  computeEpicReviewEvidenceDigest,
+} from './epic-review-binding.ts'
+export type { CanonicalEpicReviewEvidence, EpicReviewEvidenceInput } from './epic-review-binding.ts'

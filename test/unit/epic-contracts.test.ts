@@ -267,7 +267,8 @@ function coordinatedLifecycle() {
     review_id: 'review-1',
     agent: policy.reviewer_agent,
     model: policy.reviewer_candidates[0]!.model,
-    child_session_id: 'review-child-1',
+    child_session_id: null,
+    launch_state: 'reserved' as const,
     checkpoint_commit: OID('1'),
     checkpoint_tree_sha256: SHA('1'),
     started_at: AT(5),
@@ -283,19 +284,36 @@ function coordinatedLifecycle() {
     updated_at: AT(5),
     items: { 'item-a': { ...checkpointed.items['item-a']!, attempts: [reviewingAttempt] } },
   })
+  const createdReview = { ...review, child_session_id: 'review-child-1', launch_state: 'created' as const }
+  const reviewCreatedAttempt: EpicAttempt = { ...reviewingAttempt, review: createdReview }
+  const reviewCreated = validateEpicTransition(reviewing, {
+    ...reviewing,
+    state_revision: 7,
+    updated_at: AT(5),
+    items: { 'item-a': { ...reviewing.items['item-a']!, attempts: [reviewCreatedAttempt] } },
+  })
+  const promptedReview = { ...createdReview, launch_state: 'prompted' as const }
+  const reviewPromptedAttempt: EpicAttempt = { ...reviewCreatedAttempt, review: promptedReview }
+  const reviewPrompted = validateEpicTransition(reviewCreated, {
+    ...reviewCreated,
+    state_revision: 8,
+    updated_at: AT(5),
+    items: { 'item-a': { ...reviewCreated.items['item-a']!, attempts: [reviewPromptedAttempt] } },
+  })
   const completedReview = {
-    ...review,
+    ...promptedReview,
+    launch_state: 'settled' as const,
     completed_at: AT(6),
     verdict: 'passed' as const,
     evidence_digest: SHA('b'),
     result_summary: 'Review passed.',
   }
-  const reviewedAttempt: EpicAttempt = { ...reviewingAttempt, review: completedReview, review_evidence_digest: SHA('b') }
-  const reviewed = validateEpicTransition(reviewing, {
-    ...reviewing,
-    state_revision: 7,
+  const reviewedAttempt: EpicAttempt = { ...reviewPromptedAttempt, review: completedReview, review_evidence_digest: SHA('b') }
+  const reviewed = validateEpicTransition(reviewPrompted, {
+    ...reviewPrompted,
+    state_revision: 9,
     updated_at: AT(6),
-    items: { 'item-a': { ...reviewing.items['item-a']!, attempts: [reviewedAttempt] } },
+    items: { 'item-a': { ...reviewPrompted.items['item-a']!, attempts: [reviewedAttempt] } },
   })
   const passedAttempt: EpicAttempt = {
     ...reviewedAttempt,
@@ -306,7 +324,7 @@ function coordinatedLifecycle() {
   }
   const passed = validateEpicTransition(reviewed, {
     ...reviewed,
-    state_revision: 8,
+    state_revision: 10,
     updated_at: AT(7),
     items: { 'item-a': {
       ...reviewed.items['item-a']!,
@@ -318,7 +336,7 @@ function coordinatedLifecycle() {
       completed_at: AT(7),
     } },
   })
-  return { queued, reserved, created, prompted, checkpointed, reviewing, reviewed, passed }
+  return { queued, reserved, created, prompted, checkpointed, reviewing, reviewCreated, reviewPrompted, reviewed, passed }
 }
 
 function coordinatedIntent(expected_target_commit: string, intent_id: string) {
@@ -665,8 +683,13 @@ describe('shared failures, DAG, transitions, and identity invariants', () => {
     assert.equal(lifecycle.created.items['item-a']!.attempts[0]!.child_session_id, 'child-1')
     assert.equal(lifecycle.prompted.items['item-a']!.attempts[0]!.launch_state, 'prompted')
     assert.equal(lifecycle.checkpointed.items['item-a']!.attempts[0]!.status, 'checkpointed')
+    assert.equal(lifecycle.reviewing.items['item-a']!.attempts[0]!.review?.launch_state, 'reserved')
+    assert.equal(lifecycle.reviewing.items['item-a']!.attempts[0]!.review?.child_session_id, null)
+    assert.equal(lifecycle.reviewCreated.items['item-a']!.attempts[0]!.review?.launch_state, 'created')
+    assert.equal(lifecycle.reviewPrompted.items['item-a']!.attempts[0]!.review?.launch_state, 'prompted')
     assert.equal(lifecycle.reviewing.items['item-a']!.attempts[0]!.review?.completed_at, null)
     assert.equal(lifecycle.reviewed.items['item-a']!.attempts[0]!.review?.evidence_digest, SHA('b'))
+    assert.equal(lifecycle.reviewed.items['item-a']!.attempts[0]!.review?.launch_state, 'settled')
     assert.equal(lifecycle.passed.items['item-a']!.attempts[0]!.launch_state, 'settled')
   })
 
@@ -715,6 +738,22 @@ describe('shared failures, DAG, transitions, and identity invariants', () => {
       }] } },
     }), /requires a prompted launch/)
 
+    const checkpointedAttempt = lifecycle.checkpointed.items['item-a']!.attempts[0]!
+    assert.throws(() => validateEpicTransition(lifecycle.checkpointed, {
+      ...lifecycle.checkpointed,
+      state_revision: lifecycle.checkpointed.state_revision + 1,
+      updated_at: AT(5),
+      items: { 'item-a': { ...lifecycle.checkpointed.items['item-a']!, attempts: [{
+        ...checkpointedAttempt,
+        status: 'reviewing',
+        review: {
+          review_id: 'review-bypass', agent: 'epic-reviewer', model: 'example/model-b', child_session_id: 'review-child-bypass',
+          launch_state: 'created', checkpoint_commit: checkpointedAttempt.checkpoint_commit!, checkpoint_tree_sha256: checkpointedAttempt.checkpoint_tree_sha256!,
+          started_at: AT(5), completed_at: null, verdict: null, evidence_digest: null, result_summary: null,
+        },
+      }] } },
+    }), /durably reserve a no-child review launch/)
+
     const reviewedAttempt = lifecycle.reviewed.items['item-a']!.attempts[0]!
     assert.throws(() => validateEpicTransition(lifecycle.reviewed, {
       ...lifecycle.reviewed,
@@ -722,6 +761,39 @@ describe('shared failures, DAG, transitions, and identity invariants', () => {
       updated_at: AT(7),
       items: { 'item-a': { ...lifecycle.reviewed.items['item-a']!, attempts: [{ ...reviewedAttempt, review: { ...reviewedAttempt.review!, evidence_digest: SHA('c') }, review_evidence_digest: SHA('c') }] } },
     }), /review is immutable/)
+
+    const reviewCreatedAttempt = lifecycle.reviewCreated.items['item-a']!.attempts[0]!
+    assert.throws(() => validateEpicTransition(lifecycle.reviewCreated, {
+      ...lifecycle.reviewCreated,
+      state_revision: lifecycle.reviewCreated.state_revision + 1,
+      updated_at: AT(6),
+      items: { 'item-a': { ...lifecycle.reviewCreated.items['item-a']!, attempts: [{
+        ...reviewCreatedAttempt,
+        review: { ...reviewCreatedAttempt.review!, child_session_id: 'forged-review-child' },
+      }] } },
+    }), /child_session_id is immutable/)
+
+    const reviewPromptedAttempt = lifecycle.reviewPrompted.items['item-a']!.attempts[0]!
+    assert.throws(() => validateEpicTransition(lifecycle.reviewPrompted, {
+      ...lifecycle.reviewPrompted,
+      state_revision: lifecycle.reviewPrompted.state_revision + 1,
+      updated_at: AT(6),
+      items: { 'item-a': { ...lifecycle.reviewPrompted.items['item-a']!, attempts: [{
+        ...reviewPromptedAttempt,
+        review: { ...reviewPromptedAttempt.review!, launch_state: 'settled' },
+      }] } },
+    }), /incomplete settled review/)
+    assert.throws(() => validateEpicTransition(lifecycle.reviewPrompted, {
+      ...lifecycle.reviewPrompted,
+      state_revision: lifecycle.reviewPrompted.state_revision + 1,
+      updated_at: AT(6),
+      items: { 'item-a': { ...lifecycle.reviewPrompted.items['item-a']!, attempts: [{
+        ...reviewPromptedAttempt,
+        review: {
+          ...reviewPromptedAttempt.review!, completed_at: AT(6), verdict: 'passed', evidence_digest: SHA('b'), result_summary: 'Passed.',
+        },
+      }] } },
+    }), /completed review requires a settled launch/)
   })
 
   it('requires a fresh integration intent and clears it only on an exact settlement', () => {

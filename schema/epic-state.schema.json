@@ -444,10 +444,27 @@
                           "maxLength": 4096
                         },
                         "child_session_id": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 64,
+                              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "launch_state": {
                           "type": "string",
-                          "minLength": 1,
-                          "maxLength": 64,
-                          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+                          "enum": [
+                            "reserved",
+                            "created",
+                            "prompted",
+                            "settled",
+                            "ambiguous"
+                          ]
                         },
                         "checkpoint_commit": {
                           "type": "string",
@@ -519,6 +536,7 @@
                         "agent",
                         "model",
                         "child_session_id",
+                        "launch_state",
                         "checkpoint_commit",
                         "checkpoint_tree_sha256",
                         "started_at",

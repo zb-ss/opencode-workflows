@@ -34,9 +34,9 @@ const ATTEMPT_STATUS_ADJACENCY: Record<EpicAttemptStatus, ReadonlySet<EpicAttemp
   passed: new Set(['passed']), failed: new Set(['failed']), cancelled: new Set(['cancelled']),
 }
 const LAUNCH_STATE_ADJACENCY = {
-  reserved: new Set(['reserved', 'created', 'ambiguous']),
+  reserved: new Set(['reserved', 'created', 'settled', 'ambiguous']),
   created: new Set(['created', 'prompted', 'ambiguous']),
-  prompted: new Set(['prompted', 'settled']),
+  prompted: new Set(['prompted', 'settled', 'ambiguous']),
   settled: new Set(['settled']),
   ambiguous: new Set(['ambiguous']),
 } as const
@@ -50,11 +50,20 @@ function validateReviewTransition(previous: EpicAttempt, next: EpicAttempt, labe
   if (previous.review === undefined || next.review === undefined) return
   if (previous.review === null) return
   if (next.review === null) throw new EpicValidationError(`${label}.review cannot be removed`)
-  for (const field of ['review_id', 'agent', 'model', 'child_session_id', 'checkpoint_commit', 'checkpoint_tree_sha256', 'started_at'] as const) {
+  for (const field of ['review_id', 'agent', 'model', 'checkpoint_commit', 'checkpoint_tree_sha256', 'started_at'] as const) {
     assertEpicEqual(`${label}.review.${field}`, previous.review[field], next.review[field])
   }
+  if (!LAUNCH_STATE_ADJACENCY[previous.review.launch_state].has(next.review.launch_state)) {
+    throw new EpicValidationError(`${label}.review has invalid launch state transition ${previous.review.launch_state} -> ${next.review.launch_state}`)
+  }
+  if (previous.review.child_session_id === null && next.review.child_session_id !== null) {
+    if (previous.review.launch_state !== 'reserved' || next.review.launch_state !== 'created') {
+      throw new EpicValidationError(`${label}.review child_session_id may be set only during reserved -> created`)
+    }
+  } else assertEpicEqual(`${label}.review.child_session_id`, previous.review.child_session_id, next.review.child_session_id)
   if (previous.review.completed_at !== null) assertEpicEqual(`${label}.review`, previous.review, next.review)
-  if (previous.review.completed_at === null && next.review.completed_at === null) assertEpicEqual(`${label}.review`, previous.review, next.review)
+  if (previous.review.completed_at === null && next.review.completed_at === null
+    && previous.review.launch_state === next.review.launch_state) assertEpicEqual(`${label}.review`, previous.review, next.review)
 }
 
 function validateAttemptTransition(previous: EpicAttempt, next: EpicAttempt, label: string): void {
@@ -76,6 +85,10 @@ function validateAttemptTransition(previous: EpicAttempt, next: EpicAttempt, lab
   if (previous.child_session_id === null && next.child_session_id !== null) {
     if (previous.launch_state !== 'reserved' || next.launch_state !== 'created') throw new EpicValidationError(`${label} child_session_id may be set only during reserved -> created`)
   } else assertEpicEqual(`${label}.child_session_id`, previous.child_session_id, next.child_session_id)
+  if (previous.launch_state === 'reserved' && next.launch_state === 'settled'
+    && (next.status !== 'cancelled' || next.child_session_id !== null)) {
+    throw new EpicValidationError(`${label} reserved launch may settle without creation only as a no-child cancellation`)
+  }
   if (previous.checkpoint_commit !== null) assertEpicEqual(`${label}.checkpoint_commit`, previous.checkpoint_commit, next.checkpoint_commit)
   if (previous.checkpoint_tree_sha256 !== null) assertEpicEqual(`${label}.checkpoint_tree_sha256`, previous.checkpoint_tree_sha256, next.checkpoint_tree_sha256)
   if (previous.status === 'running' && next.status === 'checkpointed') {
@@ -84,6 +97,10 @@ function validateAttemptTransition(previous: EpicAttempt, next: EpicAttempt, lab
   } else if (previous.checkpoint_commit === null && next.checkpoint_commit !== null) throw new EpicValidationError(`${label} checkpoint may be set only during running -> checkpointed`)
   if (previous.status === 'checkpointed' && next.status === 'reviewing') {
     if (previous.review !== null || next.review === null) throw new EpicValidationError(`${label} reviewing transition must create one checkpoint-bound review record`)
+    const review = next.review
+    if (review === undefined || review.launch_state !== 'reserved' || review.child_session_id !== null) {
+      throw new EpicValidationError(`${label} reviewing transition must durably reserve a no-child review launch before creation`)
+    }
   } else if (previous.review === null && next.review !== null) throw new EpicValidationError(`${label} review may be created only during checkpointed -> reviewing`)
   validateReviewTransition(previous, next, label)
   if (previous.progress_commit !== next.progress_commit || previous.progress_tree_sha256 !== next.progress_tree_sha256) {
