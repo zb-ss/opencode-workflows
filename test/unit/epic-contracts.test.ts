@@ -39,11 +39,13 @@ import {
   epicStatusOnly,
   openEpicStore,
 } from '../../lib/epic-persistence.ts'
+import { epicStateDigest } from '../../lib/epic-persistence-codec.ts'
 
 const SHA = (character: string) => character.repeat(64)
 const OID = (character: string) => character.repeat(40)
 const NOW = '2026-07-18T12:00:00.000Z'
 const LATER = '2026-07-18T12:05:00.000Z'
+const AT = (minute: number) => `2026-07-18T12:${String(minute).padStart(2, '0')}:00.000Z`
 const temporary_directories: string[] = []
 
 afterEach(() => {
@@ -155,30 +157,217 @@ function withConfigDir(): void {
   process.env.OPENCODE_CONFIG_DIR = directory
 }
 
+function retryPolicy() {
+  return {
+    max_semantic_attempts: 3,
+    max_contract_attempts: 3,
+    max_transport_attempts: 3,
+    max_no_progress_attempts: 2,
+    transport_backoff: { strategy: 'exponential' as const, initial_delay_ms: 100, maximum_delay_ms: 1000, multiplier: 2 },
+  }
+}
+
+function enabledEpicConfig() {
+  return {
+    enabled: true as const,
+    max_epic_items: 12,
+    max_item_dependencies: 4,
+    max_attempts_per_item: 3,
+    max_budget_records: 24,
+    executor_agent: 'epic-executor',
+    executor_model_tier: 'mid' as const,
+    reviewer_agent: 'epic-reviewer',
+    reviewer_model_tier: 'high' as const,
+    max_parallel_sessions: 2,
+    max_attempt_duration_ms: 300_000,
+    active_time_checkpoint_ms: 30_000,
+    max_result_bytes: 1_048_576,
+    retry_policy: retryPolicy(),
+  }
+}
+
+function coordinationPolicy() {
+  return {
+    policy_version: 1 as const,
+    executor_agent: 'epic-executor',
+    executor_candidates: [{ model: 'example/model-a' }],
+    reviewer_agent: 'epic-reviewer',
+    reviewer_candidates: [{ model: 'example/model-b' }],
+    max_parallel_sessions: 2,
+    provider_concurrency: { example: 2 },
+    retry_policy: retryPolicy(),
+    max_attempt_duration_ms: 300_000,
+    active_time_checkpoint_ms: 30_000,
+    max_result_bytes: 1_048_576,
+    provider_cost_reporting: { example: { status: 'unknown' as const } },
+  }
+}
+
+function coordinatedLifecycle() {
+  const policy = coordinationPolicy()
+  const queued = baseState({
+    status: 'running',
+    updated_at: NOW,
+    coordination_policy: policy,
+    items: { 'item-a': item({ item_id: 'item-a', status: 'queued' }) },
+  })
+  const reservedAttempt: EpicAttempt = {
+    attempt_id: 'attempt-coordinated',
+    worktree_evidence: worktreeEvidence('item-a', 'attempt-coordinated'),
+    agent: policy.executor_agent,
+    model: policy.executor_candidates[0]!.model,
+    child_session_id: null,
+    started_at: AT(1),
+    completed_at: null,
+    checkpoint_commit: null,
+    review_evidence_digest: null,
+    result_summary: null,
+    failure_classification: null,
+    status: 'running',
+    launch_id: 'launch-1',
+    launch_state: 'reserved',
+    progress_commit: null,
+    progress_tree_sha256: null,
+    checkpoint_tree_sha256: null,
+    review: null,
+  }
+  const reserved = validateEpicTransition(queued, {
+    ...queued,
+    state_revision: 2,
+    updated_at: AT(1),
+    items: { 'item-a': item({ item_id: 'item-a', status: 'running', attempts: [reservedAttempt] }) },
+  })
+  const createdAttempt: EpicAttempt = { ...reservedAttempt, child_session_id: 'child-1', launch_state: 'created' }
+  const created = validateEpicTransition(reserved, {
+    ...reserved,
+    state_revision: 3,
+    updated_at: AT(2),
+    items: { 'item-a': { ...reserved.items['item-a']!, attempts: [createdAttempt] } },
+  })
+  const promptedAttempt: EpicAttempt = { ...createdAttempt, launch_state: 'prompted' }
+  const prompted = validateEpicTransition(created, {
+    ...created,
+    state_revision: 4,
+    updated_at: AT(3),
+    items: { 'item-a': { ...created.items['item-a']!, attempts: [promptedAttempt] } },
+  })
+  const checkpointedAttempt: EpicAttempt = {
+    ...promptedAttempt,
+    status: 'checkpointed',
+    checkpoint_commit: OID('1'),
+    checkpoint_tree_sha256: SHA('1'),
+  }
+  const checkpointed = validateEpicTransition(prompted, {
+    ...prompted,
+    state_revision: 5,
+    updated_at: AT(4),
+    items: { 'item-a': { ...prompted.items['item-a']!, attempts: [checkpointedAttempt] } },
+  })
+  const review = {
+    review_id: 'review-1',
+    agent: policy.reviewer_agent,
+    model: policy.reviewer_candidates[0]!.model,
+    child_session_id: 'review-child-1',
+    checkpoint_commit: OID('1'),
+    checkpoint_tree_sha256: SHA('1'),
+    started_at: AT(5),
+    completed_at: null,
+    verdict: null,
+    evidence_digest: null,
+    result_summary: null,
+  }
+  const reviewingAttempt: EpicAttempt = { ...checkpointedAttempt, status: 'reviewing', review }
+  const reviewing = validateEpicTransition(checkpointed, {
+    ...checkpointed,
+    state_revision: 6,
+    updated_at: AT(5),
+    items: { 'item-a': { ...checkpointed.items['item-a']!, attempts: [reviewingAttempt] } },
+  })
+  const completedReview = {
+    ...review,
+    completed_at: AT(6),
+    verdict: 'passed' as const,
+    evidence_digest: SHA('b'),
+    result_summary: 'Review passed.',
+  }
+  const reviewedAttempt: EpicAttempt = { ...reviewingAttempt, review: completedReview, review_evidence_digest: SHA('b') }
+  const reviewed = validateEpicTransition(reviewing, {
+    ...reviewing,
+    state_revision: 7,
+    updated_at: AT(6),
+    items: { 'item-a': { ...reviewing.items['item-a']!, attempts: [reviewedAttempt] } },
+  })
+  const passedAttempt: EpicAttempt = {
+    ...reviewedAttempt,
+    status: 'passed',
+    launch_state: 'settled',
+    completed_at: AT(7),
+    result_summary: 'Execution and review passed.',
+  }
+  const passed = validateEpicTransition(reviewed, {
+    ...reviewed,
+    state_revision: 8,
+    updated_at: AT(7),
+    items: { 'item-a': {
+      ...reviewed.items['item-a']!,
+      status: 'passed',
+      attempts: [passedAttempt],
+      selected_attempt_id: passedAttempt.attempt_id,
+      checkpoint_commit: passedAttempt.checkpoint_commit,
+      review_evidence_digest: passedAttempt.review_evidence_digest,
+      completed_at: AT(7),
+    } },
+  })
+  return { queued, reserved, created, prompted, checkpointed, reviewing, reviewed, passed }
+}
+
+function coordinatedIntent(expected_target_commit: string, intent_id: string) {
+  const passed = coordinatedLifecycle().passed
+  const passedItem = passed.items['item-a']!
+  const intent = {
+    intent_id,
+    operation: 'integrate' as const,
+    item_id: 'item-a',
+    attempt_id: passedItem.selected_attempt_id!,
+    prior_state_revision: passed.state_revision,
+    prior_state_sha256: epicStateDigest(passed),
+    prior_generation: 7,
+    expected_source_commit: passedItem.checkpoint_commit!,
+    expected_target_commit,
+    dependency_snapshot_sha256: computeDependencySnapshotDigest(passed, passedItem),
+    review_evidence_digest: passedItem.review_evidence_digest!,
+  }
+  const intended = validateEpicTransition(passed, {
+    ...passed,
+    state_revision: passed.state_revision + 1,
+    updated_at: AT(8),
+    integration_intent: intent,
+  })
+  return {
+    intended,
+    eventInput: {
+      event_id: `${intent_id}-event`,
+      dependency_snapshot_sha256: intent.dependency_snapshot_sha256,
+      source_commit: intent.expected_source_commit,
+      target_commit: intent.expected_target_commit,
+      review_evidence_digest: intent.review_evidence_digest,
+      recorded_at: AT(9),
+    },
+  }
+}
+
 describe('epic configuration', () => {
   it('defaults to exactly disabled and requires all limits to enable', () => {
     assert.deepEqual(EpicConfigSchema.parse(undefined), { enabled: false })
     assert.equal(EpicConfigSchema.safeParse({ enabled: true }).success, false)
-    const enabled = EpicConfigSchema.parse({
-      enabled: true,
-      max_epic_items: 12,
-      max_item_dependencies: 4,
-      max_attempts_per_item: 3,
-      max_budget_records: 24,
-    })
+    const enabled = EpicConfigSchema.parse(enabledEpicConfig())
     assert.equal(enabled.enabled && enabled.max_epic_items, 12)
     assert.throws(() => parseEpicConfig({ enabled: false, max_epic_items: 2 }), /invalid epic configuration/)
   })
 
   it('rejects unknown fields, maxima violations, and model or provider fields', () => {
     assert.equal(EpicConfigSchema.safeParse({ enabled: false, provider: 'example' }).success, false)
-    assert.equal(EpicConfigSchema.safeParse({
-      enabled: true,
-      max_epic_items: 257,
-      max_item_dependencies: 4,
-      max_attempts_per_item: 3,
-      max_budget_records: 24,
-    }).success, false)
+    assert.equal(EpicConfigSchema.safeParse({ ...enabledEpicConfig(), max_epic_items: 257 }).success, false)
   })
 })
 
@@ -440,6 +629,25 @@ describe('shared failures, DAG, transitions, and identity invariants', () => {
     assert.throws(() => validateEpicState({ ...baseState(), items: { 'item-a': item({ item_id: 'item-a', status: 'cancelled', completed_at: LATER, attempts: [{ ...failed, status: 'cancelled', failure_classification: null }] }) } }), /requires cancelled/)
   })
 
+  it('preserves the historical terminal review-evidence compatibility matrix', () => {
+    const failed = {
+      attempt_id: 'attempt-failed', worktree_evidence: worktreeEvidence('item-a', 'attempt-failed'), agent: 'executor', model: null, child_session_id: null,
+      started_at: NOW, completed_at: LATER, checkpoint_commit: null, review_evidence_digest: null,
+      result_summary: 'Failed.', failure_classification: 'semantic' as const, status: 'failed' as const,
+    }
+    const cancelled = { ...failed, status: 'cancelled' as const, failure_classification: 'cancelled' as const, result_summary: 'Cancelled.' }
+    for (const attempt of [failed, cancelled]) {
+      assert.doesNotThrow(() => validateEpicState({
+        ...baseState(),
+        items: { 'item-a': item({ item_id: 'item-a', status: attempt.status, completed_at: LATER, attempts: [attempt] }) },
+      }))
+      assert.throws(() => validateEpicState({
+        ...baseState(),
+        items: { 'item-a': item({ item_id: 'item-a', status: attempt.status, completed_at: LATER, attempts: [{ ...attempt, review_evidence_digest: SHA('b') }] }) },
+      }), /only passed historical attempts may carry review evidence/)
+    }
+  })
+
   it('allows one running-to-passed checkpoint binding and freezes reviewed attempt history', () => {
     const runningAttempt = { attempt_id: 'attempt-1', worktree_evidence: worktreeEvidence(), agent: 'executor', model: null, child_session_id: null, started_at: NOW, completed_at: null, checkpoint_commit: null, review_evidence_digest: null, result_summary: null, failure_classification: null, status: 'running' as const }
     const previous = baseState({ status: 'running', items: { 'item-a': item({ item_id: 'item-a', status: 'running', attempts: [runningAttempt] }), 'item-b': item({ item_id: 'item-b', dependencies: ['item-a'] }) } })
@@ -448,6 +656,190 @@ describe('shared failures, DAG, transitions, and identity invariants', () => {
     assert.doesNotThrow(() => validateEpicTransition(previous, next))
     assert.throws(() => validateEpicTransition(previous, { ...next, items: { ...next.items, 'item-a': { ...next.items['item-a']!, checkpoint_commit: OID('2') } } }), /successful passed attempt|checkpoint/)
     assert.throws(() => validateEpicTransition(next, { ...next, state_revision: 3, items: { ...next.items, 'item-a': { ...next.items['item-a']!, attempts: [...next.items['item-a']!.attempts, { ...passedAttempt, attempt_id: 'attempt-2' }] } } }), /attempt history|successful passed attempt|terminal record/)
+  })
+
+  it('persists reservation before child creation and advances through prompt, checkpoint, review, and pass', () => {
+    const lifecycle = coordinatedLifecycle()
+    assert.equal(lifecycle.reserved.items['item-a']!.attempts[0]!.launch_state, 'reserved')
+    assert.equal(lifecycle.reserved.items['item-a']!.attempts[0]!.child_session_id, null)
+    assert.equal(lifecycle.created.items['item-a']!.attempts[0]!.child_session_id, 'child-1')
+    assert.equal(lifecycle.prompted.items['item-a']!.attempts[0]!.launch_state, 'prompted')
+    assert.equal(lifecycle.checkpointed.items['item-a']!.attempts[0]!.status, 'checkpointed')
+    assert.equal(lifecycle.reviewing.items['item-a']!.attempts[0]!.review?.completed_at, null)
+    assert.equal(lifecycle.reviewed.items['item-a']!.attempts[0]!.review?.evidence_digest, SHA('b'))
+    assert.equal(lifecycle.passed.items['item-a']!.attempts[0]!.launch_state, 'settled')
+  })
+
+  it('freezes coordination policy and rejects malformed launch, checkpoint, and review progression', () => {
+    const lifecycle = coordinatedLifecycle()
+    assert.throws(() => validateEpicTransition(lifecycle.reserved, {
+      ...lifecycle.reserved,
+      state_revision: lifecycle.reserved.state_revision + 1,
+      updated_at: AT(2),
+      coordination_policy: { ...lifecycle.reserved.coordination_policy!, max_result_bytes: 2048 },
+    }), /coordination_policy is immutable/)
+
+    const reservedAttempt = lifecycle.reserved.items['item-a']!.attempts[0]!
+    assert.throws(() => validateEpicTransition(lifecycle.reserved, {
+      ...lifecycle.reserved,
+      state_revision: lifecycle.reserved.state_revision + 1,
+      updated_at: AT(2),
+      items: { 'item-a': { ...lifecycle.reserved.items['item-a']!, attempts: [{ ...reservedAttempt, launch_state: 'prompted', child_session_id: 'child-1' }] } },
+    }), /invalid launch state transition|reserved -> created/)
+
+    const createdAttempt = lifecycle.created.items['item-a']!.attempts[0]!
+    assert.throws(() => validateEpicTransition(lifecycle.created, {
+      ...lifecycle.created,
+      state_revision: lifecycle.created.state_revision + 1,
+      updated_at: AT(3),
+      items: { 'item-a': { ...lifecycle.created.items['item-a']!, attempts: [{ ...createdAttempt, child_session_id: 'child-forged' }] } },
+    }), /child_session_id is immutable/)
+
+    const promptedAttempt = lifecycle.prompted.items['item-a']!.attempts[0]!
+    assert.throws(() => validateEpicTransition(lifecycle.prompted, {
+      ...lifecycle.prompted,
+      state_revision: lifecycle.prompted.state_revision + 1,
+      updated_at: AT(4),
+      items: { 'item-a': { ...lifecycle.prompted.items['item-a']!, attempts: [{ ...promptedAttempt, checkpoint_commit: OID('1'), checkpoint_tree_sha256: SHA('1') }] } },
+    }), /running execution must not fabricate|checkpoint may be set only/)
+
+    assert.throws(() => validateEpicTransition(lifecycle.created, {
+      ...lifecycle.created,
+      state_revision: lifecycle.created.state_revision + 1,
+      updated_at: AT(3),
+      items: { 'item-a': { ...lifecycle.created.items['item-a']!, attempts: [{
+        ...createdAttempt,
+        status: 'checkpointed',
+        checkpoint_commit: OID('1'),
+        checkpoint_tree_sha256: SHA('1'),
+      }] } },
+    }), /requires a prompted launch/)
+
+    const reviewedAttempt = lifecycle.reviewed.items['item-a']!.attempts[0]!
+    assert.throws(() => validateEpicTransition(lifecycle.reviewed, {
+      ...lifecycle.reviewed,
+      state_revision: lifecycle.reviewed.state_revision + 1,
+      updated_at: AT(7),
+      items: { 'item-a': { ...lifecycle.reviewed.items['item-a']!, attempts: [{ ...reviewedAttempt, review: { ...reviewedAttempt.review!, evidence_digest: SHA('c') }, review_evidence_digest: SHA('c') }] } },
+    }), /review is immutable/)
+  })
+
+  it('requires a fresh integration intent and clears it only on an exact settlement', () => {
+    const passed = coordinatedLifecycle().passed
+    const passedItem = passed.items['item-a']!
+    const intent = {
+      intent_id: 'intent-1',
+      operation: 'integrate' as const,
+      item_id: 'item-a',
+      attempt_id: passedItem.selected_attempt_id!,
+      prior_state_revision: passed.state_revision,
+      prior_state_sha256: epicStateDigest(passed),
+      prior_generation: 7,
+      expected_source_commit: passedItem.checkpoint_commit!,
+      expected_target_commit: OID('2'),
+      dependency_snapshot_sha256: computeDependencySnapshotDigest(passed, passedItem),
+      review_evidence_digest: passedItem.review_evidence_digest!,
+    }
+    const intended = validateEpicTransition(passed, {
+      ...passed,
+      state_revision: passed.state_revision + 1,
+      updated_at: AT(8),
+      integration_intent: intent,
+    })
+    assert.equal(intended.integration_intent?.intent_id, 'intent-1')
+    assert.throws(() => validateEpicTransition(passed, {
+      ...passed,
+      state_revision: passed.state_revision + 1,
+      updated_at: AT(8),
+      integration_intent: { ...intent, prior_state_revision: passed.state_revision - 1 },
+    }), /prior revision is stale/)
+    assert.throws(() => validateEpicTransition(passed, {
+      ...passed,
+      state_revision: passed.state_revision + 1,
+      updated_at: AT(8),
+      integration_intent: { ...intent, prior_state_sha256: SHA('9') },
+    }), /prior state digest is stale/)
+
+    const event = {
+      event_id: 'event-intent-1',
+      item_id: 'item-a',
+      attempt_id: intent.attempt_id,
+      dependency_snapshot_sha256: intent.dependency_snapshot_sha256,
+      source_commit: intent.expected_source_commit,
+      target_commit: intent.expected_target_commit,
+      review_evidence_digest: intent.review_evidence_digest,
+      result: 'success' as const,
+      previous_event_digest: null,
+      event_digest: '',
+      recorded_at: AT(9),
+    }
+    event.event_digest = computeIntegrationEventDigest(event)
+    const settledInput = {
+      ...intended,
+      state_revision: intended.state_revision + 1,
+      updated_at: AT(9),
+      items: { 'item-a': { ...passedItem, status: 'integrated' as const, integration_commit: event.target_commit } },
+      integration_log: [event],
+      integration_intent: null,
+    }
+    const settled = validateEpicTransition(intended, settledInput)
+    assert.equal(settled.integration_intent, null)
+    assert.equal(settled.items['item-a']!.integration_commit, OID('2'))
+
+    const wrongEvent = { ...event, target_commit: OID('3'), event_digest: '' }
+    wrongEvent.event_digest = computeIntegrationEventDigest(wrongEvent)
+    assert.throws(() => validateEpicTransition(intended, {
+      ...settledInput,
+      items: { 'item-a': { ...passedItem, status: 'integrated', integration_commit: wrongEvent.target_commit } },
+      integration_log: [wrongEvent],
+    }), /does not exactly match/)
+    assert.throws(() => validateEpicTransition(intended, {
+      ...intended,
+      state_revision: intended.state_revision + 1,
+      updated_at: AT(9),
+      integration_intent: null,
+    }), /only by one exact settlement/)
+  })
+
+  it('settles coordinated success and conflict intents through the public integration helpers', () => {
+    const success = coordinatedIntent(OID('2'), 'intent-success')
+    const integrated = transitionEpicItemToIntegrated(success.intended, 'item-a', success.eventInput)
+    assert.equal(integrated.items['item-a']!.status, 'integrated')
+    assert.equal(integrated.items['item-a']!.integration_commit, OID('2'))
+    assert.equal(integrated.integration_intent, null)
+
+    const failure = coordinatedIntent(OID('3'), 'intent-conflict')
+    const conflicted = transitionEpicItemToConflicted(failure.intended, 'item-a', ['src/conflict.ts'], failure.eventInput)
+    assert.equal(conflicted.items['item-a']!.status, 'conflicted')
+    assert.deepEqual(conflicted.items['item-a']!.conflict_paths, ['src/conflict.ts'])
+    assert.equal(conflicted.integration_intent, null)
+  })
+
+  it('rejects coordinated helper settlement without an intent or with mismatched intent input', () => {
+    const passed = coordinatedLifecycle().passed
+    const passedItem = passed.items['item-a']!
+    const withoutIntentInput = {
+      event_id: 'event-without-intent',
+      dependency_snapshot_sha256: computeDependencySnapshotDigest(passed, passedItem),
+      source_commit: passedItem.checkpoint_commit!,
+      target_commit: OID('2'),
+      review_evidence_digest: passedItem.review_evidence_digest!,
+      recorded_at: AT(9),
+    }
+    assert.throws(
+      () => transitionEpicItemToIntegrated(passed, 'item-a', withoutIntentInput),
+      /requires a persisted integration intent/,
+    )
+
+    const mismatch = coordinatedIntent(OID('2'), 'intent-mismatch')
+    assert.throws(
+      () => transitionEpicItemToIntegrated(mismatch.intended, 'item-a', { ...mismatch.eventInput, target_commit: OID('3') }),
+      /does not exactly match the persisted integration intent/,
+    )
+    assert.throws(
+      () => transitionEpicItemToConflicted(mismatch.intended, 'item-a', ['src/conflict.ts'], { ...mismatch.eventInput, review_evidence_digest: SHA('c') }),
+      /integration review evidence|does not exactly match the persisted integration intent/,
+    )
   })
 
   it('retries failed items with fresh work while preserving prior attempt evidence', () => {
@@ -841,13 +1233,7 @@ describe('owner-bound epic persistence', () => {
     assert.equal(disabled.append({ invalid: true }, -1, 'invalid', -1), null)
     assert.equal(fs.existsSync(path.join(process.env.OPENCODE_CONFIG_DIR!, 'workflows')), false)
 
-    const config = {
-      enabled: true,
-      max_epic_items: 8,
-      max_item_dependencies: 4,
-      max_attempts_per_item: 3,
-      max_budget_records: 16,
-    } as const
+    const config = { ...enabledEpicConfig(), max_epic_items: 8, max_budget_records: 16 }
     const state = baseState({ project_identity_sha256: projectIdentitySha256(fs.realpathSync(project)) })
     const store = openEpicStore({ root_session_id: 'session-1', project_root: project, epic_id: 'epic-1', runtime_incarnation: 'runtime-1', mode: 'read_write', config })
     const written = store.append(state, 0, null, 1)!

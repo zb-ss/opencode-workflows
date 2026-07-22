@@ -4,6 +4,7 @@ import { z } from 'zod'
 
 import {
   AutomationUsageTelemetrySchema,
+  CostReportingCapabilitySchema,
   FailureClassSchema,
   finiteNonNegativeCost,
   safeNonNegativeInteger,
@@ -11,14 +12,21 @@ import {
 } from './automation-policy-contracts.ts'
 import {
   EpicOperationalLimitsSchema,
+  EpicRetryPolicySchema,
   MAX_ATTEMPTS_PER_ITEM,
+  MAX_EPIC_ACTIVE_TIME_CHECKPOINT_MS,
+  MAX_EPIC_ATTEMPT_DURATION_MS,
   MAX_EPIC_BUDGET_RECORDS,
   MAX_EPIC_ITEMS,
+  MAX_EPIC_MODEL_CANDIDATES,
+  MAX_EPIC_PARALLEL_SESSIONS,
+  MAX_EPIC_PROVIDER_POLICIES,
+  MAX_EPIC_RESULT_BYTES,
   MAX_ITEM_DEPENDENCIES,
   type EpicOperationalLimits,
 } from './epic-policy.ts'
 import { EpicWorktreeEvidenceSchema, type EpicWorktreeEvidence } from './epic-worktree-contracts.ts'
-import { validateModelCandidate } from './model-registry.ts'
+import { extractProvider, validateModelCandidate, type ModelCandidate } from './model-registry.ts'
 import { isFullPublicationGitRef } from './publication-policy.ts'
 import { SafeIdentifierSchema } from './safe-identifier.ts'
 
@@ -54,6 +62,77 @@ const ModelIdentifierSchema = z.string().max(MAX_TEXT_LENGTH).refine((model) => 
     return false
   }
 }, { message: 'must be a valid configured model identifier' })
+
+const ModelCandidateContractSchema = z.object({
+  model: ModelIdentifierSchema,
+  variant: z.string().min(1).max(MAX_TEXT_LENGTH).optional(),
+}).strict().superRefine((candidate, context) => {
+  try {
+    validateModelCandidate(candidate)
+  } catch {
+    context.addIssue({ code: 'custom', path: [], message: 'must be a valid configured model candidate' })
+  }
+})
+
+const ModelCandidateListSchema = z.array(ModelCandidateContractSchema)
+  .min(1)
+  .max(MAX_EPIC_MODEL_CANDIDATES)
+  .superRefine((candidates, context) => {
+    const identities = new Set<string>()
+    candidates.forEach((candidate, index) => {
+      const identity = `${candidate.model}\0${candidate.variant ?? ''}`
+      if (identities.has(identity)) context.addIssue({ code: 'custom', path: [index], message: 'model candidates must be unique' })
+      identities.add(identity)
+    })
+  })
+
+export const EpicCoordinationPolicySchema = z.object({
+  policy_version: z.literal(1),
+  executor_agent: SafeIdentifierSchema,
+  executor_candidates: ModelCandidateListSchema,
+  reviewer_agent: SafeIdentifierSchema,
+  reviewer_candidates: ModelCandidateListSchema,
+  max_parallel_sessions: safeNonNegativeInteger.positive().max(MAX_EPIC_PARALLEL_SESSIONS),
+  provider_concurrency: z.record(
+    SafeIdentifierSchema,
+    safeNonNegativeInteger.positive().max(MAX_EPIC_PARALLEL_SESSIONS),
+  ),
+  retry_policy: EpicRetryPolicySchema,
+  max_attempt_duration_ms: safeNonNegativeInteger.positive().max(MAX_EPIC_ATTEMPT_DURATION_MS),
+  active_time_checkpoint_ms: safeNonNegativeInteger.positive().max(MAX_EPIC_ACTIVE_TIME_CHECKPOINT_MS),
+  max_result_bytes: safeNonNegativeInteger.positive().max(MAX_EPIC_RESULT_BYTES),
+  provider_cost_reporting: z.record(SafeIdentifierSchema, CostReportingCapabilitySchema),
+}).strict().superRefine((policy, context) => {
+  if (policy.active_time_checkpoint_ms > policy.max_attempt_duration_ms) {
+    context.addIssue({ code: 'custom', path: ['active_time_checkpoint_ms'], message: 'active checkpoint interval must not exceed attempt duration' })
+  }
+  const providers = new Set([...policy.executor_candidates, ...policy.reviewer_candidates]
+    .map(candidate => extractProvider(candidate.model))
+    .filter((provider): provider is string => provider !== null))
+  const concurrency_providers = Object.keys(policy.provider_concurrency)
+  const reporting_providers = Object.keys(policy.provider_cost_reporting)
+  if (concurrency_providers.length > MAX_EPIC_PROVIDER_POLICIES) {
+    context.addIssue({ code: 'custom', path: ['provider_concurrency'], message: 'too many provider concurrency policies' })
+  }
+  if (reporting_providers.length > MAX_EPIC_PROVIDER_POLICIES) {
+    context.addIssue({ code: 'custom', path: ['provider_cost_reporting'], message: 'too many provider cost-reporting policies' })
+  }
+  for (const provider of providers) {
+    if (!Object.hasOwn(policy.provider_concurrency, provider)) {
+      context.addIssue({ code: 'custom', path: ['provider_concurrency', provider], message: 'every selected provider requires an explicit concurrency limit' })
+    }
+    if (!Object.hasOwn(policy.provider_cost_reporting, provider)) {
+      context.addIssue({ code: 'custom', path: ['provider_cost_reporting', provider], message: 'every selected provider requires an explicit cost-reporting status' })
+    }
+  }
+  for (const [provider, limit] of Object.entries(policy.provider_concurrency)) {
+    if (!providers.has(provider)) context.addIssue({ code: 'custom', path: ['provider_concurrency', provider], message: 'provider is not present in the resolved candidates' })
+    if (limit > policy.max_parallel_sessions) context.addIssue({ code: 'custom', path: ['provider_concurrency', provider], message: 'provider concurrency must not exceed global concurrency' })
+  }
+  for (const provider of reporting_providers) {
+    if (!providers.has(provider)) context.addIssue({ code: 'custom', path: ['provider_cost_reporting', provider], message: 'provider is not present in the resolved candidates' })
+  }
+})
 
 export const EPIC_BUDGET_DIMENSIONS = ['sessions', 'input_tokens', 'output_tokens', 'cost_usd', 'active_time_ms', 'calendar_age_ms'] as const
 export const EpicBudgetDimensionSchema = z.enum(EPIC_BUDGET_DIMENSIONS)
@@ -118,7 +197,23 @@ export type EpicBudgetRecord = z.infer<typeof EpicBudgetRecordSchema>
 export type EpicScopedUsage = z.infer<typeof EpicScopedUsageSchema>
 export type EpicStatus = 'pending' | 'running' | 'paused' | 'completed' | 'failed' | 'cancelled'
 export type EpicItemStatus = 'pending' | 'queued' | 'running' | 'passed' | 'failed' | 'blocked' | 'conflicted' | 'integrated' | 'cancelled'
-export type EpicAttemptStatus = 'running' | 'passed' | 'failed' | 'cancelled'
+export type EpicAttemptStatus = 'running' | 'checkpointed' | 'reviewing' | 'passed' | 'failed' | 'cancelled'
+export type EpicLaunchState = 'reserved' | 'created' | 'prompted' | 'settled' | 'ambiguous'
+export type EpicCoordinationPolicy = z.infer<typeof EpicCoordinationPolicySchema>
+
+export interface EpicReviewRecord {
+  review_id: string
+  agent: string
+  model: string
+  child_session_id: string
+  checkpoint_commit: string
+  checkpoint_tree_sha256: string
+  started_at: string
+  completed_at: string | null
+  verdict: 'passed' | 'failed' | null
+  evidence_digest: string | null
+  result_summary: string | null
+}
 
 export interface EpicIdentity {
   epic_id: string
@@ -142,6 +237,12 @@ export interface EpicAttempt {
   result_summary: string | null
   failure_classification: FailureClass | null
   status: EpicAttemptStatus
+  launch_id?: string
+  launch_state?: EpicLaunchState
+  progress_commit?: string | null
+  progress_tree_sha256?: string | null
+  checkpoint_tree_sha256?: string | null
+  review?: EpicReviewRecord | null
 }
 
 export interface EpicItem {
@@ -158,6 +259,21 @@ export interface EpicItem {
   conflict_paths: string[]
   integration_commit: string | null
   completed_at: string | null
+  retry_not_before?: string | null
+}
+
+export interface EpicIntegrationIntent {
+  intent_id: string
+  operation: 'integrate'
+  item_id: string
+  attempt_id: string
+  prior_state_revision: number
+  prior_state_sha256: string
+  prior_generation: number
+  expected_source_commit: string
+  expected_target_commit: string
+  dependency_snapshot_sha256: string
+  review_evidence_digest: string
 }
 
 export interface EpicIntegrationEvent {
@@ -193,6 +309,8 @@ export interface EpicState {
   budgets?: EpicBudgetRecord[]
   usage: EpicScopedUsage[]
   budget_updates: EpicBudgetUpdate[]
+  coordination_policy?: EpicCoordinationPolicy
+  integration_intent?: EpicIntegrationIntent | null
 }
 
 export class EpicValidationError extends Error {
@@ -211,6 +329,30 @@ export class EpicSchemaVersionError extends EpicValidationError {
   }
 }
 
+export const EpicReviewRecordSchema = z.object({
+  review_id: SafeIdentifierSchema,
+  agent: SafeIdentifierSchema,
+  model: ModelIdentifierSchema,
+  child_session_id: SafeIdentifierSchema,
+  checkpoint_commit: GitOidSchema,
+  checkpoint_tree_sha256: Sha256Schema,
+  started_at: DateTimeSchema,
+  completed_at: DateTimeSchema.nullable(),
+  verdict: z.enum(['passed', 'failed']).nullable(),
+  evidence_digest: Sha256Schema.nullable(),
+  result_summary: BoundedTextSchema.nullable(),
+}).strict().superRefine((review, context) => {
+  const is_complete = review.completed_at !== null
+  for (const field of ['verdict', 'evidence_digest', 'result_summary'] as const) {
+    if (is_complete !== (review[field] !== null)) {
+      context.addIssue({ code: 'custom', path: [field], message: `review ${field} must be present exactly when the review is complete` })
+    }
+  }
+  if (review.completed_at !== null && Date.parse(review.completed_at) < Date.parse(review.started_at)) {
+    context.addIssue({ code: 'custom', path: ['completed_at'], message: 'review completion must not precede review start' })
+  }
+})
+
 export const EpicAttemptSchema = z.object({
   attempt_id: SafeIdentifierSchema,
   worktree_evidence: EpicWorktreeEvidenceSchema,
@@ -223,19 +365,74 @@ export const EpicAttemptSchema = z.object({
   review_evidence_digest: Sha256Schema.nullable(),
   result_summary: BoundedTextSchema.nullable(),
   failure_classification: FailureClassSchema.nullable(),
-  status: z.enum(['running', 'passed', 'failed', 'cancelled']),
+  status: z.enum(['running', 'checkpointed', 'reviewing', 'passed', 'failed', 'cancelled']),
+  launch_id: SafeIdentifierSchema.optional(),
+  launch_state: z.enum(['reserved', 'created', 'prompted', 'settled', 'ambiguous']).optional(),
+  progress_commit: GitOidSchema.nullable().optional(),
+  progress_tree_sha256: Sha256Schema.nullable().optional(),
+  checkpoint_tree_sha256: Sha256Schema.nullable().optional(),
+  review: EpicReviewRecordSchema.nullable().optional(),
 }).strict().superRefine((attempt, context) => {
-  const is_running = attempt.status === 'running'
-  if (is_running !== (attempt.completed_at === null)) context.addIssue({ code: 'custom', path: ['completed_at'], message: is_running ? 'running attempt must not have completed_at' : 'terminal attempt must have completed_at' })
+  const is_active = ['running', 'checkpointed', 'reviewing'].includes(attempt.status)
+  if (is_active !== (attempt.completed_at === null)) context.addIssue({ code: 'custom', path: ['completed_at'], message: is_active ? 'active attempt must not have completed_at' : 'terminal attempt must have completed_at' })
   if (attempt.completed_at !== null && Date.parse(attempt.completed_at) < Date.parse(attempt.started_at)) context.addIssue({ code: 'custom', path: ['completed_at'], message: 'attempt completed_at must not precede started_at' })
-  if (is_running && attempt.result_summary !== null) context.addIssue({ code: 'custom', path: ['result_summary'], message: 'running attempt must not have a result summary' })
+  if (is_active && attempt.result_summary !== null) context.addIssue({ code: 'custom', path: ['result_summary'], message: 'active attempt must not have a result summary' })
   if (attempt.status === 'passed' && attempt.checkpoint_commit === null) context.addIssue({ code: 'custom', path: ['checkpoint_commit'], message: 'passed attempt requires a checkpoint commit' })
   if (attempt.status === 'passed' && attempt.review_evidence_digest === null) context.addIssue({ code: 'custom', path: ['review_evidence_digest'], message: 'passed attempt requires review evidence' })
-  else if (attempt.status !== 'passed' && attempt.review_evidence_digest !== null) context.addIssue({ code: 'custom', path: ['review_evidence_digest'], message: 'only passed attempts may carry review evidence' })
+  const has_coordination_fields = attempt.launch_id !== undefined
+    || attempt.launch_state !== undefined
+    || attempt.progress_commit !== undefined
+    || attempt.progress_tree_sha256 !== undefined
+    || attempt.checkpoint_tree_sha256 !== undefined
+    || attempt.review !== undefined
+  const coordination_fields = ['launch_id', 'launch_state', 'progress_commit', 'progress_tree_sha256', 'checkpoint_tree_sha256', 'review'] as const
+  if (has_coordination_fields) {
+    for (const field of coordination_fields) {
+      if (attempt[field] === undefined) context.addIssue({ code: 'custom', path: [field], message: 'coordinated attempts require every durable coordination field' })
+    }
+    if ((attempt.progress_commit === null) !== (attempt.progress_tree_sha256 === null)) {
+      context.addIssue({ code: 'custom', path: ['progress_tree_sha256'], message: 'progress commit and tree digest must be recorded together' })
+    }
+    if (attempt.launch_state === 'reserved' && attempt.child_session_id !== null) context.addIssue({ code: 'custom', path: ['child_session_id'], message: 'reserved launch must not have a child session ID' })
+    if (attempt.launch_state !== 'reserved' && attempt.launch_state !== 'ambiguous' && attempt.child_session_id === null) context.addIssue({ code: 'custom', path: ['child_session_id'], message: 'created launch requires a child session ID' })
+    if (attempt.launch_state === 'ambiguous') {
+      if (attempt.status !== 'failed' || attempt.failure_classification !== 'ambiguous_launch') context.addIssue({ code: 'custom', path: ['launch_state'], message: 'ambiguous launch must be a failed ambiguous_launch attempt' })
+    } else if (is_active && attempt.launch_state === 'settled') {
+      context.addIssue({ code: 'custom', path: ['launch_state'], message: 'active attempt launch must not be settled' })
+    } else if (!is_active && attempt.launch_state !== 'settled') {
+      context.addIssue({ code: 'custom', path: ['launch_state'], message: 'terminal coordinated attempt launch must be settled or ambiguous' })
+    }
+    if (attempt.status === 'running' && (attempt.checkpoint_commit !== null || attempt.checkpoint_tree_sha256 !== null || attempt.review !== null)) {
+      context.addIssue({ code: 'custom', path: ['checkpoint_commit'], message: 'running execution must not fabricate checkpoint or review evidence' })
+    }
+    if (attempt.status === 'checkpointed' && (attempt.checkpoint_commit === null || attempt.checkpoint_tree_sha256 === null || attempt.review !== null)) {
+      context.addIssue({ code: 'custom', path: ['checkpoint_commit'], message: 'checkpointed attempt requires an exact checkpoint and no review record' })
+    }
+    if (attempt.status === 'reviewing' && (attempt.checkpoint_commit === null || attempt.checkpoint_tree_sha256 === null || attempt.review === null)) {
+      context.addIssue({ code: 'custom', path: ['review'], message: 'reviewing attempt requires checkpoint-bound review evidence' })
+    }
+    if (attempt.review !== null && attempt.review !== undefined) {
+      if (attempt.review.checkpoint_commit !== attempt.checkpoint_commit || attempt.review.checkpoint_tree_sha256 !== attempt.checkpoint_tree_sha256) {
+        context.addIssue({ code: 'custom', path: ['review'], message: 'review record must bind the exact attempt checkpoint and tree digest' })
+      }
+      if (Date.parse(attempt.review.started_at) < Date.parse(attempt.started_at)) context.addIssue({ code: 'custom', path: ['review', 'started_at'], message: 'review cannot start before the attempt' })
+      if (attempt.review.completed_at !== null && attempt.completed_at !== null && Date.parse(attempt.review.completed_at) > Date.parse(attempt.completed_at)) context.addIssue({ code: 'custom', path: ['review', 'completed_at'], message: 'review cannot complete after the attempt' })
+    }
+    if (attempt.status === 'passed') {
+      if (attempt.checkpoint_tree_sha256 === null || attempt.review === null || attempt.review?.verdict !== 'passed'
+        || attempt.review.evidence_digest !== attempt.review_evidence_digest) {
+        context.addIssue({ code: 'custom', path: ['review'], message: 'passed coordinated attempt requires exact passed checkpoint review evidence' })
+      }
+    } else if (attempt.review?.completed_at !== null && attempt.review?.completed_at !== undefined) {
+      if (attempt.review.evidence_digest !== attempt.review_evidence_digest) context.addIssue({ code: 'custom', path: ['review_evidence_digest'], message: 'attempt review digest must exactly match its completed review record' })
+    } else if (attempt.review_evidence_digest !== null) {
+      context.addIssue({ code: 'custom', path: ['review_evidence_digest'], message: 'review evidence requires a completed review record' })
+    }
+  } else if (attempt.status !== 'passed' && attempt.review_evidence_digest !== null) context.addIssue({ code: 'custom', path: ['review_evidence_digest'], message: 'only passed historical attempts may carry review evidence' })
   const failed_classes: FailureClass[] = ['transport', 'contract', 'semantic', 'ambiguous_launch']
   if (attempt.status === 'failed' && !failed_classes.includes(attempt.failure_classification as FailureClass)) context.addIssue({ code: 'custom', path: ['failure_classification'], message: 'failed attempt requires transport, contract, semantic, or ambiguous_launch classification' })
   else if (attempt.status === 'cancelled' && attempt.failure_classification !== 'cancelled') context.addIssue({ code: 'custom', path: ['failure_classification'], message: 'cancelled attempt requires cancelled classification' })
-  else if ((attempt.status === 'running' || attempt.status === 'passed') && attempt.failure_classification !== null) context.addIssue({ code: 'custom', path: ['failure_classification'], message: 'running and passed attempts require null classification' })
+  else if ((is_active || attempt.status === 'passed') && attempt.failure_classification !== null) context.addIssue({ code: 'custom', path: ['failure_classification'], message: 'active and passed attempts require null classification' })
 })
 
 export const EpicItemSchema = z.object({
@@ -252,6 +449,21 @@ export const EpicItemSchema = z.object({
   conflict_paths: z.array(RelativeConflictPathSchema).max(MAX_EPIC_ITEMS),
   integration_commit: GitOidSchema.nullable(),
   completed_at: DateTimeSchema.nullable(),
+  retry_not_before: DateTimeSchema.nullable().optional(),
+}).strict()
+
+export const EpicIntegrationIntentSchema = z.object({
+  intent_id: SafeIdentifierSchema,
+  operation: z.literal('integrate'),
+  item_id: SafeIdentifierSchema,
+  attempt_id: SafeIdentifierSchema,
+  prior_state_revision: safeNonNegativeInteger.positive(),
+  prior_state_sha256: Sha256Schema,
+  prior_generation: safeNonNegativeInteger.positive(),
+  expected_source_commit: GitOidSchema,
+  expected_target_commit: GitOidSchema,
+  dependency_snapshot_sha256: Sha256Schema,
+  review_evidence_digest: Sha256Schema,
 }).strict()
 
 export const EpicIntegrationEventSchema = z.object({
@@ -287,4 +499,6 @@ export const EpicStateStructuralSchema = z.object({
   budgets: z.array(EpicBudgetRecordSchema).max(MAX_EPIC_BUDGET_RECORDS).optional(),
   usage: z.array(EpicScopedUsageSchema).max(MAX_EPIC_ITEMS + 1),
   budget_updates: z.array(EpicBudgetUpdateSchema).max(MAX_EPIC_BUDGET_RECORDS),
+  coordination_policy: EpicCoordinationPolicySchema.optional(),
+  integration_intent: EpicIntegrationIntentSchema.nullable().optional(),
 }).strict()

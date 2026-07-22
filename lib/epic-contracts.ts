@@ -9,8 +9,11 @@ export {
   EpicBudgetRecordSchema,
   EpicBudgetScopeSchema,
   EpicBudgetUpdateSchema,
+  EpicCoordinationPolicySchema,
   EpicIntegrationEventSchema,
+  EpicIntegrationIntentSchema,
   EpicItemSchema,
+  EpicReviewRecordSchema,
   EpicSchemaVersionError,
   EpicScopedUsageSchema,
   EpicValidationError,
@@ -23,13 +26,17 @@ export type {
   EpicBudgetRecord,
   EpicBudgetScope,
   EpicBudgetUpdate,
+  EpicCoordinationPolicy,
   EpicIdentity,
   EpicIntegrationEvent,
+  EpicIntegrationIntent,
   EpicItem,
   EpicItemStatus,
   EpicScopedUsage,
   EpicState,
   EpicStatus,
+  EpicLaunchState,
+  EpicReviewRecord,
 } from './epic-contract-schemas.ts'
 export {
   deriveEpicWorktreeIdentity,
@@ -69,5 +76,17 @@ export {
   validateEpicRecoveryTransition,
   validateEpicTransition,
 } from './epic-transitions.ts'
-export { EpicConfigSchema, parseEpicConfig } from './epic-policy.ts'
-export type { EpicConfig, EpicOperationalLimits } from './epic-policy.ts'
+export {
+  EpicConfigSchema,
+  EpicModelTierSchema,
+  EpicRetryPolicySchema,
+  enabledEpic,
+  parseEpicConfig,
+} from './epic-policy.ts'
+export type {
+  EnabledEpicConfig,
+  EpicConfig,
+  EpicModelTier,
+  EpicOperationalLimits,
+  EpicRetryPolicy,
+} from './epic-policy.ts'

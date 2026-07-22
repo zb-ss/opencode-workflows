@@ -41,13 +41,33 @@
     "autonomy": "interactive"
   },
 
-  "_comment_epic": "Epic worktree orchestration is opt-in and disabled by default. Enabling requires explicit operator-selected operational limits; the protocol ceilings are not enabled defaults.",
+  "_comment_epic": "Epic worktree orchestration is opt-in and disabled by default. Enabling requires explicit operator-selected agents, model tiers, retry policy, and runtime limits; no provider or model is selected by default.",
   "_example_epic": {
     "enabled": true,
     "max_epic_items": 24,
     "max_item_dependencies": 8,
     "max_attempts_per_item": 4,
-    "max_budget_records": 128
+    "max_budget_records": 128,
+    "executor_agent": "epic-executor",
+    "executor_model_tier": "mid",
+    "reviewer_agent": "epic-reviewer",
+    "reviewer_model_tier": "high",
+    "max_parallel_sessions": 2,
+    "max_attempt_duration_ms": 300000,
+    "active_time_checkpoint_ms": 30000,
+    "max_result_bytes": 1048576,
+    "retry_policy": {
+      "max_semantic_attempts": 4,
+      "max_contract_attempts": 4,
+      "max_transport_attempts": 4,
+      "max_no_progress_attempts": 2,
+      "transport_backoff": {
+        "strategy": "exponential",
+        "initial_delay_ms": 1000,
+        "maximum_delay_ms": 30000,
+        "multiplier": 2
+      }
+    }
   },
   "epic": {
     "enabled": false
