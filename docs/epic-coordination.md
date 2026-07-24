@@ -96,6 +96,6 @@ If integration may have published, recovery checks the branch head, both parents
 
 ## Operational Boundary
 
-Phase 4 coordination is process-local and attended after restart. It does not provide leases, takeover, global queue capacity, stale-worker fencing, or unattended ambiguous-launch recovery. Those require the separate durable-queue fencing proof before implementation.
+Epic coordination is process-local and attended after restart. It does not provide leases, takeover, global queue capacity, stale-worker fencing, or unattended ambiguous-launch recovery. Those capabilities require a separate durable-queue implementation that is not yet available.
 
 Git worktrees isolate branches and provenance but are not operating-system sandboxes. Executor and reviewer agents still require appropriately restricted OpenCode permission profiles.
