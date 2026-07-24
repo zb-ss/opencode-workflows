@@ -9,30 +9,24 @@ import {
 } from '../../lib/epic-contracts.ts'
 
 const SHA = (character: string) => character.repeat(64)
-const OID = (character: string) => character.repeat(40)
 
 describe('epic structured attempt results', () => {
   it('parses each strict executor result variant', () => {
     const reviewReady = parseEpicExecutorResult({
       status: 'review_ready',
       summary: 'Ready for review.',
-      checkpoint_commit: OID('1'),
-      checkpoint_tree_sha256: SHA('1'),
-      patch_sha256: SHA('2'),
-      progress_commit: OID('1'),
-      progress_tree_sha256: SHA('1'),
     })
     assert.equal(reviewReady.status, 'review_ready')
-    assert.equal(parseEpicExecutorResult({ status: 'failed', summary: 'Contract mismatch.', failure_classification: 'contract', progress_commit: null, progress_tree_sha256: null }).status, 'failed')
-    assert.equal(parseEpicExecutorResult({ status: 'blocked', summary: 'Blocked.', reason: 'Missing prerequisite.', progress_commit: null, progress_tree_sha256: null }).status, 'blocked')
+    assert.equal(parseEpicExecutorResult({ status: 'failed', summary: 'Contract mismatch.', failure_classification: 'contract' }).status, 'failed')
+    assert.equal(parseEpicExecutorResult({ status: 'blocked', summary: 'Blocked.', reason: 'Missing prerequisite.' }).status, 'blocked')
   })
 
   it('rejects malformed, oversized, unpaired, and unknown executor data', () => {
-    assert.throws(() => parseEpicExecutorResult({ status: 'failed', summary: '', failure_classification: 'semantic', progress_commit: null, progress_tree_sha256: null }))
-    assert.throws(() => parseEpicExecutorResult({ status: 'failed', summary: 'x'.repeat(MAX_EPIC_RESULT_TEXT_LENGTH + 1), failure_classification: 'semantic', progress_commit: null, progress_tree_sha256: null }))
-    assert.throws(() => parseEpicExecutorResult({ status: 'failed', summary: 'Failed.', failure_classification: 'semantic', progress_commit: OID('1'), progress_tree_sha256: null }))
-    assert.throws(() => parseEpicExecutorResult({ status: 'blocked', summary: 'Blocked.', reason: 'Reason.', progress_commit: null, progress_tree_sha256: null, extra: true }))
-    assert.throws(() => parseEpicExecutorResult({ status: 'blocked', summary: 'Blocked.', reason: 'Reason.', progress_commit: null, progress_tree_sha256: null }, 10), /byte limit/)
+    assert.throws(() => parseEpicExecutorResult({ status: 'failed', summary: '', failure_classification: 'semantic' }))
+    assert.throws(() => parseEpicExecutorResult({ status: 'failed', summary: 'x'.repeat(MAX_EPIC_RESULT_TEXT_LENGTH + 1), failure_classification: 'semantic' }))
+    assert.throws(() => parseEpicExecutorResult({ status: 'failed', summary: 'Failed.', failure_classification: 'semantic', progress_commit: '1'.repeat(40) }))
+    assert.throws(() => parseEpicExecutorResult({ status: 'blocked', summary: 'Blocked.', reason: 'Reason.', extra: true }))
+    assert.throws(() => parseEpicExecutorResult({ status: 'blocked', summary: 'Blocked.', reason: 'Reason.' }, 10), /byte limit/)
   })
 
   it('accepts pass or fail reviewer results with bounded structured issues', () => {

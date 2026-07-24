@@ -86,8 +86,10 @@ function validateAttemptTransition(previous: EpicAttempt, next: EpicAttempt, lab
     if (previous.launch_state !== 'reserved' || next.launch_state !== 'created') throw new EpicValidationError(`${label} child_session_id may be set only during reserved -> created`)
   } else assertEpicEqual(`${label}.child_session_id`, previous.child_session_id, next.child_session_id)
   if (previous.launch_state === 'reserved' && next.launch_state === 'settled'
-    && (next.status !== 'cancelled' || next.child_session_id !== null)) {
-    throw new EpicValidationError(`${label} reserved launch may settle without creation only as a no-child cancellation`)
+    && (next.child_session_id !== null
+      || !((next.status === 'cancelled' && next.failure_classification === 'cancelled')
+        || (next.status === 'failed' && next.failure_classification === 'transport')))) {
+    throw new EpicValidationError(`${label} reserved launch may settle without creation only as cancellation or definitive transport rejection`)
   }
   if (previous.checkpoint_commit !== null) assertEpicEqual(`${label}.checkpoint_commit`, previous.checkpoint_commit, next.checkpoint_commit)
   if (previous.checkpoint_tree_sha256 !== null) assertEpicEqual(`${label}.checkpoint_tree_sha256`, previous.checkpoint_tree_sha256, next.checkpoint_tree_sha256)
@@ -286,6 +288,10 @@ function validateIntegrationIntentTransition(
     if (outcomes.length !== 0) throw new EpicValidationError('integration outcome must exactly settle and clear its persisted intent')
     return
   }
+  if (outcomes.length === 0 && appendedEvents.length === 0
+    && next.status === 'paused' && next.pause_code === 'integration_undispatched') {
+    return
+  }
   if (outcomes.length !== 1 || appendedEvents.length !== 1) throw new EpicValidationError('integration intent may be cleared only by one exact settlement')
   const outcome = outcomes[0]!
   const event = appendedEvents[0]!
@@ -293,7 +299,7 @@ function validateIntegrationIntentTransition(
     || old_intent.item_id !== outcome.item_id
     || old_intent.attempt_id !== event.attempt_id
     || old_intent.expected_source_commit !== event.source_commit
-    || old_intent.expected_target_commit !== event.target_commit
+    || old_intent.expected_target_commit !== event.previous_target_commit
     || old_intent.dependency_snapshot_sha256 !== event.dependency_snapshot_sha256
     || old_intent.review_evidence_digest !== event.review_evidence_digest) {
     throw new EpicValidationError('integration intent settlement does not exactly match the integration outcome')
@@ -306,11 +312,13 @@ export function validateEpicRecoveryTransition(previousInput: unknown, nextInput
   if (next.status !== 'paused' || !next.pause_code || !next.pause_reason) throw new EpicValidationError('recovery transition must persist a paused recovery code and reason')
   for (const [item_id, oldItem] of Object.entries(previous.items)) {
     const newItem = next.items[item_id]!
-    if (oldItem.status === 'running' && newItem.status !== 'cancelled') throw new EpicValidationError(`recovery must cancel running item ${item_id}`)
+    if (oldItem.status === 'running' && !['failed', 'cancelled'].includes(newItem.status)) throw new EpicValidationError(`recovery must conservatively settle running item ${item_id}`)
     oldItem.attempts.forEach((attempt, index) => {
-      if (attempt.status !== 'running') return
+      if (!['running', 'checkpointed', 'reviewing'].includes(attempt.status)) return
       const settled = newItem.attempts[index]
-      if (!settled || settled.status !== 'cancelled' || settled.failure_classification !== 'cancelled' || settled.completed_at === null) throw new EpicValidationError(`recovery must cancel running attempt ${attempt.attempt_id}`)
+      const cancelled = settled?.status === 'cancelled' && settled.failure_classification === 'cancelled'
+      const ambiguous = settled?.status === 'failed' && settled.failure_classification === 'ambiguous_launch'
+      if (!settled || (!cancelled && !ambiguous) || settled.completed_at === null) throw new EpicValidationError(`recovery must conservatively settle active attempt ${attempt.attempt_id}`)
     })
   }
   for (const usage of next.usage) {
@@ -342,7 +350,7 @@ function validatedIntegrationSource(stateInput: unknown, itemId: string, eventIn
       || intent.item_id !== itemId
       || intent.attempt_id !== item.selected_attempt_id
       || intent.expected_source_commit !== eventInput.source_commit
-      || intent.expected_target_commit !== eventInput.target_commit
+      || intent.expected_target_commit !== eventInput.previous_target_commit
       || intent.dependency_snapshot_sha256 !== eventInput.dependency_snapshot_sha256
       || intent.review_evidence_digest !== eventInput.review_evidence_digest) {
       throw new EpicValidationError('integration helper input does not exactly match the persisted integration intent')

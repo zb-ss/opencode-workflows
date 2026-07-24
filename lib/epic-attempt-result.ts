@@ -8,45 +8,24 @@ export const MAX_EPIC_REVIEW_ISSUES = 128
 export const MAX_EPIC_REVIEW_ISSUE_PATH_LENGTH = 1024
 
 const SHA256_PATTERN = /^[a-f0-9]{64}$/
-const GIT_OID_PATTERN = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/
 const BoundedTextSchema = z.string().min(1).max(MAX_EPIC_RESULT_TEXT_LENGTH).refine(value => !value.includes('\0'))
-const OptionalProgressFields = {
-  progress_commit: z.string().regex(GIT_OID_PATTERN).nullable(),
-  progress_tree_sha256: z.string().regex(SHA256_PATTERN).nullable(),
-}
-
-function addProgressPairIssue(
-  result: { progress_commit: string | null; progress_tree_sha256: string | null },
-  context: z.core.$RefinementCtx,
-): void {
-  if ((result.progress_commit === null) !== (result.progress_tree_sha256 === null)) {
-    context.addIssue({ code: 'custom', path: ['progress_tree_sha256'], message: 'progress commit and tree digest must be present together' })
-  }
-}
 
 const ReviewReadyResultSchema = z.object({
   status: z.literal('review_ready'),
   summary: BoundedTextSchema,
-  checkpoint_commit: z.string().regex(GIT_OID_PATTERN),
-  checkpoint_tree_sha256: z.string().regex(SHA256_PATTERN),
-  patch_sha256: z.string().regex(SHA256_PATTERN),
-  progress_commit: z.string().regex(GIT_OID_PATTERN),
-  progress_tree_sha256: z.string().regex(SHA256_PATTERN),
 }).strict()
 
 const FailedResultSchema = z.object({
   status: z.literal('failed'),
   summary: BoundedTextSchema,
   failure_classification: z.enum(['transport', 'contract', 'semantic']),
-  ...OptionalProgressFields,
-}).strict().superRefine(addProgressPairIssue)
+}).strict()
 
 const BlockedResultSchema = z.object({
   status: z.literal('blocked'),
   summary: BoundedTextSchema,
   reason: BoundedTextSchema,
-  ...OptionalProgressFields,
-}).strict().superRefine(addProgressPairIssue)
+}).strict()
 
 export const EpicExecutorResultSchema = z.union([
   ReviewReadyResultSchema,

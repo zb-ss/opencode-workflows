@@ -1,4 +1,5 @@
 import type { PluginInput, ToolContext } from '@opencode-ai/plugin'
+import { execFileSync } from 'node:child_process'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
@@ -26,6 +27,21 @@ const CONFIG = {
   max_item_dependencies: 4,
   max_attempts_per_item: 3,
   max_budget_records: 32,
+  executor_agent: 'executor-example',
+  executor_model_tier: 'mid',
+  reviewer_agent: 'reviewer-example',
+  reviewer_model_tier: 'mid',
+  max_parallel_sessions: 2,
+  max_attempt_duration_ms: 60_000,
+  active_time_checkpoint_ms: 10_000,
+  max_result_bytes: 65_536,
+  retry_policy: {
+    max_semantic_attempts: 3,
+    max_contract_attempts: 3,
+    max_transport_attempts: 3,
+    max_no_progress_attempts: 2,
+    transport_backoff: { strategy: 'exponential', initial_delay_ms: 100, maximum_delay_ms: 1_000, multiplier: 2 },
+  },
 } as const
 const RUNTIME = 'epic-owner-test-runtime'
 const NOW = '2026-07-18T12:00:00.000Z'
@@ -58,6 +74,53 @@ function pluginInput(project: string, parentBySession: Record<string, string | u
     experimental_workspace: { register() {} },
     serverUrl: new URL('http://localhost'),
     $: () => {},
+  } as unknown as PluginInput
+}
+
+function git(project: string, args: string[]): string {
+  return execFileSync('git', args, { cwd: project, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
+}
+
+function coordinatorPluginInput(project: string, rejectFirstExecutorPrompt = false, malformedFirstSessionId = false): PluginInput {
+  let sequence = 0
+  let rejectedExecutorPrompt = false
+  let returnedMalformedSessionId = false
+  return {
+    ...pluginInput(project),
+    client: {
+      session: {
+        get: async ({ path: inputPath }: { path: { id: string } }) => ({ data: { id: inputPath.id } }),
+        create: async () => {
+          if (malformedFirstSessionId && !returnedMalformedSessionId) {
+            returnedMalformedSessionId = true
+            return { data: { id: 'invalid child identity' } }
+          }
+          return { data: { id: `child-${++sequence}` } }
+        },
+        prompt: async ({ body, query }: { body: { agent: string }; query: { directory: string } }) => {
+          const isExecutor = body.agent === CONFIG.executor_agent
+          if (isExecutor && rejectFirstExecutorPrompt && !rejectedExecutorPrompt) {
+            rejectedExecutorPrompt = true
+            throw Object.assign(new Error('definitive fixture rejection'), { status: 400 })
+          }
+          if (isExecutor) fs.writeFileSync(path.join(query.directory, `change-${sequence}.txt`), 'reviewed plugin change\n')
+          return {
+            data: {
+              info: { id: `response-${sequence}`, role: 'assistant', tokens: { input: 2, output: 1 } },
+              parts: [{
+                type: 'text',
+                text: JSON.stringify(isExecutor
+                  ? { status: 'review_ready', summary: 'Ready for checkpoint.' }
+                  : { verdict: 'pass', summary: 'No issues.', issues: [] }),
+              }],
+            },
+          }
+        },
+        abort: async () => ({}),
+        status: async () => ({ data: {} }),
+        messages: async () => ({ data: [] }),
+      },
+    },
   } as unknown as PluginInput
 }
 
@@ -136,7 +199,71 @@ function updateArgs(revision: number, sha256: string, overrides: Record<string, 
   }
 }
 
-describe('epic owner budget tools', () => {
+describe('epic owner tools', () => {
+  it('runs start, await, guarded integration, and cleanup through the production tool adapter', async () => {
+    const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'epic-owner-runtime-config-'))
+    const project = fs.mkdtempSync(path.join(os.tmpdir(), 'epic-owner-runtime-project-'))
+    temporaryDirectories.push(configDir, project)
+    process.env.OPENCODE_CONFIG_DIR = configDir
+    fs.writeFileSync(path.join(configDir, 'workflows.json'), JSON.stringify({
+      model_tiers: { low: [], mid: [{ model: 'provider/example-model' }], high: [] },
+      swarm_config: { default_concurrency: 2, provider_concurrency: { provider: 2 } },
+      epic: CONFIG,
+    }))
+    git(project, ['init', '--initial-branch=main'])
+    git(project, ['config', 'user.name', 'Owner Tool Test'])
+    git(project, ['config', 'user.email', 'owner-tool@example.com'])
+    fs.writeFileSync(path.join(project, 'tracked.txt'), 'base\n')
+    git(project, ['add', 'tracked.txt'])
+    git(project, ['commit', '-m', 'initial'])
+    git(project, ['branch', 'base'])
+    const requests: Parameters<ToolContext['ask']>[0][] = []
+    const context = toolContext(project, 'session-1', async request => { requests.push(request) })
+    const hooks = await createEpicOwnerTools(coordinatorPluginInput(project, true, true), RUNTIME)
+
+    const started = JSON.parse(await hooks.tool.epic_start.execute({
+      epic_id: 'epic-runtime', expected_revision: 0, expected_state_sha256: null, expected_generation: 1,
+      base_branch: 'refs/heads/base', integration_branch: 'refs/heads/main',
+      items: [{ item_id: 'item-a', dependencies: [], scope: 'Implement the reviewed change.' }],
+    }, context) as string)
+    const awaited = JSON.parse(await hooks.tool.epic_await.execute({ epic_id: 'epic-runtime', timeout_ms: 10_000 }, context) as string)
+    const collected = JSON.parse(await hooks.tool.epic_collect.execute({ epic_id: 'epic-runtime' }, context) as string)
+    const paused = JSON.parse(await hooks.tool.epic_pause.execute({
+      epic_id: 'epic-runtime', expected_revision: awaited.epic.revision,
+      expected_state_sha256: awaited.epic.state_sha256, expected_generation: awaited.epic.ownership_generation,
+      reason: 'Verify attended operator resume.',
+    }, context) as string)
+    const resumed = JSON.parse(await hooks.tool.epic_resume.execute({
+      epic_id: 'epic-runtime', expected_revision: paused.epic.revision,
+      expected_state_sha256: paused.epic.state_sha256, expected_generation: paused.epic.ownership_generation,
+      former_runtime_terminated: false,
+    }, context) as string)
+    const integrated = JSON.parse(await hooks.tool.epic_integrate.execute({
+      epic_id: 'epic-runtime', expected_revision: resumed.epic.revision,
+      expected_state_sha256: resumed.epic.state_sha256, expected_generation: resumed.epic.ownership_generation,
+      item_id: 'item-a',
+    }, context) as string)
+    const cleaned = JSON.parse(await hooks.tool.epic_cleanup.execute({
+      epic_id: 'epic-runtime', expected_revision: integrated.epic.revision,
+      expected_state_sha256: integrated.epic.state_sha256, expected_generation: integrated.epic.ownership_generation,
+      item_id: 'item-a',
+    }, context) as string)
+
+    assert.equal(started.started, true)
+    assert.equal(awaited.timed_out, false)
+    assert.equal(awaited.epic.status, 'running')
+    assert.equal(collected.items[0].attempts, 3)
+    assert.equal(paused.epic.status, 'paused')
+    assert.equal(resumed.epic.status, 'running')
+    assert.equal(integrated.epic.status, 'completed')
+    assert.deepEqual(cleaned.cleaned, ['item-a'])
+    assert.equal(git(project, ['status', '--porcelain']), '')
+    assert.deepEqual(requests.map(request => request.permission), [
+      'epic_start', 'task', 'epic_pause', 'epic_resume', 'task', 'epic_integrate', 'epic_cleanup',
+    ])
+    await hooks.dispose()
+  })
+
   it('is a true disabled no-op before session or path verification', async () => {
     const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'epic-owner-disabled-'))
     temporaryDirectories.push(configDir)

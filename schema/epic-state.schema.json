@@ -529,6 +529,81 @@
                               "type": "null"
                             }
                           ]
+                        },
+                        "issues": {
+                          "maxItems": 128,
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "issue_id": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 128,
+                                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+                              },
+                              "severity": {
+                                "type": "string",
+                                "enum": [
+                                  "critical",
+                                  "high",
+                                  "medium",
+                                  "low",
+                                  "info"
+                                ]
+                              },
+                              "message": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 4096
+                              },
+                              "path": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 1024
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              },
+                              "line": {
+                                "anyOf": [
+                                  {
+                                    "type": "integer",
+                                    "exclusiveMinimum": 0,
+                                    "maximum": 9007199254740991
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              },
+                              "recommendation": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 4096
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              }
+                            },
+                            "required": [
+                              "issue_id",
+                              "severity",
+                              "message",
+                              "path",
+                              "line",
+                              "recommendation"
+                            ],
+                            "additionalProperties": false
+                          }
                         }
                       },
                       "required": [
@@ -724,6 +799,10 @@
             "pattern": "^[a-f0-9]{64}$"
           },
           "source_commit": {
+            "type": "string",
+            "pattern": "^(?:[a-f0-9]{40}|[a-f0-9]{64})$"
+          },
+          "previous_target_commit": {
             "type": "string",
             "pattern": "^(?:[a-f0-9]{40}|[a-f0-9]{64})$"
           },
@@ -1392,7 +1471,7 @@
         },
         "max_result_bytes": {
           "type": "integer",
-          "exclusiveMinimum": 0,
+          "minimum": 8192,
           "maximum": 16777216
         },
         "provider_cost_reporting": {

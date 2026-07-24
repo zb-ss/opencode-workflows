@@ -61,6 +61,15 @@ export interface EpicIntegrationConflict extends EpicIntegrationResultBase {
 
 export type EpicIntegrationResult = EpicIntegrationSuccess | EpicIntegrationConflict
 
+export interface EpicRecoveredIntegrationVerificationInput {
+  project_root: string
+  project_identity_sha256: string
+  integration_branch: string
+  expected_target_commit: string
+  source_checkpoint_commit: string
+  result_commit: string
+}
+
 export class EpicIntegrationAmbiguousError extends Error {
   readonly expected_target_commit: string
   readonly source_checkpoint_commit: string
@@ -459,6 +468,29 @@ export function integrateEpicCheckpoint(inputValue: EpicIntegrationInput): EpicI
     result: 'success',
     result_commit: mergeCommit,
     conflict_paths: [],
+  }
+}
+
+/** Recomputes the reviewed merge tree before accepting a published result after restart. */
+export function verifyRecoveredEpicIntegration(input: EpicRecoveredIntegrationVerificationInput): void {
+  validateOid(input.expected_target_commit, 'expected target commit')
+  validateOid(input.source_checkpoint_commit, 'source checkpoint commit')
+  validateOid(input.result_commit, 'result commit')
+  validateSha256(input.project_identity_sha256, 'project identity')
+  const projectRoot = resolveProjectRoot(input.project_root)
+  if (sha256Hex(projectRoot) !== input.project_identity_sha256) throw new Error('canonical project root does not match the expected project identity')
+  assertIntegrationBranch(projectRoot, input.integration_branch)
+  if (git(['rev-parse', '--verify', `${input.integration_branch}^{commit}`], projectRoot) !== input.result_commit) {
+    throw new Error('recovered integration result is not the current integration branch commit')
+  }
+  const mergeTree = computeMergeTree(projectRoot, input.expected_target_commit, input.source_checkpoint_commit)
+  if (mergeTree.tree_oid === null) throw new Error('recovered integration inputs do not produce a clean merge tree')
+  if (git(['rev-parse', '--verify', `${input.result_commit}^{tree}`], projectRoot) !== mergeTree.tree_oid) {
+    throw new Error('recovered integration tree does not match the exact reviewed merge tree')
+  }
+  const parents = git(['rev-list', '--parents', '-n', '1', input.result_commit], projectRoot).split(/\s+/)
+  if (parents.length !== 3 || parents[1] !== input.expected_target_commit || parents[2] !== input.source_checkpoint_commit) {
+    throw new Error('recovered integration result does not have the exact expected parents')
   }
 }
 

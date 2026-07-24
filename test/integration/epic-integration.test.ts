@@ -9,6 +9,7 @@ import { sha256Hex } from '../../lib/canonical-json.ts'
 import {
   EpicIntegrationAmbiguousError,
   integrateEpicCheckpoint,
+  verifyRecoveredEpicIntegration,
   type EpicIntegrationInput,
 } from '../../lib/epic-integration.ts'
 import {
@@ -175,6 +176,40 @@ describe('guarded epic integration', { concurrency: false }, () => {
     assert.equal(git(root, ['status', '--porcelain']), '')
     assert.equal(git(created.path, ['rev-parse', 'HEAD']), checkpoint.checkpoint_commit)
     assert.equal(fs.existsSync(created.path), true)
+  })
+
+  it('rejects a recovered commit with exact parents but an unreviewed tree', () => {
+    const { root } = repository()
+    const created = createEpicAttemptWorktree(root, 'refs/heads/main', 'epic-1', 'item-1', 'attempt-1')
+    fs.writeFileSync(path.join(created.path, 'source.txt'), 'reviewed source\n')
+    const checkpoint = checkpointEpicAttemptWorktree(root, created.path, created.evidence)
+    const request = input(root, created, checkpoint.checkpoint_commit)
+    const result = integrateEpicCheckpoint(request)
+    assert.equal(result.success, true)
+    verifyRecoveredEpicIntegration({
+      project_root: root,
+      project_identity_sha256: request.project_identity_sha256,
+      integration_branch: request.integration_branch,
+      expected_target_commit: request.expected_target_commit,
+      source_checkpoint_commit: request.source_checkpoint_commit,
+      result_commit: result.result_commit,
+    })
+
+    const forged = git(root, [
+      'commit-tree', `${request.expected_target_commit}^{tree}`,
+      '-p', request.expected_target_commit,
+      '-p', request.source_checkpoint_commit,
+      '-m', 'forged recovered result',
+    ])
+    git(root, ['update-ref', request.integration_branch, forged, result.result_commit])
+    assert.throws(() => verifyRecoveredEpicIntegration({
+      project_root: root,
+      project_identity_sha256: request.project_identity_sha256,
+      integration_branch: request.integration_branch,
+      expected_target_commit: request.expected_target_commit,
+      source_checkpoint_commit: request.source_checkpoint_commit,
+      result_commit: forged,
+    }), /tree does not match/)
   })
 
   it('refuses target advance and source worktree rebind before publication', () => {

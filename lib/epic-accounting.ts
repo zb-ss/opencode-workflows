@@ -442,6 +442,10 @@ function closeAllActiveIntervals(usage: EpicScopedUsage[], observedAt: string): 
   })
 }
 
+export function closeEpicUsageIntervals(usage: EpicScopedUsage[], observed_at: string): EpicScopedUsage[] {
+  return closeAllActiveIntervals(usage, observed_at)
+}
+
 /**
  * Applies caller-supplied token/cost deltas exactly once at item and epic
  * scope. Wall-clock active time is coordinator-checkpoint-owned and advances

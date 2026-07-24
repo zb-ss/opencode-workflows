@@ -18,6 +18,7 @@ export const MAX_EPIC_PARALLEL_SESSIONS = MAX_EPIC_ITEMS
 export const MAX_EPIC_ATTEMPT_DURATION_MS = 60 * 60 * 1000
 export const MAX_EPIC_ACTIVE_TIME_CHECKPOINT_MS = 60 * 60 * 1000
 export const MAX_EPIC_RESULT_BYTES = 16 * 1024 * 1024
+export const MIN_EPIC_RESULT_BYTES = 8 * 1024
 export const MAX_EPIC_MODEL_CANDIDATES = 64
 export const MAX_EPIC_PROVIDER_POLICIES = 64
 export const MAX_EPIC_TRANSPORT_BACKOFF_DELAY_MS = 60 * 60 * 1000
@@ -65,7 +66,7 @@ const EnabledEpicConfigFields = {
   max_parallel_sessions: safePositiveInteger.max(MAX_EPIC_PARALLEL_SESSIONS),
   max_attempt_duration_ms: safePositiveInteger.max(MAX_EPIC_ATTEMPT_DURATION_MS),
   active_time_checkpoint_ms: safePositiveInteger.max(MAX_EPIC_ACTIVE_TIME_CHECKPOINT_MS),
-  max_result_bytes: safePositiveInteger.max(MAX_EPIC_RESULT_BYTES),
+  max_result_bytes: safePositiveInteger.min(MIN_EPIC_RESULT_BYTES).max(MAX_EPIC_RESULT_BYTES),
   retry_policy: EpicRetryPolicySchema,
 }
 

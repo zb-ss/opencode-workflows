@@ -10,6 +10,7 @@ import {
   safeNonNegativeInteger,
   type FailureClass,
 } from './automation-policy-contracts.ts'
+import { EpicReviewIssueSchema, MAX_EPIC_REVIEW_ISSUES, type EpicReviewIssue } from './epic-attempt-result.ts'
 import {
   EpicOperationalLimitsSchema,
   EpicRetryPolicySchema,
@@ -22,6 +23,7 @@ import {
   MAX_EPIC_PARALLEL_SESSIONS,
   MAX_EPIC_PROVIDER_POLICIES,
   MAX_EPIC_RESULT_BYTES,
+  MIN_EPIC_RESULT_BYTES,
   MAX_ITEM_DEPENDENCIES,
   type EpicOperationalLimits,
 } from './epic-policy.ts'
@@ -100,7 +102,7 @@ export const EpicCoordinationPolicySchema = z.object({
   retry_policy: EpicRetryPolicySchema,
   max_attempt_duration_ms: safeNonNegativeInteger.positive().max(MAX_EPIC_ATTEMPT_DURATION_MS),
   active_time_checkpoint_ms: safeNonNegativeInteger.positive().max(MAX_EPIC_ACTIVE_TIME_CHECKPOINT_MS),
-  max_result_bytes: safeNonNegativeInteger.positive().max(MAX_EPIC_RESULT_BYTES),
+  max_result_bytes: safeNonNegativeInteger.min(MIN_EPIC_RESULT_BYTES).max(MAX_EPIC_RESULT_BYTES),
   provider_cost_reporting: z.record(SafeIdentifierSchema, CostReportingCapabilitySchema),
 }).strict().superRefine((policy, context) => {
   if (policy.active_time_checkpoint_ms > policy.max_attempt_duration_ms) {
@@ -214,6 +216,7 @@ export interface EpicReviewRecord {
   verdict: 'passed' | 'failed' | null
   evidence_digest: string | null
   result_summary: string | null
+  issues?: EpicReviewIssue[]
 }
 
 export interface EpicIdentity {
@@ -283,6 +286,7 @@ export interface EpicIntegrationEvent {
   attempt_id: string
   dependency_snapshot_sha256: string
   source_commit: string
+  previous_target_commit?: string
   target_commit: string
   review_evidence_digest: string
   result: 'success' | 'failure'
@@ -343,6 +347,7 @@ export const EpicReviewRecordSchema = z.object({
   verdict: z.enum(['passed', 'failed']).nullable(),
   evidence_digest: Sha256Schema.nullable(),
   result_summary: BoundedTextSchema.nullable(),
+  issues: z.array(EpicReviewIssueSchema).max(MAX_EPIC_REVIEW_ISSUES).optional(),
 }).strict().superRefine((review, context) => {
   const is_complete = review.completed_at !== null
   for (const field of ['verdict', 'evidence_digest', 'result_summary'] as const) {
@@ -364,6 +369,11 @@ export const EpicReviewRecordSchema = z.object({
   }
   if (review.launch_state === 'ambiguous' && is_complete) {
     context.addIssue({ code: 'custom', path: ['launch_state'], message: 'ambiguous review launch cannot claim a completed review result' })
+  }
+  if (!is_complete && review.issues !== undefined) context.addIssue({ code: 'custom', path: ['issues'], message: 'review issues may be recorded only when the review is complete' })
+  if (is_complete && review.issues !== undefined) {
+    if (review.verdict === 'passed' && review.issues.length !== 0) context.addIssue({ code: 'custom', path: ['issues'], message: 'passed review must record zero issues' })
+    if (review.verdict === 'failed' && review.issues.length === 0) context.addIssue({ code: 'custom', path: ['issues'], message: 'failed review must record at least one issue' })
   }
 })
 
@@ -409,7 +419,9 @@ export const EpicAttemptSchema = z.object({
     }
     if (attempt.launch_state === 'reserved' && attempt.child_session_id !== null) context.addIssue({ code: 'custom', path: ['child_session_id'], message: 'reserved launch must not have a child session ID' })
     if (attempt.launch_state !== 'reserved' && attempt.launch_state !== 'ambiguous' && attempt.child_session_id === null
-      && !(attempt.launch_state === 'settled' && attempt.status === 'cancelled')) context.addIssue({ code: 'custom', path: ['child_session_id'], message: 'created launch requires a child session ID' })
+      && !(attempt.launch_state === 'settled'
+        && ((attempt.status === 'cancelled' && attempt.failure_classification === 'cancelled')
+          || (attempt.status === 'failed' && attempt.failure_classification === 'transport')))) context.addIssue({ code: 'custom', path: ['child_session_id'], message: 'created launch requires a child session ID unless a pre-dispatch launch was definitively rejected' })
     if (attempt.launch_state === 'ambiguous') {
       if (attempt.status !== 'failed' || attempt.failure_classification !== 'ambiguous_launch') context.addIssue({ code: 'custom', path: ['launch_state'], message: 'ambiguous launch must be a failed ambiguous_launch attempt' })
     } else if (is_active && attempt.launch_state === 'settled') {
@@ -433,8 +445,9 @@ export const EpicAttemptSchema = z.object({
       if (Date.parse(attempt.review.started_at) < Date.parse(attempt.started_at)) context.addIssue({ code: 'custom', path: ['review', 'started_at'], message: 'review cannot start before the attempt' })
       if (attempt.review.completed_at !== null && attempt.completed_at !== null && Date.parse(attempt.review.completed_at) > Date.parse(attempt.completed_at)) context.addIssue({ code: 'custom', path: ['review', 'completed_at'], message: 'review cannot complete after the attempt' })
       if (attempt.review.launch_state === 'settled' && attempt.review.completed_at === null
-        && (attempt.status !== 'cancelled' || attempt.review.child_session_id !== null)) {
-        context.addIssue({ code: 'custom', path: ['review', 'launch_state'], message: 'incomplete settled review is allowed only for cancellation of a reserved no-child review launch' })
+        && !((attempt.status === 'cancelled' && attempt.failure_classification === 'cancelled')
+          || (attempt.status === 'failed' && attempt.failure_classification === 'transport'))) {
+        context.addIssue({ code: 'custom', path: ['review', 'launch_state'], message: 'incomplete settled review is allowed only after cancellation or definitive transport rejection' })
       }
     }
     if (attempt.status === 'passed') {
@@ -491,6 +504,7 @@ export const EpicIntegrationEventSchema = z.object({
   attempt_id: SafeIdentifierSchema,
   dependency_snapshot_sha256: Sha256Schema,
   source_commit: GitOidSchema,
+  previous_target_commit: GitOidSchema.optional(),
   target_commit: GitOidSchema,
   review_evidence_digest: Sha256Schema,
   result: z.enum(['success', 'failure']),
@@ -521,7 +535,10 @@ export const EpicStateStructuralSchema = z.object({
   coordination_policy: EpicCoordinationPolicySchema.optional(),
   integration_intent: EpicIntegrationIntentSchema.nullable().optional(),
 }).strict().superRefine((state, context) => {
-  const has_ambiguous_review = Object.values(state.items).some(item => item.attempts.some(attempt => attempt.review?.launch_state === 'ambiguous'))
+  const has_ambiguous_review = Object.values(state.items).some(item => item.attempts.some(attempt => {
+    if (!attempt.review || attempt.review.launch_state !== 'ambiguous') return false
+    return ['running', 'checkpointed', 'reviewing'].includes(attempt.status)
+  }))
   if (has_ambiguous_review && (state.status !== 'paused' || state.pause_code !== 'ambiguous_reviewer_launch')) {
     context.addIssue({ code: 'custom', path: ['pause_code'], message: 'ambiguous reviewer launch requires an attended paused state' })
   }

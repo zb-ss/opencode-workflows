@@ -22,6 +22,7 @@ export function validateIntegrationLog(state: EpicState, issue: EpicIssueReporte
     const expected_previous = index === 0 ? null : state.integration_log[index - 1]!.event_digest
     if (event.previous_event_digest !== expected_previous) issue(['integration_log', index, 'previous_event_digest'], `event ${event.event_id} previous_event_digest does not link to preceding event`)
     if (computeIntegrationEventDigest(event) !== event.event_digest) issue(['integration_log', index, 'event_digest'], `event ${event.event_id} digest does not match content`)
+    if (state.coordination_policy && event.previous_target_commit === undefined) issue(['integration_log', index, 'previous_target_commit'], 'coordinated integration event must retain the pre-publication target commit')
     if (Date.parse(event.recorded_at) < Date.parse(state.created_at)) issue(['integration_log', index, 'recorded_at'], 'integration event cannot predate the epic')
     if (Date.parse(event.recorded_at) > Date.parse(state.updated_at)) issue(['integration_log', index, 'recorded_at'], 'integration event cannot exceed state updated_at')
     if (index > 0 && Date.parse(event.recorded_at) < Date.parse(state.integration_log[index - 1]!.recorded_at)) issue(['integration_log', index, 'recorded_at'], 'integration event timestamps must be monotonic')

@@ -1,4 +1,5 @@
 import { sha256Hex } from './canonical-json.ts'
+import path from 'node:path'
 
 import {
   deriveEpicWorktreeIdentity,
@@ -18,6 +19,7 @@ import {
   type ManagedReviewPatchOptions,
   type ManagedWorktreeCheckpoint,
   type ManagedWorktreeSnapshot,
+  getWorktreeDir,
 } from './worktree-manager.ts'
 
 const FULL_BRANCH_PREFIX = 'refs/heads/'
@@ -83,6 +85,28 @@ export function createEpicAttemptWorktree(
     identity.worktree_name,
   )
   return result(evidenceFromSnapshot(identity, snapshot), snapshot)
+}
+
+/** Filesystem-free identity plus the private runtime location used by creation. */
+export function epicAttemptWorktreePath(projectRoot: string, evidence: EpicWorktreeEvidence): string {
+  evidence = parseEpicWorktreeEvidence(evidence)
+  return path.join(getWorktreeDir(projectRoot), evidence.worktree_name)
+}
+
+/** Remove only an unused, pristine reservation worktree after a lost CAS. */
+export function cleanupUnusedEpicAttemptWorktree(
+  projectRoot: string,
+  worktreePath: string,
+  evidence: EpicWorktreeEvidence,
+): boolean {
+  try {
+    const inspected = inspectEpicAttemptWorktree(projectRoot, worktreePath, evidence)
+    if (inspected.has_changes || inspected.has_conflicts || inspected.head_commit !== evidence.base_commit) return false
+    removeManagedWorktree(projectRoot, worktreePath, evidence.worktree_name, evidence.branch_name)
+    return true
+  } catch {
+    return false
+  }
 }
 
 export function inspectEpicAttemptWorktree(

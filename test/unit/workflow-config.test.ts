@@ -26,6 +26,7 @@ import {
   MAX_EPIC_BUDGET_RECORDS,
   MAX_EPIC_ITEMS,
   MAX_ITEM_DEPENDENCIES,
+  MIN_EPIC_RESULT_BYTES,
 } from '../../lib/epic-policy.ts'
 
 function publicationTarget() {
@@ -161,6 +162,7 @@ describe('workflow config', () => {
     }
     assert.equal(WorkflowConfigSchema.safeParse({ epic: { enabled: false, max_epic_items: 1 } }).success, false)
     assert.equal(WorkflowConfigSchema.safeParse({ epic: { ...valid, max_epic_items: MAX_EPIC_ITEMS + 1 } }).success, false)
+    assert.equal(WorkflowConfigSchema.safeParse({ epic: { ...valid, max_result_bytes: MIN_EPIC_RESULT_BYTES - 1 } }).success, false)
     assert.equal(WorkflowConfigSchema.safeParse({ epic: { ...valid, model: 'provider/model' } }).success, false)
     assert.equal(WorkflowConfigSchema.safeParse({ epic: { ...enabledEpicInput(), max_epic_items: 1, max_parallel_sessions: 2 } }).success, false)
     assert.equal(WorkflowConfigSchema.safeParse({ epic: {
@@ -189,6 +191,7 @@ describe('workflow config', () => {
       { ...enabledEpicInput(), retry_policy: { ...enabledEpicInput().retry_policy, max_transport_attempts: 33 } },
       { enabled: true, max_epic_items: 12 },
       { ...enabledEpicInput(), max_epic_items: 257 },
+      { ...enabledEpicInput(), max_result_bytes: MIN_EPIC_RESULT_BYTES - 1 },
       { enabled: false, unknown: true },
     ]
     for (const epic of candidates) {

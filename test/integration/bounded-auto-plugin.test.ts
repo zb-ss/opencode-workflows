@@ -221,7 +221,10 @@ describe('bounded automatic workflow plugin', () => {
       hooks.tool!.workflow_validation_run.execute(validationArgs, childContext),
       /requires interactive autonomy.*not OS-sandboxed/,
     )
-    for (const toolName of ['epic_budget_update', 'epic_budget_extend']) {
+    for (const toolName of [
+      'epic_start', 'epic_pause', 'epic_cancel', 'epic_resume', 'epic_redelegate', 'epic_integrate', 'epic_cleanup',
+      'epic_budget_update', 'epic_budget_extend',
+    ]) {
       await assert.rejects(
         hooks['tool.execute.before']!(
           { tool: toolName, sessionID: childSessionId, callID: `${toolName}-call` },

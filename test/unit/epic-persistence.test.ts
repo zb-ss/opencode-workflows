@@ -23,7 +23,15 @@ import { getRuntimeDir, hashIdentifier } from '../../lib/paths.ts'
 const NOW = '2026-07-18T12:00:00.000Z'
 const LATER = '2026-07-18T12:05:00.000Z'
 const OID = (character: string) => character.repeat(40)
-const CONFIG = { enabled: true, max_epic_items: 8, max_item_dependencies: 4, max_attempts_per_item: 3, max_budget_records: 16 } as const
+const CONFIG = {
+  enabled: true, max_epic_items: 8, max_item_dependencies: 4, max_attempts_per_item: 3, max_budget_records: 16,
+  executor_agent: 'executor-example', executor_model_tier: 'mid', reviewer_agent: 'reviewer-example', reviewer_model_tier: 'mid',
+  max_parallel_sessions: 2, max_attempt_duration_ms: 60_000, active_time_checkpoint_ms: 10_000, max_result_bytes: 65_536,
+  retry_policy: {
+    max_semantic_attempts: 3, max_contract_attempts: 3, max_transport_attempts: 3, max_no_progress_attempts: 2,
+    transport_backoff: { strategy: 'exponential', initial_delay_ms: 100, maximum_delay_ms: 1_000, multiplier: 2 },
+  },
+} as const
 const temporaryDirectories: string[] = []
 const supportsPosixStore = process.platform !== 'win32' && typeof fs.constants.O_NOFOLLOW === 'number' && typeof fs.constants.O_DIRECTORY === 'number'
 

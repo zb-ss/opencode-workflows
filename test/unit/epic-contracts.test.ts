@@ -367,7 +367,8 @@ function coordinatedIntent(expected_target_commit: string, intent_id: string) {
       event_id: `${intent_id}-event`,
       dependency_snapshot_sha256: intent.dependency_snapshot_sha256,
       source_commit: intent.expected_source_commit,
-      target_commit: intent.expected_target_commit,
+      previous_target_commit: intent.expected_target_commit,
+      target_commit: OID('4'),
       review_evidence_digest: intent.review_evidence_digest,
       recorded_at: AT(9),
     },
@@ -699,7 +700,7 @@ describe('shared failures, DAG, transitions, and identity invariants', () => {
       ...lifecycle.reserved,
       state_revision: lifecycle.reserved.state_revision + 1,
       updated_at: AT(2),
-      coordination_policy: { ...lifecycle.reserved.coordination_policy!, max_result_bytes: 2048 },
+      coordination_policy: { ...lifecycle.reserved.coordination_policy!, max_result_bytes: 8192 },
     }), /coordination_policy is immutable/)
 
     const reservedAttempt = lifecycle.reserved.items['item-a']!.attempts[0]!
@@ -838,7 +839,8 @@ describe('shared failures, DAG, transitions, and identity invariants', () => {
       attempt_id: intent.attempt_id,
       dependency_snapshot_sha256: intent.dependency_snapshot_sha256,
       source_commit: intent.expected_source_commit,
-      target_commit: intent.expected_target_commit,
+      previous_target_commit: intent.expected_target_commit,
+      target_commit: OID('3'),
       review_evidence_digest: intent.review_evidence_digest,
       result: 'success' as const,
       previous_event_digest: null,
@@ -856,9 +858,9 @@ describe('shared failures, DAG, transitions, and identity invariants', () => {
     }
     const settled = validateEpicTransition(intended, settledInput)
     assert.equal(settled.integration_intent, null)
-    assert.equal(settled.items['item-a']!.integration_commit, OID('2'))
+    assert.equal(settled.items['item-a']!.integration_commit, OID('3'))
 
-    const wrongEvent = { ...event, target_commit: OID('3'), event_digest: '' }
+    const wrongEvent = { ...event, previous_target_commit: OID('3'), event_digest: '' }
     wrongEvent.event_digest = computeIntegrationEventDigest(wrongEvent)
     assert.throws(() => validateEpicTransition(intended, {
       ...settledInput,
@@ -877,7 +879,7 @@ describe('shared failures, DAG, transitions, and identity invariants', () => {
     const success = coordinatedIntent(OID('2'), 'intent-success')
     const integrated = transitionEpicItemToIntegrated(success.intended, 'item-a', success.eventInput)
     assert.equal(integrated.items['item-a']!.status, 'integrated')
-    assert.equal(integrated.items['item-a']!.integration_commit, OID('2'))
+    assert.equal(integrated.items['item-a']!.integration_commit, OID('4'))
     assert.equal(integrated.integration_intent, null)
 
     const failure = coordinatedIntent(OID('3'), 'intent-conflict')
@@ -905,7 +907,7 @@ describe('shared failures, DAG, transitions, and identity invariants', () => {
 
     const mismatch = coordinatedIntent(OID('2'), 'intent-mismatch')
     assert.throws(
-      () => transitionEpicItemToIntegrated(mismatch.intended, 'item-a', { ...mismatch.eventInput, target_commit: OID('3') }),
+      () => transitionEpicItemToIntegrated(mismatch.intended, 'item-a', { ...mismatch.eventInput, previous_target_commit: OID('3') }),
       /does not exactly match the persisted integration intent/,
     )
     assert.throws(
