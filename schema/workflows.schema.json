@@ -81,7 +81,16 @@
         "max_epic_items": { "type": "integer", "minimum": 1, "maximum": 256 },
         "max_item_dependencies": { "type": "integer", "minimum": 1, "maximum": 64 },
         "max_attempts_per_item": { "type": "integer", "minimum": 1, "maximum": 32 },
-        "max_budget_records": { "type": "integer", "minimum": 1, "maximum": 4096 }
+        "max_budget_records": { "type": "integer", "minimum": 1, "maximum": 4096 },
+        "executor_agent": { "$ref": "#/$defs/safeIdentifier" },
+        "executor_model_tier": { "enum": ["low", "mid", "high"] },
+        "reviewer_agent": { "$ref": "#/$defs/safeIdentifier" },
+        "reviewer_model_tier": { "enum": ["low", "mid", "high"] },
+        "max_parallel_sessions": { "type": "integer", "minimum": 1, "maximum": 256 },
+        "max_attempt_duration_ms": { "type": "integer", "minimum": 1, "maximum": 3600000 },
+        "active_time_checkpoint_ms": { "type": "integer", "minimum": 1, "maximum": 3600000 },
+        "max_result_bytes": { "type": "integer", "minimum": 8192, "maximum": 16777216 },
+        "retry_policy": { "$ref": "#/$defs/epicRetryPolicy" }
       },
       "required": ["enabled"],
       "additionalProperties": false,
@@ -89,11 +98,21 @@
         {
           "if": { "properties": { "enabled": { "const": true } }, "required": ["enabled"] },
           "then": {
+            "$comment": "Authoritative runtime validation additionally enforces active_time_checkpoint_ms <= max_attempt_duration_ms and every retry ceiling <= max_attempts_per_item; portable JSON Schema cannot compare sibling numeric values.",
             "required": [
               "max_epic_items",
               "max_item_dependencies",
               "max_attempts_per_item",
-              "max_budget_records"
+              "max_budget_records",
+              "executor_agent",
+              "executor_model_tier",
+              "reviewer_agent",
+              "reviewer_model_tier",
+              "max_parallel_sessions",
+              "max_attempt_duration_ms",
+              "active_time_checkpoint_ms",
+              "max_result_bytes",
+              "retry_policy"
             ]
           },
           "else": {
@@ -103,7 +122,16 @@
                 { "required": ["max_epic_items"] },
                 { "required": ["max_item_dependencies"] },
                 { "required": ["max_attempts_per_item"] },
-                { "required": ["max_budget_records"] }
+                { "required": ["max_budget_records"] },
+                { "required": ["executor_agent"] },
+                { "required": ["executor_model_tier"] },
+                { "required": ["reviewer_agent"] },
+                { "required": ["reviewer_model_tier"] },
+                { "required": ["max_parallel_sessions"] },
+                { "required": ["max_attempt_duration_ms"] },
+                { "required": ["active_time_checkpoint_ms"] },
+                { "required": ["max_result_bytes"] },
+                { "required": ["retry_policy"] }
               ]
             }
           }
@@ -555,6 +583,34 @@
           ]
         }
       ]
+    },
+    "epicRetryPolicy": {
+      "type": "object",
+      "properties": {
+        "max_semantic_attempts": { "type": "integer", "minimum": 1, "maximum": 32 },
+        "max_contract_attempts": { "type": "integer", "minimum": 1, "maximum": 32 },
+        "max_transport_attempts": { "type": "integer", "minimum": 1, "maximum": 32 },
+        "max_no_progress_attempts": { "type": "integer", "minimum": 1, "maximum": 32 },
+        "transport_backoff": {
+          "type": "object",
+          "properties": {
+            "strategy": { "const": "exponential" },
+            "initial_delay_ms": { "type": "integer", "minimum": 1, "maximum": 3600000 },
+            "maximum_delay_ms": { "type": "integer", "minimum": 1, "maximum": 3600000 },
+            "multiplier": { "type": "number", "exclusiveMinimum": 1, "maximum": 9007199254740991 }
+          },
+          "required": ["strategy", "initial_delay_ms", "maximum_delay_ms", "multiplier"],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "max_semantic_attempts",
+        "max_contract_attempts",
+        "max_transport_attempts",
+        "max_no_progress_attempts",
+        "transport_backoff"
+      ],
+      "additionalProperties": false
     },
     "modelId": {
       "type": "string",

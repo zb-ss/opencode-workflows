@@ -8,6 +8,7 @@
 import { execFileSync, spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
+import { sha256Hex } from './canonical-json.ts'
 import type { WorktreeState, DelegationProvider } from './types.js'
 import { ensurePrivateDirectory, getRuntimeDir, hashIdentifier } from './paths.ts'
 
@@ -16,6 +17,10 @@ const WORKTREE_PREFIX = 'delegate-'
 const BRANCH_PREFIX = 'delegate'
 const SLUG_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?$/
 const WORKTREE_NAME_PATTERN = /^(?:delegate|epic)-[a-f0-9]{24}$/
+const GIT_OID_PATTERN = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/
+const MAX_GIT_OUTPUT_BYTES = 16 * 1024 * 1024
+const MAX_DIFF_METADATA_BYTES = 64 * 1024
+const DEFAULT_MAX_PATCH_BYTES = 16 * 1024 * 1024
 
 export interface MergeWorktreeOptions {
   allowNoop?: boolean
@@ -41,6 +46,29 @@ export interface ManagedWorktreeSnapshot {
   has_conflicts: boolean
 }
 
+export interface ManagedWorktreeCheckpoint {
+  checkpoint_commit: string
+  checkpoint_tree_oid: string
+  checkpoint_tree_sha256: string
+  changed_files: string[]
+  diff_stat: string
+  diff_stat_truncated: boolean
+  created_commit: boolean
+}
+
+export interface ManagedReviewPatch {
+  base_commit: string
+  checkpoint_commit: string
+  patch_sha256: string
+  patch_content: string
+  patch_bytes: number
+  changed_files: string[]
+}
+
+export interface ManagedReviewPatchOptions {
+  max_patch_bytes?: number
+}
+
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
@@ -49,6 +77,7 @@ function git(args: string[], cwd: string): string {
   return execFileSync('git', args, {
     cwd,
     encoding: 'utf8',
+    maxBuffer: MAX_GIT_OUTPUT_BYTES,
     stdio: ['ignore', 'pipe', 'pipe'],
   }).trim()
 }
@@ -57,6 +86,7 @@ function gitRaw(args: string[], cwd: string): string {
   return execFileSync('git', args, {
     cwd,
     encoding: 'utf8',
+    maxBuffer: MAX_GIT_OUTPUT_BYTES,
     stdio: ['ignore', 'pipe', 'pipe'],
   })
 }
@@ -65,10 +95,33 @@ function gitSucceeds(args: string[], cwd: string): boolean {
   const result = spawnSync('git', args, {
     cwd,
     encoding: 'utf8',
+    maxBuffer: MAX_GIT_OUTPUT_BYTES,
     stdio: ['ignore', 'pipe', 'pipe'],
   })
 
   return !result.error && result.status === 0
+}
+
+function gitBuffer(args: string[], cwd: string, maxBytes: number): Buffer {
+  const result = spawnSync('git', args, {
+    cwd,
+    encoding: 'buffer',
+    maxBuffer: maxBytes + 1,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  if (result.error) {
+    if ((result.error as NodeJS.ErrnoException).code === 'ENOBUFS') {
+      throw new Error(`Git output exceeds the ${maxBytes}-byte limit`)
+    }
+    throw result.error
+  }
+  if (result.status !== 0) {
+    const detail = Buffer.isBuffer(result.stderr) ? result.stderr.toString('utf8').trim() : ''
+    throw new Error(`Git command failed${detail ? `: ${detail}` : ''}`)
+  }
+  const output = Buffer.isBuffer(result.stdout) ? result.stdout : Buffer.alloc(0)
+  if (output.byteLength > maxBytes) throw new Error(`Git output exceeds the ${maxBytes}-byte limit`)
+  return output
 }
 
 function resolveGitPath(cwd: string, gitPath: string): string {
@@ -126,6 +179,46 @@ function validateSlug(value: string, label: string): void {
   if (!SLUG_PATTERN.test(value) || value.includes('..')) {
     throw new Error(`${label} must be a safe slug (letters, numbers, dot, underscore, or hyphen)`)
   }
+}
+
+function validateOid(value: string, label: string): void {
+  if (!GIT_OID_PATTERN.test(value)) throw new Error(`${label} must be an exact Git object ID`)
+}
+
+function assertSafeRelativePath(filePath: string): string {
+  if (!filePath || filePath.length > 4096 || filePath.includes('\0')
+    || path.posix.isAbsolute(filePath) || path.win32.isAbsolute(filePath)) {
+    throw new Error('Git returned an unsafe worktree-relative path')
+  }
+  const segments = filePath.replaceAll('\\', '/').split('/')
+  if (segments.includes('..') || !segments.some(segment => segment !== '' && segment !== '.')) {
+    throw new Error('Git returned an unsafe worktree-relative path')
+  }
+  return filePath
+}
+
+function parseNulPaths(output: Buffer): string[] {
+  if (output.length === 0) return []
+  if (output.at(-1) !== 0) throw new Error('Git returned malformed path output')
+  const paths: string[] = []
+  let start = 0
+  for (let index = 0; index < output.length; index++) {
+    if (output[index] !== 0) continue
+    const encoded = output.subarray(start, index)
+    const filePath = encoded.toString('utf8')
+    if (!Buffer.from(filePath, 'utf8').equals(encoded)) throw new Error('Git returned a path that is not valid UTF-8')
+    paths.push(assertSafeRelativePath(filePath))
+    start = index + 1
+  }
+  return paths
+}
+
+function capUtf8(value: string, maxBytes: number): { content: string; truncated: boolean } {
+  const encoded = Buffer.from(value, 'utf8')
+  if (encoded.length <= maxBytes) return { content: value, truncated: false }
+  let end = maxBytes
+  while (end > 0 && (encoded[end] & 0xc0) === 0x80) end--
+  return { content: encoded.subarray(0, end).toString('utf8'), truncated: true }
 }
 
 export function getDelegationWorktreeName(workflowId: string, taskId: string): string {
@@ -333,6 +426,12 @@ export function inspectManagedWorktree(
   validateRefSyntax(realProjectRoot, expectedBranch, 'managed branch')
   const realWorktreePath = resolveManagedWorktree(realProjectRoot, worktreePath)
   if (path.basename(realWorktreePath) !== expectedName) throw new Error('managed worktree name does not match expected identity')
+  const initialWorktreeIdentity = directoryIdentity(realWorktreePath, 'managed worktree')
+  const projectCommonDirectory = resolveGitPath(realProjectRoot, git(['rev-parse', '--git-common-dir'], realProjectRoot))
+  const initialCommonDirectory = resolveGitPath(realWorktreePath, git(['rev-parse', '--git-common-dir'], realWorktreePath))
+  if (projectCommonDirectory !== initialCommonDirectory) throw new Error('managed worktree belongs to a different Git common directory')
+  const initialCommonIdentity = directoryIdentity(initialCommonDirectory, 'Git common directory')
+
   const branch = readWorktreeBranch(realWorktreePath)
   if (branch !== expectedBranch) throw new Error('managed worktree branch does not match expected identity')
   validateLocalBranch(realProjectRoot, branch, 'managed branch')
@@ -340,31 +439,166 @@ export function inspectManagedWorktree(
   const headCommit = git(['rev-parse', '--verify', 'HEAD^{commit}'], realWorktreePath)
   const branchCommit = git(['rev-parse', '--verify', `refs/heads/${branch}^{commit}`], realProjectRoot)
   if (headCommit !== branchCommit) throw new Error('managed worktree HEAD does not match its branch ref')
-
-  const projectCommonDirectory = resolveGitPath(realProjectRoot, git(['rev-parse', '--git-common-dir'], realProjectRoot))
-  const worktreeCommonDirectory = resolveGitPath(realWorktreePath, git(['rev-parse', '--git-common-dir'], realWorktreePath))
-  if (projectCommonDirectory !== worktreeCommonDirectory) throw new Error('managed worktree belongs to a different Git common directory')
-
-  const worktreeIdentity = directoryIdentity(realWorktreePath, 'managed worktree')
-  const commonIdentity = directoryIdentity(worktreeCommonDirectory, 'Git common directory')
   const status = readStatus(realWorktreePath)
   const hasConflicts = gitRaw(['diff', '--name-only', '--diff-filter=U', '-z'], realWorktreePath)
     .split('\0')
     .some(Boolean)
+
+  const finalBranch = readWorktreeBranch(realWorktreePath)
+  const finalHeadCommit = git(['rev-parse', '--verify', 'HEAD^{commit}'], realWorktreePath)
+  const finalBranchCommit = git(['rev-parse', '--verify', `refs/heads/${expectedBranch}^{commit}`], realProjectRoot)
+  const finalStatus = readStatus(realWorktreePath)
+  const finalHasConflicts = gitRaw(['diff', '--name-only', '--diff-filter=U', '-z'], realWorktreePath)
+    .split('\0')
+    .some(Boolean)
+  const finalCommonDirectory = resolveGitPath(realWorktreePath, git(['rev-parse', '--git-common-dir'], realWorktreePath))
+  const finalRealWorktreePath = fs.realpathSync(worktreePath)
+  const finalWorktreeIdentity = directoryIdentity(finalRealWorktreePath, 'managed worktree')
+  const finalCommonIdentity = directoryIdentity(finalCommonDirectory, 'Git common directory')
+  if (finalRealWorktreePath !== realWorktreePath
+    || finalCommonDirectory !== initialCommonDirectory
+    || finalBranch !== branch
+    || finalHeadCommit !== headCommit
+    || finalBranchCommit !== branchCommit
+    || JSON.stringify(finalStatus) !== JSON.stringify(status)
+    || finalHasConflicts !== hasConflicts
+    || finalWorktreeIdentity.dev !== initialWorktreeIdentity.dev
+    || finalWorktreeIdentity.ino !== initialWorktreeIdentity.ino
+    || finalCommonIdentity.dev !== initialCommonIdentity.dev
+    || finalCommonIdentity.ino !== initialCommonIdentity.ino) {
+    throw new Error('managed worktree changed or was rebound during inspection')
+  }
   return {
     name: expectedName,
     path: realWorktreePath,
     branch,
     head_commit: headCommit,
-    directory_dev: worktreeIdentity.dev,
-    directory_ino: worktreeIdentity.ino,
-    git_common_directory: worktreeCommonDirectory,
-    git_common_directory_dev: commonIdentity.dev,
-    git_common_directory_ino: commonIdentity.ino,
+    directory_dev: initialWorktreeIdentity.dev,
+    directory_ino: initialWorktreeIdentity.ino,
+    git_common_directory: initialCommonDirectory,
+    git_common_directory_dev: initialCommonIdentity.dev,
+    git_common_directory_ino: initialCommonIdentity.ino,
     changed_files: status.changed_files,
     diff_stat: status.diff_stat,
     has_changes: status.has_changes,
     has_conflicts: hasConflicts,
+  }
+}
+
+/**
+ * Commit the complete tracked and untracked state of an exact managed
+ * worktree. Hooks are intentionally honored. The returned tree SHA-256 binds
+ * the repository's native tree OID without assuming its object format.
+ */
+export function checkpointManagedWorktree(
+  projectRoot: string,
+  worktreePath: string,
+  expectedName: string,
+  expectedBranch: string,
+  checkpointId: string,
+): ManagedWorktreeCheckpoint {
+  validateSlug(checkpointId, 'checkpoint ID')
+  const before = inspectManagedWorktree(projectRoot, worktreePath, expectedName, expectedBranch)
+  if (before.has_conflicts) throw new Error('managed worktree has unresolved conflicts')
+
+  const changedFiles = before.changed_files.map(assertSafeRelativePath)
+  if (!before.has_changes) {
+    const treeOid = git(['rev-parse', '--verify', 'HEAD^{tree}'], before.path)
+    validateOid(treeOid, 'checkpoint tree')
+    return {
+      checkpoint_commit: before.head_commit,
+      checkpoint_tree_oid: treeOid,
+      checkpoint_tree_sha256: sha256Hex(treeOid),
+      changed_files: [],
+      diff_stat: '',
+      diff_stat_truncated: false,
+      created_commit: false,
+    }
+  }
+
+  git(['add', '-A', '--'], before.path)
+  if (gitSucceeds(['diff', '--cached', '--quiet', '--exit-code', '--'], before.path)) {
+    throw new Error('managed worktree changes could not be staged for checkpoint')
+  }
+  const diffMetadata = capUtf8(
+    gitRaw(['diff', '--cached', '--no-ext-diff', '--no-textconv', '--stat=120,200', '--'], before.path),
+    MAX_DIFF_METADATA_BYTES,
+  )
+  git([
+    '-c', 'commit.gpgSign=false',
+    '-c', 'user.name=OpenCode Workflows',
+    '-c', 'user.email=opencode-workflows@localhost',
+    'commit', '-m', `chore(epic): checkpoint ${checkpointId}`,
+  ], before.path)
+
+  const after = inspectManagedWorktree(projectRoot, before.path, expectedName, expectedBranch)
+  if (after.has_changes || after.has_conflicts) {
+    throw new Error('managed worktree changed while its checkpoint commit was being created')
+  }
+  const treeOid = git(['rev-parse', '--verify', `${after.head_commit}^{tree}`], after.path)
+  validateOid(treeOid, 'checkpoint tree')
+  return {
+    checkpoint_commit: after.head_commit,
+    checkpoint_tree_oid: treeOid,
+    checkpoint_tree_sha256: sha256Hex(treeOid),
+    changed_files: changedFiles,
+    diff_stat: diffMetadata.content,
+    diff_stat_truncated: diffMetadata.truncated,
+    created_commit: true,
+  }
+}
+
+/** Produce one bounded, byte-exact patch for an immutable commit range. */
+export function createManagedReviewPatch(
+  projectRoot: string,
+  worktreePath: string,
+  expectedName: string,
+  expectedBranch: string,
+  baseCommit: string,
+  checkpointCommit: string,
+  options: ManagedReviewPatchOptions = {},
+): ManagedReviewPatch {
+  validateOid(baseCommit, 'base commit')
+  validateOid(checkpointCommit, 'checkpoint commit')
+  const maxPatchBytes = options.max_patch_bytes ?? DEFAULT_MAX_PATCH_BYTES
+  if (!Number.isSafeInteger(maxPatchBytes) || maxPatchBytes <= 0 || maxPatchBytes > DEFAULT_MAX_PATCH_BYTES) {
+    throw new Error(`patch byte limit must be between 1 and ${DEFAULT_MAX_PATCH_BYTES}`)
+  }
+
+  const before = inspectManagedWorktree(projectRoot, worktreePath, expectedName, expectedBranch)
+  if (before.has_changes || before.has_conflicts) throw new Error('review patch requires a clean managed worktree')
+  if (before.head_commit !== checkpointCommit) throw new Error('managed worktree HEAD does not equal the reviewed checkpoint')
+  if (!managedCommitIsAncestor(projectRoot, baseCommit, checkpointCommit)) {
+    throw new Error('reviewed checkpoint is not descended from its bound base commit')
+  }
+
+  const changedPathOutput = gitBuffer([
+    'diff', '--name-only', '-z', '--no-ext-diff', '--no-textconv', baseCommit, checkpointCommit, '--',
+  ], before.path, MAX_DIFF_METADATA_BYTES)
+  const changedFiles = parseNulPaths(changedPathOutput)
+  const patch = gitBuffer([
+    'diff', '--binary', '--full-index', '--no-color', '--no-ext-diff', '--no-textconv',
+    baseCommit, checkpointCommit, '--',
+  ], before.path, maxPatchBytes)
+  const patchContent = patch.toString('utf8')
+  if (!Buffer.from(patchContent, 'utf8').equals(patch)) {
+    throw new Error('review patch is not valid UTF-8')
+  }
+
+  const after = inspectManagedWorktree(projectRoot, before.path, expectedName, expectedBranch)
+  if (after.head_commit !== checkpointCommit || after.has_changes || after.has_conflicts
+    || after.directory_dev !== before.directory_dev || after.directory_ino !== before.directory_ino
+    || after.git_common_directory_dev !== before.git_common_directory_dev
+    || after.git_common_directory_ino !== before.git_common_directory_ino) {
+    throw new Error('managed worktree changed while its review patch was being created')
+  }
+  return {
+    base_commit: baseCommit,
+    checkpoint_commit: checkpointCommit,
+    patch_sha256: sha256Hex(patch),
+    patch_content: patchContent,
+    patch_bytes: patch.byteLength,
+    changed_files: changedFiles,
   }
 }
 
@@ -379,7 +613,7 @@ export function removeManagedWorktree(
   if (snapshot.has_changes || snapshot.has_conflicts) throw new Error('managed worktree with retained changes or conflicts cannot be removed')
   const realProjectRoot = resolveProjectRoot(projectRoot)
   git(['worktree', 'remove', snapshot.path], realProjectRoot)
-  git(['branch', '-D', snapshot.branch], realProjectRoot)
+  git(['update-ref', '-d', `refs/heads/${snapshot.branch}`, snapshot.head_commit], realProjectRoot)
 }
 
 /** Check exact object IDs without accepting revision-expression syntax. */

@@ -1,4 +1,5 @@
 import { sha256Hex } from './canonical-json.ts'
+import path from 'node:path'
 
 import {
   deriveEpicWorktreeIdentity,
@@ -7,12 +8,18 @@ import {
   type EpicWorktreeIdentity,
 } from './epic-worktree-contracts.ts'
 import {
+  checkpointManagedWorktree,
+  createManagedReviewPatch,
   createManagedWorktree,
   inspectManagedWorktree,
   managedCommitIsAncestor,
   managedCommitIsRetainedByAnotherBranch,
   removeManagedWorktree,
+  type ManagedReviewPatch,
+  type ManagedReviewPatchOptions,
+  type ManagedWorktreeCheckpoint,
   type ManagedWorktreeSnapshot,
+  getWorktreeDir,
 } from './worktree-manager.ts'
 
 const FULL_BRANCH_PREFIX = 'refs/heads/'
@@ -80,6 +87,28 @@ export function createEpicAttemptWorktree(
   return result(evidenceFromSnapshot(identity, snapshot), snapshot)
 }
 
+/** Filesystem-free identity plus the private runtime location used by creation. */
+export function epicAttemptWorktreePath(projectRoot: string, evidence: EpicWorktreeEvidence): string {
+  evidence = parseEpicWorktreeEvidence(evidence)
+  return path.join(getWorktreeDir(projectRoot), evidence.worktree_name)
+}
+
+/** Remove only an unused, pristine reservation worktree after a lost CAS. */
+export function cleanupUnusedEpicAttemptWorktree(
+  projectRoot: string,
+  worktreePath: string,
+  evidence: EpicWorktreeEvidence,
+): boolean {
+  try {
+    const inspected = inspectEpicAttemptWorktree(projectRoot, worktreePath, evidence)
+    if (inspected.has_changes || inspected.has_conflicts || inspected.head_commit !== evidence.base_commit) return false
+    removeManagedWorktree(projectRoot, worktreePath, evidence.worktree_name, evidence.branch_name)
+    return true
+  } catch {
+    return false
+  }
+}
+
 export function inspectEpicAttemptWorktree(
   projectRoot: string,
   worktreePath: string,
@@ -103,6 +132,56 @@ export function inspectEpicAttemptWorktree(
     throw new Error('epic worktree HEAD is not descended from its bound base commit')
   }
   return result(evidence, snapshot)
+}
+
+/** Create or reuse a clean, exact checkpoint after revalidating epic evidence. */
+export function checkpointEpicAttemptWorktree(
+  projectRoot: string,
+  worktreePath: string,
+  evidence: EpicWorktreeEvidence,
+): ManagedWorktreeCheckpoint {
+  const before = inspectEpicAttemptWorktree(projectRoot, worktreePath, evidence)
+  if (before.has_conflicts) throw new Error('epic worktree has unresolved conflicts')
+  const checkpoint = checkpointManagedWorktree(
+    projectRoot,
+    before.path,
+    before.evidence.worktree_name,
+    before.evidence.branch_name,
+    before.evidence.attempt_id,
+  )
+  const after = inspectEpicAttemptWorktree(projectRoot, before.path, before.evidence)
+  if (after.head_commit !== checkpoint.checkpoint_commit || after.has_changes || after.has_conflicts) {
+    throw new Error('epic worktree did not remain bound to its checkpoint')
+  }
+  return checkpoint
+}
+
+/** Build a bounded exact patch from the evidence-bound base to one checkpoint. */
+export function createEpicReviewPatch(
+  projectRoot: string,
+  worktreePath: string,
+  evidence: EpicWorktreeEvidence,
+  checkpointCommit: string,
+  options: ManagedReviewPatchOptions = {},
+): ManagedReviewPatch {
+  const before = inspectEpicAttemptWorktree(projectRoot, worktreePath, evidence)
+  if (before.head_commit !== checkpointCommit || before.has_changes || before.has_conflicts) {
+    throw new Error('epic review patch requires a clean worktree at the exact checkpoint')
+  }
+  const patch = createManagedReviewPatch(
+    projectRoot,
+    before.path,
+    before.evidence.worktree_name,
+    before.evidence.branch_name,
+    before.evidence.base_commit,
+    checkpointCommit,
+    options,
+  )
+  const after = inspectEpicAttemptWorktree(projectRoot, before.path, before.evidence)
+  if (after.head_commit !== checkpointCommit || after.has_changes || after.has_conflicts) {
+    throw new Error('epic worktree changed while its review patch was created')
+  }
+  return patch
 }
 
 export function cleanupIntegratedEpicAttemptWorktree(

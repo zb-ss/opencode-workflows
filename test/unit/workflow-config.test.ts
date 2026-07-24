@@ -26,6 +26,7 @@ import {
   MAX_EPIC_BUDGET_RECORDS,
   MAX_EPIC_ITEMS,
   MAX_ITEM_DEPENDENCIES,
+  MIN_EPIC_RESULT_BYTES,
 } from '../../lib/epic-policy.ts'
 
 function publicationTarget() {
@@ -100,38 +101,84 @@ function workflowSchemaInput(publication: unknown) {
   }
 }
 
+function enabledEpicInput() {
+  return {
+    enabled: true as const,
+    max_epic_items: 12,
+    max_item_dependencies: 4,
+    max_attempts_per_item: 3,
+    max_budget_records: 24,
+    executor_agent: 'epic-executor',
+    executor_model_tier: 'mid' as const,
+    reviewer_agent: 'epic-reviewer',
+    reviewer_model_tier: 'high' as const,
+    max_parallel_sessions: 2,
+    max_attempt_duration_ms: 300_000,
+    active_time_checkpoint_ms: 30_000,
+    max_result_bytes: 1_048_576,
+    retry_policy: {
+      max_semantic_attempts: 3,
+      max_contract_attempts: 3,
+      max_transport_attempts: 3,
+      max_no_progress_attempts: 2,
+      transport_backoff: { strategy: 'exponential' as const, initial_delay_ms: 100, maximum_delay_ms: 1000, multiplier: 2 },
+    },
+  }
+}
+
 describe('workflow config', () => {
   it('defaults omitted epic configuration to disabled and preserves complete enabled limits', () => {
     assert.deepEqual(WorkflowConfigSchema.parse({}).epic, { enabled: false })
-    const epic = {
-      enabled: true as const,
-      max_epic_items: 12,
-      max_item_dependencies: 4,
-      max_attempts_per_item: 3,
-      max_budget_records: 24,
-    }
+    const epic = enabledEpicInput()
     assert.deepEqual(WorkflowConfigSchema.parse({ epic }).epic, epic)
   })
 
   it('requires complete enabled epic limits and rejects unknown fields or protocol ceiling violations', () => {
     const valid = {
-      enabled: true,
+      ...enabledEpicInput(),
       max_epic_items: MAX_EPIC_ITEMS,
       max_item_dependencies: MAX_ITEM_DEPENDENCIES,
       max_attempts_per_item: MAX_ATTEMPTS_PER_ITEM,
       max_budget_records: MAX_EPIC_BUDGET_RECORDS,
     }
-    for (const field of ['max_epic_items', 'max_item_dependencies', 'max_attempts_per_item', 'max_budget_records'] as const) {
+    for (const field of [
+      'max_epic_items',
+      'max_item_dependencies',
+      'max_attempts_per_item',
+      'max_budget_records',
+      'executor_agent',
+      'executor_model_tier',
+      'reviewer_agent',
+      'reviewer_model_tier',
+      'max_parallel_sessions',
+      'max_attempt_duration_ms',
+      'active_time_checkpoint_ms',
+      'max_result_bytes',
+      'retry_policy',
+    ] as const) {
       const incomplete: Record<string, unknown> = { ...valid }
       delete incomplete[field]
       assert.equal(WorkflowConfigSchema.safeParse({ epic: incomplete }).success, false)
     }
     assert.equal(WorkflowConfigSchema.safeParse({ epic: { enabled: false, max_epic_items: 1 } }).success, false)
     assert.equal(WorkflowConfigSchema.safeParse({ epic: { ...valid, max_epic_items: MAX_EPIC_ITEMS + 1 } }).success, false)
+    assert.equal(WorkflowConfigSchema.safeParse({ epic: { ...valid, max_result_bytes: MIN_EPIC_RESULT_BYTES - 1 } }).success, false)
     assert.equal(WorkflowConfigSchema.safeParse({ epic: { ...valid, model: 'provider/model' } }).success, false)
+    assert.equal(WorkflowConfigSchema.safeParse({ epic: { ...enabledEpicInput(), max_epic_items: 1, max_parallel_sessions: 2 } }).success, false)
+    assert.equal(WorkflowConfigSchema.safeParse({ epic: {
+      ...enabledEpicInput(),
+      max_attempt_duration_ms: 1000,
+      active_time_checkpoint_ms: 1001,
+    } }).success, false)
+    for (const field of ['max_semantic_attempts', 'max_contract_attempts', 'max_transport_attempts', 'max_no_progress_attempts'] as const) {
+      assert.equal(WorkflowConfigSchema.safeParse({ epic: {
+        ...enabledEpicInput(),
+        retry_policy: { ...enabledEpicInput().retry_policy, [field]: enabledEpicInput().max_attempts_per_item + 1 },
+      } }).success, false, `${field} must not exceed max_attempts_per_item`)
+    }
   })
 
-  it('keeps epic workflow JSON Schema parity for disabled and enabled candidates', () => {
+  it('keeps epic workflow JSON Schema structural parity for disabled and enabled candidates', () => {
     const public_schema = JSON.parse(fs.readFileSync(path.resolve('schema/workflows.schema.json'), 'utf8'))
     const AjvConstructor = Ajv2020 as unknown as new (options: object) => { compile(schema: object): (input: unknown) => boolean }
     const validate = new AjvConstructor({ strict: true, strictRequired: false, strictTuples: false }).compile(public_schema)
@@ -139,9 +186,12 @@ describe('workflow config', () => {
       undefined,
       { enabled: false },
       { enabled: false, max_epic_items: 2 },
-      { enabled: true, max_epic_items: 12, max_item_dependencies: 4, max_attempts_per_item: 3, max_budget_records: 24 },
+      enabledEpicInput(),
+      { ...enabledEpicInput(), executor_model_tier: 'unknown' },
+      { ...enabledEpicInput(), retry_policy: { ...enabledEpicInput().retry_policy, max_transport_attempts: 33 } },
       { enabled: true, max_epic_items: 12 },
-      { enabled: true, max_epic_items: 257, max_item_dependencies: 4, max_attempts_per_item: 3, max_budget_records: 24 },
+      { ...enabledEpicInput(), max_epic_items: 257 },
+      { ...enabledEpicInput(), max_result_bytes: MIN_EPIC_RESULT_BYTES - 1 },
       { enabled: false, unknown: true },
     ]
     for (const epic of candidates) {
@@ -149,6 +199,36 @@ describe('workflow config', () => {
       if (epic !== undefined) input.epic = epic
       assert.equal(validate(input), WorkflowConfigSchema.safeParse(input).success, JSON.stringify(epic))
     }
+  })
+
+  it('documents portable-schema limits while runtime rejects invalid epic cross-field relationships', () => {
+    const public_schema = JSON.parse(fs.readFileSync(path.resolve('schema/workflows.schema.json'), 'utf8'))
+    const AjvConstructor = Ajv2020 as unknown as new (options: object) => { compile(schema: object): (input: unknown) => boolean }
+    const validate = new AjvConstructor({ strict: true, strictRequired: false, strictTuples: false }).compile(public_schema)
+    const crossFieldInvalid = [
+      {
+        ...enabledEpicInput(),
+        max_attempt_duration_ms: 1000,
+        active_time_checkpoint_ms: 1001,
+      },
+      {
+        ...enabledEpicInput(),
+        retry_policy: {
+          ...enabledEpicInput().retry_policy,
+          max_semantic_attempts: enabledEpicInput().max_attempts_per_item + 1,
+        },
+      },
+    ]
+    for (const epic of crossFieldInvalid) {
+      const input = workflowSchemaInput({ enabled: false, internal_markers: [], targets: {} }) as Record<string, unknown>
+      input.epic = epic
+      assert.equal(validate(input), true, 'public schema must remain portable and structural')
+      assert.equal(WorkflowConfigSchema.safeParse(input).success, false, 'runtime validation must enforce cross-field relationships')
+    }
+    assert.match(
+      public_schema.properties.epic.allOf[0].then.$comment,
+      /runtime validation.*sibling numeric values/,
+    )
   })
 
   it('defaults autonomy to interactive when it is omitted', () => {

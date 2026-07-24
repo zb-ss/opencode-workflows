@@ -11,9 +11,10 @@ import {
   type EpicStatus,
   EpicValidationError,
 } from './epic-contract-schemas.ts'
-import { validateIntegrationLog } from './epic-integration-digests.ts'
+import { computeDependencySnapshotDigest, validateIntegrationLog } from './epic-integration-digests.ts'
 
 const TERMINAL_ITEM_STATUSES = new Set<EpicItemStatus>(['passed', 'failed', 'blocked', 'conflicted', 'integrated', 'cancelled'])
+const ACTIVE_ATTEMPT_STATUSES = new Set(['running', 'checkpointed', 'reviewing'])
 
 export const EpicStateSchema = EpicStateStructuralSchema.superRefine((state, context) => {
   addStateIssues(state as EpicState, context)
@@ -25,6 +26,12 @@ function addStateIssues(state: EpicState, context: z.core.$RefinementCtx): void 
   if (Date.parse(state.updated_at) < Date.parse(state.created_at)) issue(['updated_at'], 'updated_at must not precede created_at')
   if ((state.status === 'paused') !== (state.pause_reason !== null)) issue(['pause_reason'], 'pause_reason is required only while the epic is paused')
   if (state.status !== 'paused' && state.pause_code != null) issue(['pause_code'], 'pause_code is allowed only while the epic is paused')
+  if (state.coordination_policy) {
+    if (state.coordination_policy.max_parallel_sessions > state.operational_limits.max_epic_items) issue(['coordination_policy', 'max_parallel_sessions'], 'coordination concurrency exceeds the frozen epic item limit')
+    for (const field of ['max_semantic_attempts', 'max_contract_attempts', 'max_transport_attempts', 'max_no_progress_attempts'] as const) {
+      if (state.coordination_policy.retry_policy[field] > state.operational_limits.max_attempts_per_item) issue(['coordination_policy', 'retry_policy', field], `${field} exceeds the frozen per-item attempt limit`)
+    }
+  }
   const item_ids = Object.keys(state.items)
   if (item_ids.length === 0) issue(['items'], 'epic must contain at least one item')
   if (item_ids.length > state.operational_limits.max_epic_items) issue(['items'], 'item count exceeds frozen operational limit')
@@ -34,16 +41,18 @@ function addStateIssues(state: EpicState, context: z.core.$RefinementCtx): void 
   const maximum_integration_events = item_ids.length * state.operational_limits.max_attempts_per_item
   if (state.integration_log.length > maximum_integration_events) issue(['integration_log'], 'integration event count exceeds frozen attempt capacity')
   const attempt_ids = new Set<string>()
+  const launch_ids = new Set<string>()
+  const review_ids = new Set<string>()
   for (const [key, item] of Object.entries(state.items)) {
     if (item.item_id !== key) issue(['items', key], `item record key ${key} does not match item_id ${item.item_id}`)
     if (item.dependencies.length > state.operational_limits.max_item_dependencies) issue(['items', key, 'dependencies'], 'dependency count exceeds frozen operational limit')
     if (item.attempts.length > state.operational_limits.max_attempts_per_item) issue(['items', key, 'attempts'], 'attempt count exceeds frozen operational limit')
     let previous_completed_at: number | null = null
-    let running_attempts = 0
+    let active_attempts = 0
     for (const [index, attempt] of item.attempts.entries()) {
       if (attempt_ids.has(attempt.attempt_id)) issue(['items', key, 'attempts', index, 'attempt_id'], `duplicate attempt ID: ${attempt.attempt_id}`)
       attempt_ids.add(attempt.attempt_id)
-      if (attempt.status === 'running') running_attempts += 1
+      if (ACTIVE_ATTEMPT_STATUSES.has(attempt.status)) active_attempts += 1
       if (attempt.worktree_evidence.epic_id !== state.epic_id) issue(['items', key, 'attempts', index, 'worktree_evidence', 'epic_id'], 'attempt worktree evidence must match the containing epic')
       if (attempt.worktree_evidence.item_id !== item.item_id) issue(['items', key, 'attempts', index, 'worktree_evidence', 'item_id'], 'attempt worktree evidence must match the containing item')
       if (attempt.worktree_evidence.attempt_id !== attempt.attempt_id) issue(['items', key, 'attempts', index, 'worktree_evidence', 'attempt_id'], 'attempt worktree evidence must match the containing attempt')
@@ -51,10 +60,41 @@ function addStateIssues(state: EpicState, context: z.core.$RefinementCtx): void 
       if (previous_completed_at !== null && Date.parse(attempt.started_at) < previous_completed_at) issue(['items', key, 'attempts', index, 'started_at'], 'attempt history timestamps must be ordered')
       if (Date.parse(attempt.started_at) > Date.parse(state.updated_at)) issue(['items', key, 'attempts', index, 'started_at'], 'attempt cannot start after state updated_at')
       if (attempt.completed_at !== null && Date.parse(attempt.completed_at) > Date.parse(state.updated_at)) issue(['items', key, 'attempts', index, 'completed_at'], 'attempt cannot complete after state updated_at')
+      const is_coordinated = attempt.launch_id !== undefined
+      if ((state.coordination_policy !== undefined) !== is_coordinated) issue(['items', key, 'attempts', index], 'attempt coordination fields must match the epic coordination policy')
+      if (state.coordination_policy && is_coordinated) {
+        if (launch_ids.has(attempt.launch_id!)) issue(['items', key, 'attempts', index, 'launch_id'], `duplicate launch ID: ${attempt.launch_id}`)
+        launch_ids.add(attempt.launch_id!)
+        if (attempt.agent !== state.coordination_policy.executor_agent) issue(['items', key, 'attempts', index, 'agent'], 'coordinated attempt agent must match the immutable executor policy')
+        if (attempt.model === null || !state.coordination_policy.executor_candidates.some(candidate => candidate.model === attempt.model)) {
+          issue(['items', key, 'attempts', index, 'model'], 'coordinated attempt model must be a resolved executor candidate')
+        }
+        if (attempt.review) {
+          if (review_ids.has(attempt.review.review_id)) issue(['items', key, 'attempts', index, 'review', 'review_id'], `duplicate review ID: ${attempt.review.review_id}`)
+          review_ids.add(attempt.review.review_id)
+          if (attempt.review.agent !== state.coordination_policy.reviewer_agent) issue(['items', key, 'attempts', index, 'review', 'agent'], 'review agent must match the immutable reviewer policy')
+          if (!state.coordination_policy.reviewer_candidates.some(candidate => candidate.model === attempt.review!.model)) issue(['items', key, 'attempts', index, 'review', 'model'], 'review model must be a resolved reviewer candidate')
+        }
+      }
       previous_completed_at = attempt.completed_at === null ? null : Date.parse(attempt.completed_at)
     }
-    if (running_attempts > 1) issue(['items', key, 'attempts'], 'item may have at most one running attempt')
-    if (running_attempts === 1 && item.attempts.at(-1)?.status !== 'running') issue(['items', key, 'attempts'], 'running attempt must be the final attempt')
+    if (active_attempts > 1) issue(['items', key, 'attempts'], 'item may have at most one running or otherwise active attempt')
+    if (active_attempts === 1 && !ACTIVE_ATTEMPT_STATUSES.has(item.attempts.at(-1)!.status)) issue(['items', key, 'attempts'], 'active attempt must be the final attempt')
+    if (item.retry_not_before != null) {
+      if (!['failed', 'blocked', 'conflicted', 'cancelled'].includes(item.status)) issue(['items', key, 'retry_not_before'], 'retry_not_before is allowed only on retryable terminal items')
+      if (item.completed_at !== null && Date.parse(item.retry_not_before) < Date.parse(item.completed_at)) issue(['items', key, 'retry_not_before'], 'retry_not_before must not precede item completion')
+    }
+  }
+  if (state.integration_intent !== undefined && state.integration_intent !== null) {
+    const intent = state.integration_intent
+    if (!state.coordination_policy) issue(['integration_intent'], 'integration intent requires an immutable coordination policy')
+    const item = state.items[intent.item_id]
+    if (!item || item.status !== 'passed' || item.selected_attempt_id !== intent.attempt_id) issue(['integration_intent'], 'integration intent must bind the currently selected passed item attempt')
+    else {
+      if (intent.expected_source_commit !== item.checkpoint_commit || intent.review_evidence_digest !== item.review_evidence_digest) issue(['integration_intent'], 'integration intent must bind the selected checkpoint and review digest')
+      if (intent.dependency_snapshot_sha256 !== computeDependencySnapshotDigest(state, item)) issue(['integration_intent', 'dependency_snapshot_sha256'], 'integration intent dependency snapshot is stale')
+    }
+    if (intent.prior_state_revision >= state.state_revision) issue(['integration_intent', 'prior_state_revision'], 'integration intent prior revision must precede the containing state revision')
   }
   validateBudgetsAndUsage(state, issue)
   validatePolicyHistory(state, issue)
@@ -151,9 +191,9 @@ export function validateEpicTransitions(state: EpicState): void {
   const allowed = allowedTerminalItems[state.status]
   if (allowed && itemStatuses.some(status => !allowed.has(status))) throw new EpicValidationError(`terminal epic status ${state.status} has an inappropriate item disposition`)
   for (const item of Object.values(state.items)) {
-    const running_attempts = item.attempts.filter(attempt => attempt.status === 'running').length
-    if (item.status === 'running' && running_attempts !== 1) throw new EpicValidationError(`running item ${item.item_id} must have exactly one running attempt`)
-    if (item.status !== 'running' && running_attempts !== 0) throw new EpicValidationError(`non-running item ${item.item_id} must not have a running attempt`)
+    const active_attempts = item.attempts.filter(attempt => ACTIVE_ATTEMPT_STATUSES.has(attempt.status)).length
+    if (item.status === 'running' && active_attempts !== 1) throw new EpicValidationError(`running item ${item.item_id} must have exactly one active attempt`)
+    if (item.status !== 'running' && active_attempts !== 0) throw new EpicValidationError(`non-running item ${item.item_id} must not have an active attempt`)
     const isCurrentTerminal = TERMINAL_ITEM_STATUSES.has(item.status)
     if (isCurrentTerminal !== (item.completed_at !== null)) throw new EpicValidationError(`item ${item.item_id} completed_at must match terminal status`)
     if (item.completed_at !== null

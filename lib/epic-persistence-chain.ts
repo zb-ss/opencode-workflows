@@ -48,6 +48,14 @@ export interface EpicRevisionChainResult {
   stateSha256: string
   ownershipGeneration: number
   latestRuntimeIncarnation: string
+  revisionEvidence: EpicRevisionEvidence[]
+}
+
+export interface EpicRevisionEvidence {
+  revision: number
+  ownership_generation: number
+  previous_state_sha256: string | null
+  state_sha256: string
 }
 
 export function encodeEpicRevision(
@@ -82,7 +90,12 @@ export function writeEpicRevision(context: EpicRevisionChainContext, state: Epic
   let existingBytes = 0
   if (fs.existsSync(context.revisions)) {
     for (const name of listEpicDirectory(context.revisions)) {
-      const size = fs.lstatSync(path.join(context.revisions, name)).size
+      if (!/^\d{20}\.json$/.test(name)) throw new EpicCorruptError('revision directory contains an unexpected record')
+      const stat = fs.lstatSync(path.join(context.revisions, name))
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) {
+        throw new EpicUnsafeStorageError('revision entry is not one regular file')
+      }
+      const size = stat.size
       if (existingBytes > context.maxChainBytes - size) throw new EpicBoundsExceededError('epic aggregate chain bytes exceed the protocol bound')
       existingBytes += size
     }
@@ -106,6 +119,7 @@ export function readEpicRevisionChain(
   let previousSha256: string | null = null
   let latestRuntimeIncarnation = ''
   let ownershipGeneration: number = identity.ownership_generation
+  const revisionEvidence: EpicRevisionEvidence[] = []
 
   for (let index = 0; index < names.length; index += 1) {
     const expectedRevision = index + 1
@@ -119,6 +133,12 @@ export function readEpicRevisionChain(
     previousSha256 = envelope.state_sha256
     latestRuntimeIncarnation = envelope.runtime_incarnation
     ownershipGeneration = envelope.ownership_generation
+    revisionEvidence.push({
+      revision: envelope.revision,
+      ownership_generation: envelope.ownership_generation,
+      previous_state_sha256: envelope.previous_state_sha256,
+      state_sha256: envelope.state_sha256,
+    })
   }
 
   return {
@@ -126,6 +146,7 @@ export function readEpicRevisionChain(
     stateSha256: previousSha256!,
     ownershipGeneration,
     latestRuntimeIncarnation,
+    revisionEvidence,
   }
 }
 

@@ -225,6 +225,7 @@ Review permission requests before allowing them. The supplied `opencode.jsonc.te
 - [Workflow System](./WORKFLOWS.md)
 - [AI Agent Setup Guide](./docs/ai-agent-setup.md)
 - [Autonomous Workflows](./docs/autonomous-workflows.md)
+- [Epic Coordination](./docs/epic-coordination.md)
 - [Validation And Fixed-Point Review](./docs/validation-and-fixed-point-review.md)
 - [Guarded Publication](./docs/guarded-publication.md)
 - [Agent Reference](./docs/agents.md)

@@ -4,6 +4,7 @@ import path from 'node:path'
 import { z } from 'zod'
 
 import { stableCanonicalJson } from './epic-canonical-json.ts'
+import { projectEpicBudgetStatus, type EpicBudgetStatus } from './epic-budget-usage.ts'
 import {
   EPIC_SCHEMA_VERSION,
   EpicSchemaVersionError,
@@ -26,6 +27,7 @@ import {
 } from './epic-persistence-codec.ts'
 import {
   encodeEpicRevision,
+  type EpicRevisionEvidence,
   type EpicRevisionChainContext,
   readEpicRevisionChain,
   writeEpicRevision,
@@ -104,6 +106,8 @@ export interface EpicLoadResult {
   ownership_generation: number
   recovery_required: boolean
   identity_digest: string
+  /** Present on persisted loads so owner tools can verify historical idempotency CAS evidence. */
+  revision_evidence?: EpicRevisionEvidence[]
 }
 
 export interface EpicStatusOnly {
@@ -116,6 +120,7 @@ export interface EpicStatusOnly {
   running_count: number
   failed_count: number
   conflicted_count: number
+  budget_dimensions: EpicBudgetStatus
   revision: number
   ownership_generation: number
   updated_at: string
@@ -386,6 +391,7 @@ class EpicStore implements EpicStoreHandle {
       ownership_generation: chain.ownershipGeneration,
       recovery_required: recoveryRequired,
       identity_digest: identity.identity_digest,
+      revision_evidence: chain.revisionEvidence,
     }
   }
 }
@@ -420,6 +426,7 @@ export function projectEpicStatus(
     running_count: items.filter(item => item.status === 'running').length,
     failed_count: items.filter(item => item.status === 'failed' || item.status === 'blocked').length,
     conflicted_count: items.filter(item => item.status === 'conflicted').length,
+    budget_dimensions: projectEpicBudgetStatus(state),
     revision: state.state_revision,
     ownership_generation: evidence.ownership_generation,
     updated_at: state.updated_at,
