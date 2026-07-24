@@ -57,7 +57,25 @@ function readLeaseFile(directory: string): FencingLeaseRecord | null {
   }
 }
 
-function writeLeaseFile(directory: string, record: FencingLeaseRecord): void {
+function createLeaseFile(directory: string, record: FencingLeaseRecord): void {
+  const leaseFile = leasePath(directory)
+  let fd: number | null = null
+  try {
+    fd = fs.openSync(leaseFile, fs.constants.O_WRONLY | fs.constants.O_CREAT | O_EXCL | O_NOFOLLOW, FILE_MODE)
+    fs.writeFileSync(fd, JSON.stringify(record, null, 2) + '\n', { encoding: 'utf8' })
+    fs.fsyncSync(fd)
+    fs.closeSync(fd)
+    fd = null
+  } catch (error) {
+    if (fd !== null) { try { fs.closeSync(fd) } catch {} }
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+      throw new FencingLeaseError('lease_held', 'a lease file already exists')
+    }
+    throw error
+  }
+}
+
+function replaceLeaseFile(directory: string, record: FencingLeaseRecord): void {
   const leaseFile = leasePath(directory)
   const temp = `${leaseFile}.${process.pid}.${randomUUID()}.tmp`
   try {
@@ -132,7 +150,16 @@ export class FencingLeaseStore {
       renewal_count: 0,
     }
 
-    writeLeaseFile(this.directory, record)
+    if (existing) {
+      // Expired lease exists — remove it then use O_EXCL for the new lease.
+      // The race is safe: if two processes both unlink, one gets ENOENT (ignored).
+      // Both then race on O_EXCL — exactly one wins, the other gets EEXIST.
+      try { fs.unlinkSync(leasePath(this.directory)) } catch {}
+      createLeaseFile(this.directory, record)
+    } else {
+      // No lease file — use O_EXCL to atomically create it
+      createLeaseFile(this.directory, record)
+    }
     return this.createHandle(record)
   }
 
@@ -180,7 +207,7 @@ export class FencingLeaseStore {
           expires_at: new Date(this.now() + duration).toISOString(),
           renewal_count: onDisk.renewal_count + 1,
         }
-        writeLeaseFile(this.directory, current)
+        replaceLeaseFile(this.directory, current)
         return current
       },
       release: (): void => {
@@ -188,10 +215,8 @@ export class FencingLeaseStore {
         released = true
         const onDisk = readLeaseFile(this.directory)
         if (onDisk && onDisk.lease_id === current.lease_id) {
-          // Mark as expired immediately rather than deleting, so the generation
-          // counter persists for monotonicity across release+reacquire
           const expired = { ...onDisk, expires_at: new Date(this.now() - 1).toISOString() }
-          writeLeaseFile(this.directory, expired)
+          replaceLeaseFile(this.directory, expired)
         }
       },
       is_valid: (): boolean => {
