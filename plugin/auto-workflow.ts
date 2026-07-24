@@ -54,19 +54,21 @@ function limits(
   config: WorkflowConfig,
   validationBroker: WorkflowConfig['validation_broker'] = config.validation_broker,
 ): AutomationLimits {
+  const a = config.automation
   return {
-    max_sessions: config.automation.max_sessions!,
-    max_parallel_sessions: config.automation.max_parallel_sessions!,
-    max_attempts_per_stage: config.automation.max_attempts_per_stage!,
-    max_wall_time_ms: config.automation.max_wall_time_ms!,
-    max_input_tokens: config.automation.max_input_tokens!,
-    max_output_tokens: config.automation.max_output_tokens!,
-    max_bounded_read_bytes: config.automation.max_bounded_read_bytes!,
-    max_bounded_write_bytes: config.automation.max_bounded_write_bytes!,
+    max_sessions: a.max_sessions!,
+    max_parallel_sessions: a.max_parallel_sessions!,
+    max_attempts_per_stage: a.max_attempts_per_stage!,
+    max_active_time_ms: a.max_active_time_ms ?? null,
+    max_calendar_age_ms: a.max_calendar_age_ms ?? null,
+    max_input_tokens: a.max_input_tokens ?? null,
+    max_output_tokens: a.max_output_tokens ?? null,
+    max_bounded_read_bytes: a.max_bounded_read_bytes ?? null,
+    max_bounded_write_bytes: a.max_bounded_write_bytes ?? null,
     max_validation_runs: validationBroker.enabled
       ? enabledValidationBroker(validationBroker).max_runs_per_workflow
-      : 0,
-    max_cost_usd: config.automation.max_cost_usd!,
+      : null,
+    max_cost_usd: a.max_cost_usd ?? null,
   }
 }
 

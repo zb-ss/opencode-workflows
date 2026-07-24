@@ -190,7 +190,8 @@ function limits(overrides: Partial<AutomationLimits> = {}): AutomationLimits {
     max_sessions: 20,
     max_parallel_sessions: 2,
     max_attempts_per_stage: 3,
-    max_wall_time_ms: 60_000,
+    max_calendar_age_ms: 60_000,
+    max_active_time_ms: null,
     max_input_tokens: 10_000,
     max_output_tokens: 10_000,
     max_bounded_read_bytes: 10_000,
@@ -530,7 +531,7 @@ describe('WorkflowEngine scheduling and events', () => {
     temporaryDirectories.push(directory)
     const original = createEngine(workflowDefinition, adapter, {
       directory,
-      budget: { max_wall_time_ms: 20 },
+      budget: { max_calendar_age_ms: 20 },
       now: () => now,
     })
     await start(original.engine)
@@ -554,19 +555,19 @@ describe('WorkflowEngine scheduling and events', () => {
     now = 21
     const restored = createEngine(workflowDefinition, adapter, {
       directory,
-      budget: { max_wall_time_ms: 20 },
+      budget: { max_calendar_age_ms: 20 },
       now: () => now,
       state: loadAutomaticWorkflowState(original.statePath),
       schedulingEnabled: false,
     })
     await waitFor(
-      () => /wall-time budget exhausted/i.test(restored.engine.snapshot().pause_reason ?? ''),
-      'restored wall-time enforcement did not settle',
+      () => /calendar-age budget exhausted/i.test(restored.engine.snapshot().pause_reason ?? ''),
+      'restored calendar-age enforcement did not settle',
     )
 
     const expired = restored.engine.snapshot()
     assert.equal(expired.status, 'paused')
-    assert.match(expired.pause_reason!, /wall-time budget exhausted/i)
+    assert.match(expired.pause_reason!, /calendar-age budget exhausted/i)
     assert.equal(expired.stages.sibling.status, 'pending')
     assert.equal(expired.stages.sibling.session_id, null)
     assert.equal(adapter.calls.filter((call) => call.name === 'abort' && call.sessionId === siblingSession).length, 2)
@@ -679,23 +680,37 @@ describe('WorkflowEngine scheduling and events', () => {
 
     const legacyPath = path.join(directory, 'legacy-state.json')
     const legacy = structuredClone(saved) as unknown as Record<string, unknown>
+    legacy.schema_version = 1
     delete legacy.autonomy
-    const legacyBudget = legacy.budget as { usage: Record<string, unknown> }
-    const legacyLimits = (legacy.budget as { limits: Record<string, unknown> }).limits
+    const legacyBudget = legacy.budget as { usage: Record<string, unknown>; limits: Record<string, unknown> }
+    const legacyLimits = legacyBudget.limits
+    legacyLimits.max_wall_time_ms = legacyLimits.max_calendar_age_ms
+    delete legacyLimits.max_calendar_age_ms
+    delete legacyLimits.max_active_time_ms
     delete legacyLimits.max_bounded_read_bytes
     delete legacyLimits.max_bounded_write_bytes
     delete legacyLimits.max_validation_runs
+    delete legacyBudget.usage.active_time_ms
+    delete legacyBudget.usage.active_interval_started_at
+    delete legacyBudget.usage.last_active_checkpoint_at
     delete legacyBudget.usage.bounded_read_bytes
     delete legacyBudget.usage.bounded_write_bytes
     delete legacyBudget.usage.validation_runs
     fs.writeFileSync(legacyPath, `${JSON.stringify(legacy, null, 2)}\n`)
     const normalizedLegacy = loadAutomaticWorkflowState(legacyPath)
+    assert.equal(normalizedLegacy.schema_version, 2)
     assert.equal(normalizedLegacy.autonomy, 'interactive')
+    assert.equal((normalizedLegacy.budget.limits as unknown as Record<string, unknown>).max_wall_time_ms, undefined)
+    assert.equal(normalizedLegacy.budget.limits.max_calendar_age_ms, 60_000)
+    assert.equal(normalizedLegacy.budget.limits.max_active_time_ms, null)
+    assert.equal(normalizedLegacy.budget.limits.max_bounded_read_bytes, null)
+    assert.equal(normalizedLegacy.budget.limits.max_bounded_write_bytes, null)
+    assert.equal(normalizedLegacy.budget.limits.max_validation_runs, null)
+    assert.equal(normalizedLegacy.budget.usage.active_time_ms, 0)
+    assert.equal(normalizedLegacy.budget.usage.active_interval_started_at, null)
+    assert.equal(normalizedLegacy.budget.usage.last_active_checkpoint_at, null)
     assert.equal(normalizedLegacy.budget.usage.bounded_read_bytes, 0)
     assert.equal(normalizedLegacy.budget.usage.bounded_write_bytes, 0)
-    assert.equal(normalizedLegacy.budget.limits.max_bounded_read_bytes, 0)
-    assert.equal(normalizedLegacy.budget.limits.max_bounded_write_bytes, 0)
-    assert.equal(normalizedLegacy.budget.limits.max_validation_runs, 0)
     assert.equal(normalizedLegacy.budget.usage.validation_runs, 0)
 
     assert.throws(
@@ -1650,7 +1665,7 @@ describe('WorkflowEngine budgets and persistence', () => {
     let now = 1_000
     const adapter = new FakeAdapter()
     const { engine } = createEngine(definition([{ id: 'slow' }]), adapter, {
-      budget: { max_wall_time_ms: 10 },
+      budget: { max_calendar_age_ms: 10 },
       now: () => now,
     })
     await start(engine)
@@ -1676,7 +1691,7 @@ describe('WorkflowEngine budgets and persistence', () => {
 
     const state = engine.snapshot()
     assert.equal(state.status, 'paused')
-    assert.match(state.pause_reason!, /wall-time/i)
+    assert.match(state.pause_reason!, /calendar-age/i)
     assert.equal(state.stages.slow.status, 'pending')
     assert.equal(state.stages.slow.result, null)
     assert.equal(state.budget.usage.input_tokens, 2)
@@ -1687,14 +1702,14 @@ describe('WorkflowEngine budgets and persistence', () => {
     let now = 1_000
     const wallAdapter = new FakeAdapter()
     const { engine: wallEngine } = createEngine(definition([{ id: 'slow' }]), wallAdapter, {
-      budget: { max_wall_time_ms: 10 },
+      budget: { max_calendar_age_ms: 10 },
       now: () => now,
     })
     await start(wallEngine)
     now += 11
     await wallEngine.reconcile()
     assert.equal(wallEngine.snapshot().status, 'paused')
-    assert.match(wallEngine.snapshot().pause_reason!, /wall-time/i)
+    assert.match(wallEngine.snapshot().pause_reason!, /calendar-age/i)
 
     const adapter = new FakeAdapter()
     const workflowDefinition = definition([
@@ -1792,7 +1807,7 @@ describe('AutoWorkflow production plugin integration', () => {
         max_parallel_sessions: 1,
         max_sessions: 3,
         max_attempts_per_stage: 2,
-        max_wall_time_ms: 60_000,
+        max_calendar_age_ms: 60_000,
         max_input_tokens: 1_000,
         max_output_tokens: 1_000,
         max_bounded_read_bytes: 1_000,
