@@ -80,7 +80,7 @@ describe('bounded automatic workflow plugin', () => {
         max_parallel_sessions: 1,
         max_sessions: 3,
         max_attempts_per_stage: 2,
-        max_wall_time_ms: 60_000,
+        max_calendar_age_ms: 60_000,
         max_input_tokens: 1_000,
         max_output_tokens: 1_000,
         max_bounded_read_bytes: 1_000,

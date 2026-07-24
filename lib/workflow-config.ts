@@ -421,7 +421,8 @@ export const WorkflowConfigSchema = z.object({
     max_parallel_sessions: z.number().int().positive().optional(),
     max_sessions: z.number().int().positive().optional(),
     max_attempts_per_stage: z.number().int().positive().optional(),
-    max_wall_time_ms: z.number().int().positive().optional(),
+    max_active_time_ms: z.number().int().positive().optional(),
+    max_calendar_age_ms: z.number().int().positive().optional(),
     max_input_tokens: z.number().int().nonnegative().optional(),
     max_output_tokens: z.number().int().nonnegative().optional(),
     max_bounded_read_bytes: z.number().int().nonnegative().max(MAX_BOUNDED_IO_BYTES).optional(),
@@ -429,24 +430,14 @@ export const WorkflowConfigSchema = z.object({
     max_cost_usd: z.number().nonnegative().nullable().optional(),
   }).superRefine((automation, context) => {
     if (!automation.enabled) return
-    for (const field of [
-      'max_parallel_sessions',
-      'max_sessions',
-      'max_attempts_per_stage',
-      'max_wall_time_ms',
-      'max_input_tokens',
-      'max_output_tokens',
-      'max_bounded_read_bytes',
-      'max_bounded_write_bytes',
-      'max_cost_usd',
-    ] as const) {
-      if (automation[field] === undefined) {
-        context.addIssue({
-          code: 'custom',
-          path: [field],
-          message: `${field} is required when automation is enabled`,
-        })
-      }
+    if (automation.max_parallel_sessions === undefined) {
+      context.addIssue({ code: 'custom', path: ['max_parallel_sessions'], message: 'max_parallel_sessions is required when automation is enabled' })
+    }
+    if (automation.max_attempts_per_stage === undefined) {
+      context.addIssue({ code: 'custom', path: ['max_attempts_per_stage'], message: 'max_attempts_per_stage is required when automation is enabled' })
+    }
+    if (automation.max_sessions === undefined) {
+      context.addIssue({ code: 'custom', path: ['max_sessions'], message: 'max_sessions is required when automation is enabled' })
     }
   }).default({ enabled: false, autonomy: 'interactive' }),
   experimental_capabilities: z.object({

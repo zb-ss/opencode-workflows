@@ -26,7 +26,7 @@ function git(root: string, args: string[]): string {
 
 function workflowState(root: string): AutomaticWorkflowState {
   return {
-    schema_version: 1,
+    schema_version: 2,
     workflow_id: 'wf-publication-e2e',
     definition_id: 'development',
     definition_path: path.join(root, 'definition.json'),
@@ -46,7 +46,8 @@ function workflowState(root: string): AutomaticWorkflowState {
         max_sessions: 1,
         max_parallel_sessions: 1,
         max_attempts_per_stage: 1,
-        max_wall_time_ms: 60_000,
+        max_calendar_age_ms: 60_000,
+        max_active_time_ms: null,
         max_input_tokens: 0,
         max_output_tokens: 0,
         max_bounded_read_bytes: 0,
@@ -63,6 +64,9 @@ function workflowState(root: string): AutomaticWorkflowState {
         bounded_read_bytes: 0,
         bounded_write_bytes: 0,
         validation_runs: 0,
+        active_time_ms: 0,
+        active_interval_started_at: null,
+        last_active_checkpoint_at: null,
         messages: {},
       },
     },

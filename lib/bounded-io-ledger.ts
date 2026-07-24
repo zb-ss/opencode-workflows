@@ -18,8 +18,8 @@ interface ActiveReservation {
 
 interface BoundedIoBudget {
   limits: {
-    max_bounded_read_bytes: number
-    max_bounded_write_bytes: number
+    max_bounded_read_bytes: number | null
+    max_bounded_write_bytes: number | null
   }
   usage: {
     bounded_read_bytes: number
@@ -45,9 +45,10 @@ export class BoundedIoLedger {
       }
       const budget = this.budget()
       const usageKey = this.usageKey(kind)
-      const remaining = Math.max(0, this.limit(budget, kind) - budget.usage[usageKey])
+      const limit = this.limit(budget, kind)
+      const remaining = limit === null ? Math.max(0, requestedBytes ?? 0) : Math.max(0, limit - budget.usage[usageKey])
       const reserved = requestedBytes ?? remaining
-      if (reserved > remaining) throw new Error(`bounded ${kind} byte budget exhausted`)
+      if (limit !== null && reserved > remaining) throw new Error(`bounded ${kind} byte budget exhausted`)
       this.updateUsage(budget, usageKey, budget.usage[usageKey] + reserved)
       const active: ActiveReservation = { id: crypto.randomUUID(), kind, bytes: reserved, closed: false }
       this.reservations.set(active.id, active)
@@ -69,7 +70,8 @@ export class BoundedIoLedger {
       const usageKey = this.usageKey(current.kind)
       const nextUsage = budget.usage[usageKey] - current.bytes + bytes
       if (nextUsage < 0) throw new Error('bounded I/O reservation exceeds recorded usage')
-      if (nextUsage > this.limit(budget, current.kind)) {
+      const limit = this.limit(budget, current.kind)
+      if (limit !== null && nextUsage > limit) {
         throw new Error(`bounded ${current.kind} byte budget exhausted`)
       }
       this.updateUsage(budget, usageKey, nextUsage)
@@ -111,7 +113,7 @@ export class BoundedIoLedger {
     return kind === 'read' ? 'bounded_read_bytes' : 'bounded_write_bytes'
   }
 
-  private limit(budget: BoundedIoBudget, kind: BoundedIoKind): number {
+  private limit(budget: BoundedIoBudget, kind: BoundedIoKind): number | null {
     return kind === 'read' ? budget.limits.max_bounded_read_bytes : budget.limits.max_bounded_write_bytes
   }
 

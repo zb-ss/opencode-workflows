@@ -158,7 +158,7 @@ function snapshot(findings: PublicationGitSnapshot['findings'] = [], headOid = O
 
 function workflowState(root: string, status: AutomaticWorkflowState['status'] = 'completed'): AutomaticWorkflowState {
   return {
-    schema_version: 1,
+    schema_version: 2,
     workflow_id: 'wf-publication',
     definition_id: 'development',
     definition_path: path.join(root, 'definition.json'),
@@ -178,7 +178,8 @@ function workflowState(root: string, status: AutomaticWorkflowState['status'] = 
         max_sessions: 1,
         max_parallel_sessions: 1,
         max_attempts_per_stage: 1,
-        max_wall_time_ms: 1000,
+        max_calendar_age_ms: 1000,
+        max_active_time_ms: null,
         max_input_tokens: 0,
         max_output_tokens: 0,
         max_bounded_read_bytes: 0,
@@ -195,6 +196,9 @@ function workflowState(root: string, status: AutomaticWorkflowState['status'] = 
         bounded_read_bytes: 0,
         bounded_write_bytes: 0,
         validation_runs: 0,
+        active_time_ms: 0,
+        active_interval_started_at: null,
+        last_active_checkpoint_at: null,
         messages: {},
       },
     },

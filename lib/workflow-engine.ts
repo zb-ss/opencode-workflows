@@ -64,12 +64,13 @@ export interface AutomationLimits {
   max_sessions: number
   max_parallel_sessions: number
   max_attempts_per_stage: number
-  max_wall_time_ms: number
-  max_input_tokens: number
-  max_output_tokens: number
-  max_bounded_read_bytes: number
-  max_bounded_write_bytes: number
-  max_validation_runs: number
+  max_active_time_ms: number | null
+  max_calendar_age_ms: number | null
+  max_input_tokens: number | null
+  max_output_tokens: number | null
+  max_bounded_read_bytes: number | null
+  max_bounded_write_bytes: number | null
+  max_validation_runs: number | null
   max_cost_usd: number | null
 }
 
@@ -92,7 +93,7 @@ export interface AutomaticStageState {
 }
 
 export interface AutomaticWorkflowState {
-  schema_version: 1
+  schema_version: 2
   workflow_id: string
   definition_id: string
   definition_path: string
@@ -118,6 +119,9 @@ export interface AutomaticWorkflowState {
       bounded_read_bytes: number
       bounded_write_bytes: number
       validation_runs: number
+      active_time_ms: number
+      active_interval_started_at: string | null
+      last_active_checkpoint_at: string | null
       messages: Record<string, MessageUsage>
     }
   }
@@ -479,12 +483,13 @@ export function validateAutomationLimits(input: AutomationLimits): AutomationLim
     max_sessions: positiveInteger(input.max_sessions, 'max_sessions'),
     max_parallel_sessions: positiveInteger(input.max_parallel_sessions, 'max_parallel_sessions'),
     max_attempts_per_stage: positiveInteger(input.max_attempts_per_stage, 'max_attempts_per_stage'),
-    max_wall_time_ms: positiveInteger(input.max_wall_time_ms, 'max_wall_time_ms'),
-    max_input_tokens: nonNegativeInteger(input.max_input_tokens, 'max_input_tokens'),
-    max_output_tokens: nonNegativeInteger(input.max_output_tokens, 'max_output_tokens'),
-    max_bounded_read_bytes: boundedByteLimit(input.max_bounded_read_bytes, 'max_bounded_read_bytes'),
-    max_bounded_write_bytes: boundedByteLimit(input.max_bounded_write_bytes, 'max_bounded_write_bytes'),
-    max_validation_runs: (() => {
+    max_active_time_ms: input.max_active_time_ms === null ? null : positiveInteger(input.max_active_time_ms, 'max_active_time_ms'),
+    max_calendar_age_ms: input.max_calendar_age_ms === null ? null : positiveInteger(input.max_calendar_age_ms, 'max_calendar_age_ms'),
+    max_input_tokens: input.max_input_tokens === null ? null : nonNegativeInteger(input.max_input_tokens, 'max_input_tokens'),
+    max_output_tokens: input.max_output_tokens === null ? null : nonNegativeInteger(input.max_output_tokens, 'max_output_tokens'),
+    max_bounded_read_bytes: input.max_bounded_read_bytes === null ? null : boundedByteLimit(input.max_bounded_read_bytes, 'max_bounded_read_bytes'),
+    max_bounded_write_bytes: input.max_bounded_write_bytes === null ? null : boundedByteLimit(input.max_bounded_write_bytes, 'max_bounded_write_bytes'),
+    max_validation_runs: input.max_validation_runs === null ? null : (() => {
       const runs = nonNegativeInteger(input.max_validation_runs, 'max_validation_runs')
       if (runs > MAX_VALIDATION_RUNS_PER_WORKFLOW) {
         throw new Error(`max_validation_runs must not exceed ${MAX_VALIDATION_RUNS_PER_WORKFLOW}`)
@@ -522,20 +527,43 @@ function normalizeAutomaticWorkflowState(parsed: unknown): unknown {
     ? 'interactive'
     : candidate.autonomy
   if (!candidate.budget || typeof candidate.budget !== 'object' || Array.isArray(candidate.budget)) {
-    return { ...candidate, ...(autonomy === undefined ? {} : { autonomy }) }
+    return { ...candidate, ...(autonomy === undefined ? {} : { autonomy }), schema_version: candidate.schema_version === 1 ? 2 : candidate.schema_version }
   }
   const budget = candidate.budget as Record<string, unknown>
+  const limits = budget.limits as Record<string, unknown> ?? {}
+  const usage = budget.usage as Record<string, unknown> ?? {}
+
+  // v1 to v2 migration: map max_wall_time_ms -> max_calendar_age_ms, add active-time fields, make budget fields nullable
+  const migratedLimits = { ...limits }
+  if (candidate.schema_version === 1) {
+    if (limits.max_wall_time_ms !== undefined && migratedLimits.max_calendar_age_ms === undefined) {
+      migratedLimits.max_calendar_age_ms = limits.max_wall_time_ms
+    }
+    delete migratedLimits.max_wall_time_ms
+    // Make previously-required fields nullable (null = not configured) for v2
+    for (const field of ['max_input_tokens', 'max_output_tokens', 'max_bounded_read_bytes', 'max_bounded_write_bytes', 'max_validation_runs'] as const) {
+      if (migratedLimits[field] === undefined) migratedLimits[field] = null
+    }
+    if (migratedLimits.max_active_time_ms === undefined) migratedLimits.max_active_time_ms = null
+  }
+
+  const migratedUsage = {
+    ...numericDefaults(usage, [
+      'bounded_read_bytes', 'bounded_write_bytes', 'validation_runs',
+    ]) as Record<string, unknown>,
+    active_time_ms: usage.active_time_ms ?? 0,
+    active_interval_started_at: usage.active_interval_started_at ?? null,
+    last_active_checkpoint_at: usage.last_active_checkpoint_at ?? null,
+  }
+
   return {
     ...candidate,
     ...(autonomy === undefined ? {} : { autonomy }),
+    schema_version: candidate.schema_version === 1 ? 2 : candidate.schema_version,
     budget: {
       ...budget,
-      limits: numericDefaults(budget.limits, [
-        'max_bounded_read_bytes', 'max_bounded_write_bytes', 'max_validation_runs',
-      ]),
-      usage: numericDefaults(budget.usage, [
-        'bounded_read_bytes', 'bounded_write_bytes', 'validation_runs',
-      ]),
+      limits: migratedLimits,
+      usage: migratedUsage,
     },
   }
 }
@@ -553,7 +581,7 @@ export function validateAutomaticWorkflowState(input: unknown): asserts input is
     'schema_version', 'workflow_id', 'definition_id', 'definition_path', 'root_session_id', 'directory',
     'worktree', 'mode', 'autonomy', 'task', 'status', 'pause_reason', 'created_at', 'updated_at', 'stages', 'budget',
   ], 'automatic workflow state')
-  if (state.schema_version !== 1) throw new Error('automatic workflow state schema_version must be 1')
+  if (state.schema_version !== 2) throw new Error('automatic workflow state schema_version must be 2')
   for (const key of ['workflow_id', 'definition_id', 'definition_path', 'root_session_id', 'directory', 'worktree', 'mode', 'task']) {
     nonEmptyString(state[key], `automatic workflow state ${key}`)
   }
@@ -596,18 +624,26 @@ export function validateAutomaticWorkflowState(input: unknown): asserts input is
     usage,
     [
       'sessions', 'attempts', 'input_tokens', 'output_tokens', 'cost_usd',
-      'bounded_read_bytes', 'bounded_write_bytes', 'validation_runs', 'messages',
+      'bounded_read_bytes', 'bounded_write_bytes', 'validation_runs',
+      'active_time_ms', 'active_interval_started_at', 'last_active_checkpoint_at',
+      'messages',
     ],
     'automatic workflow usage',
   )
   for (const key of [
     'sessions', 'attempts', 'input_tokens', 'output_tokens', 'bounded_read_bytes', 'bounded_write_bytes',
-    'validation_runs',
+    'validation_runs', 'active_time_ms',
   ]) {
     nonNegativeInteger(usage[key], `automatic workflow usage ${key}`)
   }
   if (!Number.isFinite(usage.cost_usd) || Number(usage.cost_usd) < 0) {
     throw new Error('automatic workflow usage cost_usd must be a non-negative number')
+  }
+  if (usage.active_interval_started_at !== null && typeof usage.active_interval_started_at !== 'string') {
+    throw new Error('automatic workflow usage active_interval_started_at must be a string or null')
+  }
+  if (usage.last_active_checkpoint_at !== null && typeof usage.last_active_checkpoint_at !== 'string') {
+    throw new Error('automatic workflow usage last_active_checkpoint_at must be a string or null')
   }
   const messages = objectValue(usage.messages, 'automatic workflow usage messages')
   for (const [id, inputMessage] of Object.entries(messages)) {
@@ -742,7 +778,7 @@ export class WorkflowEngine {
         }
       }
       this.state = {
-        schema_version: 1,
+        schema_version: 2,
         workflow_id: input.workflowId ?? `auto-${this.definition.id}-${crypto.randomUUID()}`,
         definition_id: this.definition.id,
         definition_path: this.definitionPath,
@@ -768,6 +804,9 @@ export class WorkflowEngine {
             bounded_read_bytes: 0,
             bounded_write_bytes: 0,
             validation_runs: 0,
+            active_time_ms: 0,
+            active_interval_started_at: null,
+            last_active_checkpoint_at: null,
             messages: {},
           },
         },
@@ -791,6 +830,7 @@ export class WorkflowEngine {
       this.wallAbortAttempted = false
       state.status = 'running'
       state.pause_reason = null
+      this.openActiveInterval()
       this.persist()
       this.scheduleWallTimer()
       await this.reconcileInternal()
@@ -941,7 +981,8 @@ export class WorkflowEngine {
       if (!stage || stage.status !== 'running') {
         throw new Error('validation operations require the currently running workflow stage session')
       }
-      if (state.budget.usage.validation_runs >= state.budget.limits.max_validation_runs) {
+      if (state.budget.limits.max_validation_runs !== null
+        && state.budget.usage.validation_runs >= state.budget.limits.max_validation_runs) {
         throw new Error('validation run budget exhausted')
       }
       state.budget.usage.validation_runs++
@@ -1016,6 +1057,7 @@ export class WorkflowEngine {
     stage.error = null
     state.budget.usage.attempts++
     state.budget.usage.sessions++
+    if (!this.hasRunningStages()) this.openActiveInterval()
     const candidates = this.modelCandidates(stage.agent, stageDefinition.model_tier)
     const candidate = candidates.length > 0 ? candidates[(stage.attempt - 1) % candidates.length] : undefined
     stage.model = candidate?.model ?? null
@@ -1478,17 +1520,22 @@ export class WorkflowEngine {
     state.status = requiredPassed ? 'completed' : 'failed'
     state.pause_reason = null
     this.clearWallTimer()
+    this.closeActiveInterval()
     this.persist()
     return true
   }
 
   private exceededUsageReason(): string | null {
     const { limits, usage } = this.requiredState().budget
-    if (usage.input_tokens > limits.max_input_tokens) return 'Input token budget exhausted'
-    if (usage.output_tokens > limits.max_output_tokens) return 'Output token budget exhausted'
+    if (limits.max_input_tokens !== null && usage.input_tokens > limits.max_input_tokens) return 'Input token budget exhausted'
+    if (limits.max_output_tokens !== null && usage.output_tokens > limits.max_output_tokens) return 'Output token budget exhausted'
     if (limits.max_cost_usd !== null && usage.cost_usd > limits.max_cost_usd) return 'Cost budget exhausted'
-    if (this.now() - new Date(this.requiredState().created_at).getTime() >= limits.max_wall_time_ms) {
-      return 'Wall-time budget exhausted'
+    if (limits.max_calendar_age_ms !== null && this.now() - new Date(this.requiredState().created_at).getTime() >= limits.max_calendar_age_ms) {
+      return 'Calendar-age budget exhausted'
+    }
+    if (limits.max_active_time_ms !== null) {
+      const activeTime = this.computeActiveTime()
+      if (activeTime >= limits.max_active_time_ms) return 'Active-time budget exhausted'
     }
     return null
   }
@@ -1498,8 +1545,8 @@ export class WorkflowEngine {
     if (exceeded) return exceeded
     const { limits, usage } = this.requiredState().budget
     if (usage.sessions >= limits.max_sessions) return 'Child-session budget exhausted'
-    if (usage.input_tokens >= limits.max_input_tokens) return 'Input token budget exhausted'
-    if (usage.output_tokens >= limits.max_output_tokens) return 'Output token budget exhausted'
+    if (limits.max_input_tokens !== null && usage.input_tokens >= limits.max_input_tokens) return 'Input token budget exhausted'
+    if (limits.max_output_tokens !== null && usage.output_tokens >= limits.max_output_tokens) return 'Output token budget exhausted'
     if (limits.max_cost_usd !== null && usage.cost_usd >= limits.max_cost_usd) return 'Cost budget exhausted'
     return null
   }
@@ -1523,6 +1570,7 @@ export class WorkflowEngine {
     }
     state.status = 'paused'
     state.pause_reason = reason
+    if (!this.hasRunningStages()) this.closeActiveInterval()
     if (this.hasRunningStages()) this.scheduleWallTimer()
     else this.clearWallTimer()
     this.persist()
@@ -1548,7 +1596,7 @@ export class WorkflowEngine {
       result.stage.error = reason
     }
     if (this.hasRunningStages()) this.scheduleWallTimer()
-    else this.clearWallTimer()
+    else { this.clearWallTimer(); this.closeActiveInterval() }
     this.persist()
   }
 
@@ -1607,16 +1655,55 @@ export class WorkflowEngine {
     if (JSON.stringify(expected) !== JSON.stringify(actual)) throw new Error('saved state stages do not match the definition')
   }
 
+  private computeActiveTime(): number {
+    const { usage } = this.requiredState().budget
+    if (usage.last_active_checkpoint_at === null) return usage.active_time_ms
+    const elapsed = this.now() - Date.parse(usage.last_active_checkpoint_at)
+    return usage.active_time_ms + Math.max(0, elapsed)
+  }
+
+  private openActiveInterval(): void {
+    const now = new Date(this.now()).toISOString()
+    const usage = this.requiredState().budget.usage
+    if (usage.active_interval_started_at === null) {
+      usage.active_interval_started_at = now
+      usage.last_active_checkpoint_at = now
+    }
+  }
+
+  private closeActiveInterval(): void {
+    const usage = this.requiredState().budget.usage
+    if (usage.last_active_checkpoint_at !== null) {
+      const elapsed = this.now() - Date.parse(usage.last_active_checkpoint_at)
+      usage.active_time_ms += Math.max(0, elapsed)
+    }
+    usage.active_interval_started_at = null
+    usage.last_active_checkpoint_at = null
+  }
+
   private scheduleWallTimer(): void {
     this.clearWallTimer()
     const state = this.state
     if (!state || (state.status !== 'running' && !(state.status === 'paused' && this.hasRunningStages()))) return
-    const elapsed = this.now() - new Date(state.created_at).getTime()
-    const remaining = state.budget.limits.max_wall_time_ms - elapsed
+    const limits = state.budget.limits
+    let remaining: number | null = null
+    if (limits.max_calendar_age_ms !== null) {
+      const calendarRemaining = limits.max_calendar_age_ms - (this.now() - new Date(state.created_at).getTime())
+      if (remaining === null || calendarRemaining < remaining) remaining = calendarRemaining
+    }
+    if (limits.max_active_time_ms !== null && state.status === 'running') {
+      const activeRemaining = limits.max_active_time_ms - this.computeActiveTime()
+      if (remaining === null || activeRemaining < remaining) remaining = activeRemaining
+    }
+    if (remaining === null) return
     if (remaining <= 0 && state.status === 'paused' && this.wallAbortAttempted) return
     const timer = setTimeout(() => {
       this.wallAbortAttempted = true
-      void this.serial(async () => this.pauseInternal('Wall-time budget exhausted', true))
+      void this.serial(async () => {
+        const reason = this.exceededUsageReason()
+        if (reason) await this.pauseInternal(reason, true)
+        else await this.pauseInternal('Time budget exhausted', true)
+      })
     }, Math.max(1, remaining))
     timer.unref?.()
     this.wallTimer = timer
