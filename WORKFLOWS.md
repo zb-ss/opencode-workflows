@@ -427,6 +427,7 @@ For a manual workflow, use `/workflow-status` and inspect its active state. For 
 - [Agent Reference](./docs/agents.md)
 - [Autonomous Workflows](./docs/autonomous-workflows.md)
 - [Epic Coordination](./docs/epic-coordination.md)
+- [Durable Queue](./docs/durable-queue.md)
 - [Guarded Publication](./docs/guarded-publication.md)
 - [Model Compatibility](./docs/model-compatibility.md)
 - [Review System](./docs/review-system.md)

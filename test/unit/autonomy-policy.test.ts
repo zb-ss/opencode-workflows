@@ -42,6 +42,7 @@ describe('bounded autonomy policy', () => {
     for (const permission of [
       'question', 'plan_enter', 'plan_exit', 'task', 'delegation_unsafe',
       'epic_start', 'epic_pause', 'epic_cancel', 'epic_resume', 'epic_redelegate', 'epic_integrate', 'epic_cleanup',
+      'queue_enqueue', 'queue_pause', 'queue_resume', 'queue_cancel', 'queue_recover',
       'epic_budget_update', 'epic_budget_extend',
     ]) {
       assert.equal(resolved.some((rule) => (

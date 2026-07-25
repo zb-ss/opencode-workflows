@@ -223,6 +223,7 @@ describe('bounded automatic workflow plugin', () => {
     )
     for (const toolName of [
       'epic_start', 'epic_pause', 'epic_cancel', 'epic_resume', 'epic_redelegate', 'epic_integrate', 'epic_cleanup',
+      'queue_enqueue', 'queue_pause', 'queue_resume', 'queue_cancel', 'queue_recover',
       'epic_budget_update', 'epic_budget_extend',
     ]) {
       await assert.rejects(
