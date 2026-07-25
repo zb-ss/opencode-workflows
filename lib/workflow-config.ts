@@ -8,6 +8,7 @@ import {
   type ModelCandidate,
 } from './model-registry.ts'
 import { EpicConfigSchema } from './epic-policy.ts'
+import { QueueConfigSchema } from './queue-policy.ts'
 import { getConfigDir } from './paths.ts'
 import {
   MAX_BOUNDED_IO_BYTES,
@@ -415,6 +416,7 @@ export const WorkflowConfigSchema = z.object({
   review_loop: ReviewLoopSchema,
   publication: PublicationConfigSchema,
   epic: EpicConfigSchema,
+  queue: QueueConfigSchema,
   automation: z.object({
     enabled: z.boolean().default(false),
     autonomy: z.enum(['interactive', 'bounded']).default('interactive'),
