@@ -61,6 +61,14 @@ if (mode === 'rate-limit') {
   process.stderr.write('rate limit exceeded (429)\\n')
   process.exit(1)
 }
+if (mode === 'permission-denied') {
+  process.stdout.write('I could not complete the task because read_file permission was denied.')
+  process.exit(0)
+}
+if (mode === 'permission-denied-exit') {
+  process.stderr.write('Error: tool use denied: read_file')
+  process.exit(1)
+}
 if (mode === 'slow') {
   setTimeout(() => process.stdout.write('late response'), 10000)
 } else if (mode === 'large') {
@@ -471,5 +479,60 @@ describe('external CLI delegation', () => {
     assert.equal(requests[0].permission, 'delegation_legacy')
     assert.equal(fs.readFileSync(legacyPath, 'utf8'), originalLegacyContent)
     assert.equal(fs.statSync(path.join(getSessionRunsDirectory(context), `${runId}.json`)).mode & 0o777, 0o600)
+  })
+
+  it('classifies a headless tool permission denial on exit 0 as tool_permission_denied', async (test) => {
+    const harness = createHarness(test)
+    process.env.FAKE_AGY_MODE = 'permission-denied'
+    const tools = await pluginTools()
+    const context = harness.context('session-1')
+
+    const result = await executeJson(tools, 'delegate_run', {
+      provider: 'gemini',
+      prompt: 'Read the file and summarize it.',
+      allowFallback: false,
+    }, context)
+
+    assert.equal(result.success, false)
+    const attempts = result.attempts as Array<{ category: string; provider: string }>
+    assert.equal(attempts[0].category, 'tool_permission_denied')
+    assert.equal(attempts[0].provider, 'gemini')
+  })
+
+  it('classifies a headless tool permission denial on non-zero exit as tool_permission_denied', async (test) => {
+    const harness = createHarness(test)
+    process.env.FAKE_AGY_MODE = 'permission-denied-exit'
+    const tools = await pluginTools()
+    const context = harness.context('session-1')
+
+    const result = await executeJson(tools, 'delegate_run', {
+      provider: 'gemini',
+      prompt: 'Read the file and summarize it.',
+      allowFallback: false,
+    }, context)
+
+    assert.equal(result.success, false)
+    const attempts = result.attempts as Array<{ category: string; provider: string }>
+    assert.equal(attempts[0].category, 'tool_permission_denied')
+  })
+
+  it('distinguishes tool permission denial from provider auth failure', async (test) => {
+    const harness = createHarness(test)
+    process.env.FAKE_AGY_MODE = 'permission-denied'
+    process.env.FAKE_CLAUDE_MODE = 'auth-fail'
+    const tools = await pluginTools()
+    const context = harness.context('session-1')
+
+    const result = await executeJson(tools, 'delegate_run', {
+      provider: 'auto',
+      prompt: 'Read the file and summarize it.',
+    }, context)
+
+    const attempts = result.attempts as Array<{ category: string; provider: string }>
+    assert.equal(attempts[0].provider, 'claude')
+    assert.equal(attempts[0].category, 'auth_required')
+    assert.equal(attempts[1].provider, 'gemini')
+    assert.equal(attempts[1].category, 'tool_permission_denied')
+    assert.equal(result.success, false)
   })
 })
