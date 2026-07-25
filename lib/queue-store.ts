@@ -130,6 +130,35 @@ export class QueueStore {
     return parsed
   }
 
+  /**
+   * Reconcile a workflow record during attended recovery. Unlike `update`,
+   * the CAS check compares the on-disk state_revision against the caller's
+   * expected revision (ignoring fencing_generation) so a new authority can
+   * re-stamp a record written by a crashed predecessor. The caller MUST hold
+   * a valid lease and pass the current lease's fencing_generation as the new
+   * stamp; the previous record's fencing_generation is overwritten.
+   */
+  reconcile(
+    workflowId: string,
+    expectedRevision: number,
+    newGeneration: number,
+    mutate: (record: QueueWorkflowRecord) => QueueWorkflowRecord,
+  ): QueueWorkflowRecord {
+    assertFencingGeneration(this.leaseStore, newGeneration)
+    const current = this.load(workflowId)
+    if (!current) throw new QueueStoreError('missing', `workflow ${workflowId} not found`)
+    if (current.state_revision !== expectedRevision) {
+      throw new QueueStoreError('stale_revision', `expected revision ${expectedRevision}, found ${current.state_revision}`)
+    }
+    const next = mutate(structuredClone(current))
+    next.state_revision = current.state_revision + 1
+    next.fencing_generation = newGeneration
+    next.updated_at = new Date(this.now()).toISOString()
+    const parsed = QueueWorkflowRecordSchema.parse(next)
+    this.replaceWorkflowRecord(parsed)
+    return parsed
+  }
+
   rebuildIndex(): QueueIndexEntry[] {
     const entries: QueueIndexEntry[] = []
     let files: string[]
