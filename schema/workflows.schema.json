@@ -63,12 +63,7 @@
             "required": [
               "max_parallel_sessions",
               "max_sessions",
-              "max_attempts_per_stage",
-              "max_input_tokens",
-              "max_output_tokens",
-              "max_bounded_read_bytes",
-              "max_bounded_write_bytes",
-              "max_cost_usd"
+              "max_attempts_per_stage"
             ]
           }
         }

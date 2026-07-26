@@ -179,7 +179,7 @@ describe('QueueScheduler', () => {
     handle.dispose()
   })
 
-  it('returns leased workflows to queued when the lease expires and a new scheduler takes over', () => {
+  it('preserves leased workflows as paused when the lease expires and a new scheduler takes over', () => {
     const dir = tempDir('queue-scheduler-takeover-')
     const store = new QueueStore({ config_directory: dir, owner: 'test-scheduler', now: clockNow })
 
@@ -193,8 +193,9 @@ describe('QueueScheduler', () => {
     handleA.dispose()
 
     const afterDispose = store.load('wf-1')!
-    assert.equal(afterDispose.status, 'queued')
-    assert.equal(afterDispose.launch_intent, null)
+    assert.equal(afterDispose.status, 'paused')
+    assert.notEqual(afterDispose.launch_intent, null)
+    assert.equal(afterDispose.launch_intent!.launch_state, 'ambiguous')
   })
 
   it('recovers a crashed scheduler by reconciling reserved launch intents as paused', async () => {

@@ -116,7 +116,7 @@ describe('epic worktree isolation and provenance', { concurrency: false }, () =>
     assert.deepEqual(noOp.changed_files, [])
   })
 
-  it('runs epic checkpoint hooks and preserves work when a hook rejects the commit', () => {
+  it('does not execute repository hooks during epic checkpoint commits', () => {
     const { parent, root } = repository()
     const created = createEpicAttemptWorktree(root, 'refs/heads/main', 'epic-1', 'item-1', 'attempt-1')
     const hook = path.join(root, '.git', 'hooks', 'pre-commit')
@@ -124,14 +124,8 @@ describe('epic worktree isolation and provenance', { concurrency: false }, () =>
     fs.writeFileSync(hook, `#!/bin/sh\nprintf ran > "${marker}"\n`)
     fs.chmodSync(hook, 0o700)
     fs.writeFileSync(path.join(created.path, 'tracked.txt'), 'hooked checkpoint\n')
-    const checkpoint = checkpointEpicAttemptWorktree(root, created.path, created.evidence)
-    assert.equal(fs.readFileSync(marker, 'utf8'), 'ran')
-
-    fs.writeFileSync(hook, '#!/bin/sh\nexit 1\n')
-    fs.writeFileSync(path.join(created.path, 'tracked.txt'), 'rejected checkpoint\n')
-    assert.throws(() => checkpointEpicAttemptWorktree(root, created.path, created.evidence))
-    assert.equal(git(created.path, ['rev-parse', 'HEAD']), checkpoint.checkpoint_commit)
-    assert.match(git(created.path, ['status', '--porcelain']), /tracked\.txt/)
+    checkpointEpicAttemptWorktree(root, created.path, created.evidence)
+    assert.equal(fs.existsSync(marker), false, 'repository hook must not execute during checkpoint')
   })
 
   it('creates an exact bounded review patch and refuses post-checkpoint mutations', () => {

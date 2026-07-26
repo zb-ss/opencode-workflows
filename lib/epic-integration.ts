@@ -492,6 +492,14 @@ export function verifyRecoveredEpicIntegration(input: EpicRecoveredIntegrationVe
   if (parents.length !== 3 || parents[1] !== input.expected_target_commit || parents[2] !== input.source_checkpoint_commit) {
     throw new Error('recovered integration result does not have the exact expected parents')
   }
+  // Verify the canonical checkout matches the published merge commit.
+  // If the worktree or index is stale or dirty, the integration is ambiguous.
+  if (hasOperationState(projectRoot)) {
+    throw new Error('recovered integration target has an incomplete Git operation')
+  }
+  if (!indexAndWorktreeMatchCommit(projectRoot, input.result_commit)) {
+    throw new Error('recovered integration canonical checkout does not match the published merge commit')
+  }
 }
 
 export const integrateReviewedEpicCheckpoint = integrateEpicCheckpoint

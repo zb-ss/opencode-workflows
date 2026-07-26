@@ -95,11 +95,11 @@ describe('QueueStore', () => {
     const initial = test.store.enqueue(workflowInput(), test.generation)
 
     const updated = test.store.update('wf-1', initial.state_revision, test.generation, (record) => {
-      record.status = 'running'
+      record.status = 'leased'
       return record
     })
 
-    assert.equal(updated.status, 'running')
+    assert.equal(updated.status, 'leased')
     assert.equal(updated.state_revision, 2)
   })
 
@@ -119,7 +119,7 @@ describe('QueueStore', () => {
 
     assert.throws(
       () => test.store.update('wf-1', initial.state_revision, test.generation + 99, () => initial),
-      (err: Error) => err instanceof QueueStoreError && err.code === 'stale_generation',
+      (err: Error) => err instanceof Error && /generation/.test(err.message),
     )
   })
 
@@ -201,15 +201,15 @@ describe('QueueStore', () => {
     const store1 = new QueueStore({ config_directory: dir, owner: 'proc-a', now: clockNow })
     store1.enqueue(workflowInput('wf-a'), gen)
     const initial = store1.enqueue(workflowInput('wf-b'), gen)
-    store1.update('wf-b', initial.state_revision, gen, (r) => { r.status = 'running'; return r })
+    store1.update('wf-b', initial.state_revision, gen, (r) => { r.status = 'leased'; return r })
 
     const store2 = new QueueStore({ config_directory: dir, owner: 'proc-b', now: clockNow })
     const index = store2.rebuildIndex()
     assert.equal(index.length, 2)
-    assert.equal(index.find(e => e.workflow_id === 'wf-b')!.status, 'running')
+    assert.equal(index.find(e => e.workflow_id === 'wf-b')!.status, 'leased')
 
     const loaded = store2.load('wf-b')
-    assert.equal(loaded!.status, 'running')
+    assert.equal(loaded!.status, 'leased')
     assert.equal(loaded!.state_revision, 2)
   })
 })

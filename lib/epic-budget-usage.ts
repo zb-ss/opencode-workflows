@@ -52,10 +52,10 @@ export function validateBudgetsAndUsage(state: EpicState, issue: EpicIssueReport
 }
 
 function dimensionUsage(state: EpicState, usage: AutomationUsageTelemetry, dimension: EpicBudgetDimension): number | 'unknown' {
-  if (dimension === 'calendar_age_ms') return Date.parse(state.updated_at) - Date.parse(state.created_at)
+  if (dimension === 'calendar_age_ms') return Date.now() - Date.parse(state.created_at)
   if (dimension === 'cost_usd') return usage.cost_evidence.kind === 'known' ? usage.cost_evidence.cost_usd : 'unknown'
   if (dimension === 'active_time_ms' && usage.last_active_checkpoint_at !== null) {
-    return usage.active_time_ms + Math.max(0, Date.parse(state.updated_at) - Date.parse(usage.last_active_checkpoint_at))
+    return usage.active_time_ms + Math.max(0, Date.now() - Date.parse(usage.last_active_checkpoint_at))
   }
   return usage[dimension]
 }
@@ -65,6 +65,9 @@ function isBudgetExhausted(state: EpicState, budget: EpicBudgetRecord, usage: Au
   const consumed = dimensionUsage(state, usage, budget.dimension)
   if (budget.dimension === 'cost_usd') {
     return consumed === 'unknown' || evaluateCostBudget(budget.limit, { kind: 'known', cost_usd: consumed }).decision === 'exhausted'
+  }
+  if (budget.dimension === 'sessions') {
+    return consumed === 'unknown' || consumed > budget.limit
   }
   return consumed !== 'unknown' && (consumed === budget.limit || isConfiguredIntegerLimitExceeded(consumed, budget.limit))
 }
@@ -92,6 +95,11 @@ export function epicBudgetDecision(
   const consumed = dimensionUsage(state, scoped_usage.usage, dimension)
   if (dimension === 'cost_usd') {
     return evaluateCostBudget(budget.limit, consumed === 'unknown' ? { kind: 'unknown' } : { kind: 'known', cost_usd: consumed })
+  }
+  if (dimension === 'sessions') {
+    return consumed !== 'unknown' && consumed > budget.limit
+      ? { decision: 'exhausted' }
+      : { decision: 'within_limit' }
   }
   return consumed !== 'unknown' && (consumed === budget.limit || isConfiguredIntegerLimitExceeded(consumed, budget.limit))
     ? { decision: 'exhausted' }

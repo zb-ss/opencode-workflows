@@ -266,7 +266,21 @@ export class EpicCoordinator {
     this.clock = options.clock ?? defaultClock()
     this.runtime = options.runtime ?? defaultRuntime()
     const loaded = options.store.load()
-    if (loaded?.state.coordination_policy) this.installQueue(loaded.state.coordination_policy)
+    if (loaded?.state.coordination_policy) {
+      this.installQueue(loaded.state.coordination_policy)
+      this.restoreRetryTimers(loaded.state)
+    }
+  }
+
+  private restoreRetryTimers(state: EpicState): void {
+    for (const item of Object.values(state.items)) {
+      if (item.retry_not_before) {
+        const delay = Date.parse(item.retry_not_before) - this.clock.now()
+        if (delay > 0) {
+          this.scheduleRetry(delay)
+        }
+      }
+    }
   }
 
   async start(
@@ -721,7 +735,7 @@ export class EpicCoordinator {
       return
     }
     if (result.status === 'blocked') {
-      this.blockAttempt(item_id, attempt_id, result.summary, result.reason)
+      await this.blockAttempt(item_id, attempt_id, result.summary, result.reason)
       this.applyUsage(item_id, child.id, response)
       return
     }
@@ -865,14 +879,23 @@ export class EpicCoordinator {
     this.persistFailureDecision(loaded, next, item_id)
   }
 
-  private blockAttempt(item_id: string, attempt_id: string, summary: string, reason: string): void {
-    const loaded = this.requireLoaded(); const at = this.timestamp(loaded.state); const next = cloneState(loaded.state)
-    const item = next.items[item_id]!; const attempt = item.attempts.find(value => value.attempt_id === attempt_id)!
-    attempt.status = 'failed'; attempt.completed_at = at; attempt.launch_state = 'settled'; attempt.failure_classification = 'semantic'; attempt.result_summary = cap(`${summary} ${reason}`)
-    item.status = 'blocked'; item.completed_at = at; item.retry_not_before = null
-    next.state_revision++; next.updated_at = at; next.status = 'paused'; next.pause_code = 'item_blocked'; next.pause_reason = cap(reason)
-    this.closeIntervals(next, at)
-    this.options.store.append(validateEpicTransition(loaded.state, next), loaded.revision, loaded.state_sha256, loaded.ownership_generation)
+  private async blockAttempt(item_id: string, attempt_id: string, summary: string, reason: string): Promise<void> {
+    this.beginLifecycleMutation()
+    try {
+      const loaded = this.requireLoaded()
+      const uncertain = await this.abortKnownChildren(loaded.state)
+      const current = this.requireLoaded()
+      if (isTerminal(current.state.status) || current.state.status === 'paused') return
+      const at = this.timestamp(current.state); const next = cloneState(current.state)
+      const item = next.items[item_id]!; const attempt = item.attempts.find(value => value.attempt_id === attempt_id)!
+      attempt.status = 'failed'; attempt.completed_at = at; attempt.launch_state = 'settled'; attempt.failure_classification = 'semantic'; attempt.result_summary = cap(`${summary} ${reason}`)
+      item.status = 'blocked'; item.completed_at = at; item.retry_not_before = null
+      next.state_revision++; next.updated_at = at; next.status = 'paused'
+      next.pause_code = uncertain.review ? 'ambiguous_reviewer_launch' : uncertain.execution ? 'ambiguous_execution_launch' : 'item_blocked'
+      next.pause_reason = uncertain.execution || uncertain.review ? 'Pause could not prove that every dispatched child had terminated.' : cap(reason)
+      this.closeIntervals(next, at)
+      this.options.store.append(validateEpicTransition(current.state, next), current.revision, current.state_sha256, current.ownership_generation)
+    } finally { this.endLifecycleMutation() }
   }
 
   private persistFailureDecision(loaded: EpicLoadResult, candidate: EpicState, item_id: string): void {

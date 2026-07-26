@@ -526,9 +526,10 @@ export function checkpointManagedWorktree(
   )
   git([
     '-c', 'commit.gpgSign=false',
+    '-c', 'core.hooksPath=/dev/null',
     '-c', 'user.name=OpenCode Workflows',
     '-c', 'user.email=opencode-workflows@localhost',
-    'commit', '-m', `chore(epic): checkpoint ${checkpointId}`,
+    'commit', '--no-verify', '-m', `chore(epic): checkpoint ${checkpointId}`,
   ], before.path)
 
   const after = inspectManagedWorktree(projectRoot, before.path, expectedName, expectedBranch)

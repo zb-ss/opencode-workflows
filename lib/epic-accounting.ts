@@ -175,6 +175,19 @@ function assertReservationBudgets(state: EpicState, itemId: string, usage: EpicS
   }
 }
 
+function assertPreReservationBudgets(state: EpicState, itemId: string, usage: EpicScopedUsage[], at: string): void {
+  const applicable = applicableBudgets(state, itemId)
+  for (const budget of applicable) {
+    if (budget.limit === null) continue
+    const index = usageIndex(usage, budget.scope as 'epic' | 'item', budget.item_id)
+    if (index < 0) throw new EpicValidationError(`configured ${budgetLabel(budget)} budget lacks usage telemetry`)
+    const consumed = dimensionUsage(state, usage[index]!.usage, budget.dimension, at)
+    if (budget.dimension === 'sessions' && consumed !== 'unknown' && consumed > budget.limit) {
+      throw new EpicValidationError(`reservation blocked by configured ${budgetLabel(budget)} budget`)
+    }
+  }
+}
+
 function assertCoordinationEnabled(state: EpicState): NonNullable<EpicState['coordination_policy']> {
   if (!state.coordination_policy) throw new EpicValidationError('epic coordination is not enabled')
   return state.coordination_policy
@@ -230,7 +243,7 @@ export function reserveEpicAttempt(stateInput: unknown, input: EpicAttemptReserv
   }
 
   const usage = reserveScopedUsage(state, item.item_id, input.reserved_at, true)
-  assertReservationBudgets(state, item.item_id, usage, input.reserved_at)
+  assertPreReservationBudgets(state, item.item_id, usage, input.reserved_at)
   const attempt = {
     attempt_id: input.attempt_id,
     worktree_evidence: evidence,

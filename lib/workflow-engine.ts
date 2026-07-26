@@ -745,7 +745,10 @@ export class WorkflowEngine {
       }
       if (this.state.definition_id !== this.definition.id) throw new Error('saved state does not match the workflow definition')
       this.assertStateStages()
-      this.state.budget.limits = this.configuredLimits
+      // Preserve persisted budget limits until explicit authorized resume.
+      // The constructor must NOT replace persisted limits with current
+      // configuration, as that could relax enforcement before the owner
+      // explicitly authorizes resume.
       if (this.state.status === 'running'
         || (this.state.status === 'paused' && Object.values(this.state.stages).some((stage) => stage.status === 'running'))) {
         this.scheduleWallTimer()
@@ -1057,7 +1060,7 @@ export class WorkflowEngine {
     stage.error = null
     state.budget.usage.attempts++
     state.budget.usage.sessions++
-    if (!this.hasRunningStages()) this.openActiveInterval()
+    this.openActiveInterval()
     const candidates = this.modelCandidates(stage.agent, stageDefinition.model_tier)
     const candidate = candidates.length > 0 ? candidates[(stage.attempt - 1) % candidates.length] : undefined
     stage.model = candidate?.model ?? null
@@ -1691,7 +1694,7 @@ export class WorkflowEngine {
       const calendarRemaining = limits.max_calendar_age_ms - (this.now() - new Date(state.created_at).getTime())
       if (remaining === null || calendarRemaining < remaining) remaining = calendarRemaining
     }
-    if (limits.max_active_time_ms !== null && state.status === 'running') {
+    if (limits.max_active_time_ms !== null && (state.status === 'running' || (state.status === 'paused' && this.hasRunningStages()))) {
       const activeRemaining = limits.max_active_time_ms - this.computeActiveTime()
       if (remaining === null || activeRemaining < remaining) remaining = activeRemaining
     }

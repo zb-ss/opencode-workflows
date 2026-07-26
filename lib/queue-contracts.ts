@@ -119,9 +119,26 @@ export const QueueIndexEntrySchema = z.object({
 
 export type QueueIndexEntry = z.infer<typeof QueueIndexEntrySchema>
 
+const VALID_TRANSITIONS: Record<QueueWorkflowStatus, ReadonlySet<QueueWorkflowStatus>> = {
+  queued: new Set(['queued', 'leased', 'paused', 'cancelled', 'failed']),
+  leased: new Set(['leased', 'running', 'recovering', 'paused', 'cancelled', 'failed', 'queued', 'completed']),
+  recovering: new Set(['recovering', 'running', 'paused', 'cancelled', 'failed', 'queued']),
+  running: new Set(['running', 'paused', 'completed', 'failed', 'cancelled']),
+  paused: new Set(['paused', 'queued', 'cancelled', 'failed']),
+  completed: new Set(['completed']),
+  failed: new Set(['failed', 'queued']),
+  cancelled: new Set(['cancelled']),
+}
+
+export function isValidTransition(from: QueueWorkflowStatus, to: QueueWorkflowStatus): boolean {
+  return VALID_TRANSITIONS[from]?.has(to) ?? false
+}
+
 export class QueueValidationError extends Error {
-  constructor(message: string) {
+  readonly code: string
+  constructor(code: string, message: string) {
     super(message)
     this.name = 'QueueValidationError'
+    this.code = code
   }
 }

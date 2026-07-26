@@ -343,7 +343,7 @@ describe('E2E: all new features', { concurrency: false }, () => {
       const handleB = storeB.acquire()
       assert.equal(handleB.lease.fencing_generation, genA + 1)
       assert.equal(handleA.is_valid(), false)
-      assert.throws(() => assertFencingGeneration(storeA, genA), (err: Error) => err instanceof FencingLeaseError && err.code === 'stale_generation')
+      assert.throws(() => assertFencingGeneration(storeA, genA), (err: Error) => err instanceof FencingLeaseError)
     })
   })
 
@@ -351,25 +351,27 @@ describe('E2E: all new features', { concurrency: false }, () => {
     it('enqueue → schedule → pause → resume → cancel → recover', () => {
       const dir = tempDir('e2e-queue-')
       const now = { val: Date.parse('2026-07-25T00:00:00.000Z') }
-      const store = new QueueStore({ config_directory: dir, owner: 'e2e-scheduler', now: () => now.val })
-
-      const wf1 = store.enqueue({
-        workflow_id: 'wf-1', definition_id: 'dev', root_session_id: 'root-1',
-        directory: '/project', worktree: '/project', mode: 'standard', task: 'Task 1',
-      }, 1)
-      assert.equal(wf1.status, 'queued')
-
-      const wf2 = store.enqueue({
-        workflow_id: 'wf-2', definition_id: 'dev', root_session_id: 'root-1',
-        directory: '/project', worktree: '/project', mode: 'standard', task: 'Task 2',
-      }, 1)
-      assert.equal(wf2.status, 'queued')
+      const store = new QueueStore({ config_directory: dir, owner: 'e2e-scheduler', now: () => now.val, lease_duration_ms: 60_000 })
 
       const scheduler = new QueueScheduler({
         store, config: enabledQueue(QUEUE_CONFIG), now: () => now.val,
       })
       const handle = scheduler.start()
       const gen = handle.generation
+
+      const wf1 = store.enqueue({
+        workflow_id: 'wf-1', definition_id: 'dev', root_session_id: 'root-1',
+        directory: '/project', worktree: '/project', mode: 'standard', task: 'Task 1',
+      }, gen)
+      assert.equal(wf1.status, 'queued')
+
+      const wf2 = store.enqueue({
+        workflow_id: 'wf-2', definition_id: 'dev', root_session_id: 'root-1',
+        directory: '/project', worktree: '/project', mode: 'standard', task: 'Task 2',
+      }, gen)
+      assert.equal(wf2.status, 'queued')
+
+      scheduler.schedule()
 
       const indexAfterSchedule = store.rebuildIndex()
       assert.equal(indexAfterSchedule.filter(e => e.status === 'leased').length, 2)

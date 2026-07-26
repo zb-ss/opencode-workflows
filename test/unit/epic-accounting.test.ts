@@ -163,8 +163,8 @@ describe('epic execution accounting reservations', () => {
 
   it('fails closed for epic, item, and zero session limits', () => {
     for (const budgets of [
-      [budget('epic', 1)],
-      [budget('item', 1, 'item-a')],
+      [budget('epic', 0)],
+      [budget('item', 0, 'item-a')],
       [budget('epic', 0)],
     ]) {
       const state = baseState({
@@ -177,6 +177,18 @@ describe('epic execution accounting reservations', () => {
       })
       assert.throws(() => reserveEpicAttempt(state, reservation()), /budget/)
     }
+  })
+
+  it('admits exactly N sessions for a limit of N', () => {
+    const state = baseState({
+      status: 'pending',
+      budgets: [budget('epic', 1)],
+      usage: [{ scope: 'epic', item_id: null, usage: emptyAutomationUsageTelemetry() }],
+      items: { 'item-a': item('item-a'), 'item-b': item('item-b') },
+    })
+    const first = reserveEpicAttempt(state, reservation('item-a', 'attempt-1'))
+    assert.equal(first.usage[0]!.usage.sessions, 1)
+    assert.throws(() => reserveEpicAttempt(first, reservation('item-b', 'attempt-2')), /budget/)
   })
 
   it('requires every dependency to be integrated and respects retry time and the hard attempt cap', () => {
