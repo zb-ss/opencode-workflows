@@ -31,6 +31,7 @@ type AttemptCategory =
   | 'execution_failed'
   | 'storage_failed'
   | 'auth_required'
+  | 'tool_permission_denied'
   | 'rate_limited'
   | 'model_unavailable'
   | 'invalid_request'
@@ -947,6 +948,9 @@ function extractResumeToken(responseJson: unknown): string | null {
 }
 
 function classifyExitFailure(output: string): AttemptCategory {
+  if (/(permission\s+(?:was\s+)?denied|tool\s+use.*denied|read_file.*denied|access\s+denied.*read|headless.*permission)/i.test(output)) {
+    return 'tool_permission_denied'
+  }
   if (/(not\s+logged\s+in|login\s+required|sign\s+in|unauth|authentication\s+required|\b401\b|\b403\b)/i.test(output)) {
     return 'auth_required'
   }
@@ -1045,6 +1049,11 @@ async function runAttempt(
   }
 
   const responseText = extractResponseText(parsed, rawText)
+  if (/(permission\s+(?:was\s+)?denied|tool\s+use.*denied|read_file.*denied|access\s+denied.*read)/i.test(responseText)) {
+    const attempt = failedAttempt(provider, 'tool_permission_denied', `${provider} headless tool permission was denied`, result, warnings, output, modelAlias)
+    attempt.response_text = responseText
+    return attempt
+  }
   if (provider === 'claude' && isRecord(parsed) && parsed.is_error === true) {
     const detail = typeof parsed.result === 'string' ? truncate(parsed.result, 200) : 'unknown'
     const attempt = failedAttempt(provider, 'provider_error', `Claude reported error: ${detail}`, result, warnings, output, modelAlias)
@@ -1308,30 +1317,35 @@ async function preflightProvider(
     .map(line => line.trim())
     .find(Boolean) ?? null
 
-  let authState: PreflightResult['auth_state'] = 'unknown'
-  if (options.checkAuth !== false) {
-    const authArgs = provider === 'claude'
-      ? ['auth', 'status']
-      : ['--print', 'Reply with OK only.']
-    const authTimeoutMs = clampTimeout(options.authTimeoutMs, MIN_TIMEOUT_MS)
-    const authResult = await execCommand(binary, authArgs, {
-      timeoutMs: authTimeoutMs,
-      signal: context.abort,
-      cwd: invocation.directory,
-    })
-    throwIfAborted(context)
-    if (authResult.timed_out) {
-      warnings.push(`${provider} auth probe timed out after ${authTimeoutMs}ms.`)
-    } else {
-      const output = `${authResult.stdout}\n${authResult.stderr}`.trim()
-      authState = detectAuthState(output, provider)
-      if (provider === 'gemini' && authState === 'unknown' && authResult.exit_code === 0 && output) {
-        authState = 'authenticated'
+    let authState: PreflightResult['auth_state'] = 'unknown'
+    if (options.checkAuth !== false) {
+      const authArgs = provider === 'claude'
+        ? ['auth', 'status']
+        : ['--print', 'Reply with OK only.']
+      const authTimeoutMs = clampTimeout(options.authTimeoutMs, MIN_TIMEOUT_MS)
+      const authResult = await execCommand(binary, authArgs, {
+        timeoutMs: authTimeoutMs,
+        signal: context.abort,
+        cwd: invocation.directory,
+      })
+      throwIfAborted(context)
+      if (authResult.timed_out) {
+        warnings.push(`${provider} auth probe timed out after ${authTimeoutMs}ms.`)
+      } else {
+        const output = `${authResult.stdout}\n${authResult.stderr}`.trim()
+        authState = detectAuthState(output, provider)
+        if (provider === 'gemini' && authState === 'unknown' && authResult.exit_code === 0 && output) {
+          if (/(permission\s+(?:was\s+)?denied|tool\s+use.*denied|read_file.*denied)/i.test(output)) {
+            authState = 'unknown'
+            warnings.push('Antigravity headless tool permission was denied during the auth probe. The CLI may not have read access in headless mode.')
+          } else {
+            authState = 'authenticated'
+          }
+        }
       }
+    } else {
+      warnings.push(`Skipped ${provider} auth probe (checkAuth=false).`)
     }
-  } else {
-    warnings.push(`Skipped ${provider} auth probe (checkAuth=false).`)
-  }
 
   if (authState === 'unknown') {
     warnings.push(`Could not confidently determine ${provider} auth state. Run '${command}' interactively if needed.`)
