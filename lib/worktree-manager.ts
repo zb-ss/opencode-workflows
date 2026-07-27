@@ -11,6 +11,7 @@ import path from 'node:path'
 import { sha256Hex } from './canonical-json.ts'
 import type { WorktreeState, DelegationProvider } from './types.js'
 import { ensurePrivateDirectory, getRuntimeDir, hashIdentifier } from './paths.ts'
+import { sandboxedGitArgs, sandboxedGitEnv } from './git-sandbox.ts'
 
 const WORKTREE_DIRECTORY = 'worktrees'
 const WORKTREE_PREFIX = 'delegate-'
@@ -74,40 +75,44 @@ export interface ManagedReviewPatchOptions {
 // ---------------------------------------------------------------------------
 
 function git(args: string[], cwd: string): string {
-  return execFileSync('git', args, {
+  return execFileSync('git', sandboxedGitArgs(args), {
     cwd,
     encoding: 'utf8',
     maxBuffer: MAX_GIT_OUTPUT_BYTES,
     stdio: ['ignore', 'pipe', 'pipe'],
+    env: sandboxedGitEnv(),
   }).trim()
 }
 
 function gitRaw(args: string[], cwd: string): string {
-  return execFileSync('git', args, {
+  return execFileSync('git', sandboxedGitArgs(args), {
     cwd,
     encoding: 'utf8',
     maxBuffer: MAX_GIT_OUTPUT_BYTES,
     stdio: ['ignore', 'pipe', 'pipe'],
+    env: sandboxedGitEnv(),
   })
 }
 
 function gitSucceeds(args: string[], cwd: string): boolean {
-  const result = spawnSync('git', args, {
+  const result = spawnSync('git', sandboxedGitArgs(args), {
     cwd,
     encoding: 'utf8',
     maxBuffer: MAX_GIT_OUTPUT_BYTES,
     stdio: ['ignore', 'pipe', 'pipe'],
+    env: sandboxedGitEnv(),
   })
 
   return !result.error && result.status === 0
 }
 
 function gitBuffer(args: string[], cwd: string, maxBytes: number): Buffer {
-  const result = spawnSync('git', args, {
+  const result = spawnSync('git', sandboxedGitArgs(args), {
     cwd,
     encoding: 'buffer',
     maxBuffer: maxBytes + 1,
     stdio: ['ignore', 'pipe', 'pipe'],
+    env: sandboxedGitEnv(),
   })
   if (result.error) {
     if ((result.error as NodeJS.ErrnoException).code === 'ENOBUFS') {
@@ -526,7 +531,6 @@ export function checkpointManagedWorktree(
   )
   git([
     '-c', 'commit.gpgSign=false',
-    '-c', 'core.hooksPath=/dev/null',
     '-c', 'user.name=OpenCode Workflows',
     '-c', 'user.email=opencode-workflows@localhost',
     'commit', '--no-verify', '-m', `chore(epic): checkpoint ${checkpointId}`,
@@ -613,6 +617,10 @@ export function removeManagedWorktree(
   const snapshot = inspectManagedWorktree(projectRoot, worktreePath, expectedName, expectedBranch)
   if (snapshot.has_changes || snapshot.has_conflicts) throw new Error('managed worktree with retained changes or conflicts cannot be removed')
   const realProjectRoot = resolveProjectRoot(projectRoot)
+  const currentBranchTip = git(['rev-parse', '--verify', `refs/heads/${snapshot.branch}^{commit}`], realProjectRoot)
+  if (currentBranchTip !== snapshot.head_commit) {
+    throw new Error('managed branch advanced concurrently and cannot be removed')
+  }
   git(['worktree', 'remove', snapshot.path], realProjectRoot)
   git(['update-ref', '-d', `refs/heads/${snapshot.branch}`, snapshot.head_commit], realProjectRoot)
 }

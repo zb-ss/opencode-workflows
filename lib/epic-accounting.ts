@@ -182,7 +182,18 @@ function assertPreReservationBudgets(state: EpicState, itemId: string, usage: Ep
     const index = usageIndex(usage, budget.scope as 'epic' | 'item', budget.item_id)
     if (index < 0) throw new EpicValidationError(`configured ${budgetLabel(budget)} budget lacks usage telemetry`)
     const consumed = dimensionUsage(state, usage[index]!.usage, budget.dimension, at)
-    if (budget.dimension === 'sessions' && consumed !== 'unknown' && consumed > budget.limit) {
+    if (consumed === 'unknown') {
+      // Cost budgets cannot be enforced without evidence; calendar/active are always known here.
+      if (budget.dimension === 'cost_usd') continue
+      throw new EpicValidationError(`reservation blocked by unmeasurable ${budgetLabel(budget)} budget`)
+    }
+    if (budget.dimension === 'sessions') {
+      if (consumed > budget.limit) {
+        throw new EpicValidationError(`reservation blocked by configured ${budgetLabel(budget)} budget`)
+      }
+      continue
+    }
+    if (consumed >= budget.limit) {
       throw new EpicValidationError(`reservation blocked by configured ${budgetLabel(budget)} budget`)
     }
   }

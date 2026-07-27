@@ -195,6 +195,7 @@ const runtime = (project: string): EpicCoordinatorRuntime => ({
   integrate() { throw new Error('not used') },
   mergeParents() { return [] },
   verifyRecoveredIntegration() {},
+  repairRecoveredIntegration() {},
 })
 
 async function recover(project: string, previous: EpicLoadResult) {

@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process'
 
+import { sandboxedGitArgs, sandboxedGitEnv } from './git-sandbox.ts'
 import { applyEpicUsageDelta, closeEpicUsageIntervals, reserveEpicAttempt, reserveEpicReviewSession } from './epic-accounting.ts'
 import { parseEpicExecutorResult, parseEpicReviewerResult, type EpicExecutorResult, type EpicReviewerResult } from './epic-attempt-result.ts'
 import { projectEpicBudgetStatus } from './epic-budget-usage.ts'
@@ -17,6 +18,7 @@ import { computeDependencySnapshotDigest } from './epic-integration-digests.ts'
 import {
   EpicIntegrationAmbiguousError,
   integrateEpicCheckpoint,
+  repairRecoveredEpicIntegration,
   verifyRecoveredEpicIntegration,
   type EpicIntegrationInput,
   type EpicIntegrationResult,
@@ -103,6 +105,7 @@ export interface EpicCoordinatorRuntime {
   integrate(input: EpicIntegrationInput): EpicIntegrationResult
   mergeParents(project_root: string, commit: string): string[]
   verifyRecoveredIntegration(input: Parameters<typeof verifyRecoveredEpicIntegration>[0]): void
+  repairRecoveredIntegration(input: Parameters<typeof repairRecoveredEpicIntegration>[0]): void
 }
 
 export interface EpicCoordinatorOptions {
@@ -157,7 +160,7 @@ function defaultClock(): EpicCoordinatorClock {
 }
 
 function git(project_root: string, args: string[]): string {
-  return execFileSync('git', args, { cwd: project_root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
+  return execFileSync('git', sandboxedGitArgs(args), { cwd: project_root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: sandboxedGitEnv() }).trim()
 }
 
 function defaultRuntime(): EpicCoordinatorRuntime {
@@ -173,6 +176,7 @@ function defaultRuntime(): EpicCoordinatorRuntime {
     integrate: integrateEpicCheckpoint,
     mergeParents: (project_root, commit) => git(project_root, ['rev-list', '--parents', '-n', '1', commit]).split(/\s+/).slice(1),
     verifyRecoveredIntegration: verifyRecoveredEpicIntegration,
+    repairRecoveredIntegration: repairRecoveredEpicIntegration,
   }
 }
 
@@ -604,7 +608,7 @@ export class EpicCoordinator {
     return { cleaned, retained }
   }
 
-  dispose(): void {
+  async dispose(): Promise<void> {
     if (this.disposed) return
     this.disposed = true
     if (this.checkpointTimer !== null) this.clock.clearInterval(this.checkpointTimer)
@@ -612,6 +616,14 @@ export class EpicCoordinator {
     this.retryTimers.clear()
     this.checkpointTimer = null
     this.scheduled.clear()
+    try {
+      const loaded = this.options.store.load()
+      if (loaded?.state.coordination_policy) {
+        await this.abortKnownChildren(loaded.state)
+      }
+    } catch {
+      // Best-effort child quiescence during disposal.
+    }
     this.notify()
   }
 
@@ -700,8 +712,8 @@ export class EpicCoordinator {
       )
     } catch (error) {
       if (!this.currentAttemptHasStatus(item_id, attempt_id, 'running')) return
-      if (error instanceof EpicDefinitiveSessionError) { this.failAttempt(item_id, attempt_id, 'transport', cap(error.message) ?? 'Child creation was definitively rejected.'); return }
-      this.markAmbiguous(item_id, attempt_id, false); return
+      if (error instanceof EpicDefinitiveSessionError) { await this.failAttempt(item_id, attempt_id, 'transport', cap(error.message) ?? 'Child creation was definitively rejected.'); return }
+      await this.markAmbiguous(item_id, attempt_id, false); return
     }
     if (this.disposed) return
     if (!this.currentAttemptHasStatus(item_id, attempt_id, 'running')) {
@@ -721,16 +733,16 @@ export class EpicCoordinator {
       if (!this.currentAttemptHasStatus(item_id, attempt_id, 'running')) return
       if (error instanceof EpicDefinitiveSessionError) {
         try { await this.withDeadline(this.options.session.abort(child.id, worktree.path), policy.max_attempt_duration_ms) }
-        catch { this.markAmbiguous(item_id, attempt_id, false); return }
-        this.failAttempt(item_id, attempt_id, 'transport', cap(error.message) ?? 'Transport failure.')
-      } else this.markAmbiguous(item_id, attempt_id, false)
+        catch { await this.markAmbiguous(item_id, attempt_id, false); return }
+        await this.failAttempt(item_id, attempt_id, 'transport', cap(error.message) ?? 'Transport failure.')
+      } else await this.markAmbiguous(item_id, attempt_id, false)
       return
     }
     if (!this.currentAttemptHasStatus(item_id, attempt_id, 'running')) return
     let result: EpicExecutorResult
     try { result = parseEpicExecutorResult(response.result, policy.max_result_bytes) }
     catch {
-      this.failAttempt(item_id, attempt_id, 'contract', 'Executor returned an invalid bounded result.')
+      await this.failAttempt(item_id, attempt_id, 'contract', 'Executor returned an invalid bounded result.')
       this.applyUsage(item_id, child.id, response)
       return
     }
@@ -740,7 +752,7 @@ export class EpicCoordinator {
       return
     }
     if (result.status === 'failed') {
-      this.failAttempt(item_id, attempt_id, result.failure_classification, result.summary)
+      await this.failAttempt(item_id, attempt_id, result.failure_classification, result.summary)
       this.applyUsage(item_id, child.id, response)
       return
     }
@@ -753,7 +765,7 @@ export class EpicCoordinator {
         this.reviewPatchLimit(item_id, attempt_id, policy.max_result_bytes),
       )
       if (this.reviewPatchIsUnsafe(item_id, attempt_id, patch.patch_content, patch.changed_files)) {
-        this.blockUnsafeReview(item_id, attempt_id)
+        await this.blockUnsafeReview(item_id, attempt_id)
         this.applyUsage(item_id, child.id, response)
         return
       }
@@ -770,7 +782,7 @@ export class EpicCoordinator {
       }), progressed)
       this.applyUsage(item_id, child.id, response)
     } catch (error) {
-      this.failAttempt(item_id, attempt_id, 'semantic', cap(error instanceof Error ? error.message : String(error)) ?? 'Checkpoint validation failed.')
+      await this.failAttempt(item_id, attempt_id, 'semantic', cap(error instanceof Error ? error.message : String(error)) ?? 'Checkpoint validation failed.')
       this.applyUsage(item_id, child.id, response)
     }
   }
@@ -799,7 +811,7 @@ export class EpicCoordinator {
     } catch (error) {
       if (!this.currentAttemptHasStatus(item_id, attempt_id, 'reviewing')) return
       if (error instanceof EpicDefinitiveSessionError) this.failReservedReviewTransport(item_id, attempt_id, error.message)
-      else this.markAmbiguous(item_id, attempt_id, true)
+      else await this.markAmbiguous(item_id, attempt_id, true)
       return
     }
     if (this.disposed) return
@@ -820,9 +832,9 @@ export class EpicCoordinator {
       if (!this.currentAttemptHasStatus(item_id, attempt_id, 'reviewing')) return
       if (error instanceof EpicDefinitiveSessionError) {
         try { await this.withDeadline(this.options.session.abort(child.id, worktreePath), policy.max_attempt_duration_ms) }
-        catch { this.markAmbiguous(item_id, attempt_id, true); return }
+        catch { await this.markAmbiguous(item_id, attempt_id, true); return }
         this.failReview(item_id, attempt_id, { verdict: 'fail', summary: cap(error.message) ?? 'Reviewer transport failure.', issues: [{ issue_id: 'review-transport', severity: 'high', message: 'Reviewer transport failed.', path: null, line: null, recommendation: null }] }, 'transport')
-      } else this.markAmbiguous(item_id, attempt_id, true)
+      } else await this.markAmbiguous(item_id, attempt_id, true)
       return
     }
     if (!this.currentAttemptHasStatus(item_id, attempt_id, 'reviewing')) return
@@ -869,14 +881,15 @@ export class EpicCoordinator {
     this.settleReview(item_id, attempt_id, result, '0'.repeat(64), attempt.review!.child_session_id!, classification)
   }
 
-  private failAttempt(item_id: string, attempt_id: string, classification: 'transport' | 'contract' | 'semantic', summary: string, progress_commit: string | null = null, progress_tree_sha256: string | null = null): void {
+  private async failAttempt(item_id: string, attempt_id: string, classification: 'transport' | 'contract' | 'semantic', summary: string, progress_commit: string | null = null, progress_tree_sha256: string | null = null): Promise<void> {
     const loaded = this.requireLoaded(); const at = this.timestamp(loaded.state); const next = cloneState(loaded.state)
+    const uncertain = await this.abortKnownChildren(next)
     const item = next.items[item_id]!; const attempt = item.attempts.find(value => value.attempt_id === attempt_id)!
     attempt.status = 'failed'; attempt.completed_at = at; attempt.launch_state = 'settled'; attempt.failure_classification = classification; attempt.result_summary = cap(summary); attempt.progress_commit = progress_commit; attempt.progress_tree_sha256 = progress_tree_sha256
     item.status = 'failed'; item.completed_at = at; item.retry_not_before = null
     next.state_revision++; next.updated_at = at
     this.closeItemIntervals(next, item_id, at)
-    this.persistFailureDecision(loaded, next, item_id)
+    this.persistFailureDecision(loaded, next, item_id, uncertain)
   }
 
   private async blockAttempt(item_id: string, attempt_id: string, summary: string, reason: string): Promise<void> {
@@ -898,7 +911,7 @@ export class EpicCoordinator {
     } finally { this.endLifecycleMutation() }
   }
 
-  private persistFailureDecision(loaded: EpicLoadResult, candidate: EpicState, item_id: string): void {
+  private persistFailureDecision(loaded: EpicLoadResult, candidate: EpicState, item_id: string, uncertain: { execution: boolean; review: boolean } = { execution: false, review: false }): void {
     const initiallyValid = validateEpicTransition(loaded.state, candidate)
     const decision = assessEpicRetry(initiallyValid, item_id)
     const next = cloneState(candidate)
@@ -906,8 +919,13 @@ export class EpicCoordinator {
       next.items[item_id]!.retry_not_before = decision.retry_not_before
     } else {
       next.status = 'paused'
-      next.pause_code = decision.reason === 'ambiguous_launch' ? 'ambiguous_execution_launch' : 'retry_exhausted'
-      next.pause_reason = `Automatic retry stopped: ${decision.reason}.`
+      if (decision.reason === 'ambiguous_launch' || uncertain.execution || uncertain.review) {
+        next.pause_code = uncertain.review ? 'ambiguous_reviewer_launch' : 'ambiguous_execution_launch'
+        next.pause_reason = 'Pause could not prove that every dispatched child had terminated.'
+      } else {
+        next.pause_code = 'retry_exhausted'
+        next.pause_reason = `Automatic retry stopped: ${decision.reason}.`
+      }
       this.closeIntervals(next, next.updated_at)
     }
     this.options.store.append(validateEpicTransition(loaded.state, next), loaded.revision, loaded.state_sha256, loaded.ownership_generation)
@@ -934,11 +952,11 @@ export class EpicCoordinator {
     attempt.review = { ...attempt.review!, launch_state: 'settled' }
     item.status = 'failed'; item.completed_at = at; item.retry_not_before = null
     next.state_revision++; next.updated_at = at; this.closeItemIntervals(next, item_id, at)
-    this.persistFailureDecision(loaded, next, item_id)
+    this.persistFailureDecision(loaded, next, item_id, { execution: false, review: false })
   }
 
-  private blockUnsafeReview(item_id: string, attempt_id: string): void {
-    this.failAttempt(item_id, attempt_id, 'semantic', 'Review patch was blocked by the built-in content safety scan.')
+  private async blockUnsafeReview(item_id: string, attempt_id: string): Promise<void> {
+    await this.failAttempt(item_id, attempt_id, 'semantic', 'Review patch was blocked by the built-in content safety scan.')
     const loaded = this.requireLoaded()
     if (loaded.state.status !== 'running') return
     this.appendFrom(loaded, state => ({
@@ -951,13 +969,14 @@ export class EpicCoordinator {
     }))
   }
 
-  private markAmbiguous(item_id: string, attempt_id: string, reviewer: boolean): void {
+  private async markAmbiguous(item_id: string, attempt_id: string, reviewer: boolean): Promise<void> {
     const loaded = this.requireLoaded(); const at = this.timestamp(loaded.state); const next = cloneState(loaded.state)
+    const uncertain = await this.abortKnownChildren(next)
     const item = next.items[item_id]!; const attempt = item.attempts.find(value => value.attempt_id === attempt_id)!
     attempt.status = 'failed'; attempt.completed_at = at; attempt.failure_classification = 'ambiguous_launch'; attempt.result_summary = 'Session launch or execution outcome is ambiguous.'; attempt.launch_state = reviewer ? 'settled' : 'ambiguous'
     if (reviewer && attempt.review) attempt.review.launch_state = 'ambiguous'
     item.status = 'failed'; item.completed_at = at
-    next.state_revision++; next.updated_at = at; next.status = 'paused'; next.pause_code = reviewer ? 'ambiguous_reviewer_launch' : 'ambiguous_execution_launch'; next.pause_reason = 'Attended reconciliation is required before more work can be scheduled.'
+    next.state_revision++; next.updated_at = at; next.status = 'paused'; next.pause_code = uncertain.review ? 'ambiguous_reviewer_launch' : 'ambiguous_execution_launch'; next.pause_reason = 'Attended reconciliation is required before more work can be scheduled.'
     this.closeIntervals(next, at)
     this.options.store.append(validateEpicTransition(loaded.state, next), loaded.revision, loaded.state_sha256, loaded.ownership_generation)
   }

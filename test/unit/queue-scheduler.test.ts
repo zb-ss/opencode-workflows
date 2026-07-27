@@ -62,13 +62,14 @@ function workflowInput(id: string) {
   }
 }
 
-function enqueueWith(store: QueueStore, generation: number, id: string): QueueWorkflowRecord {
-  return store.enqueue(workflowInput(id), generation)
+function enqueueWith(store: QueueStore, handle: import('../../lib/fencing-lease.ts').FencingLeaseHandle, id: string): QueueWorkflowRecord {
+  return store.enqueue(workflowInput(id), handle)
 }
 
-function seedLeasedWorkflow(store: QueueStore, generation: number, id: string, launchState: 'reserved' | 'settled'): QueueWorkflowRecord {
-  const initial = store.enqueue(workflowInput(id), generation)
-  return store.update(id, initial.state_revision, generation, (record) => {
+function seedLeasedWorkflow(store: QueueStore, handle: import('../../lib/fencing-lease.ts').FencingLeaseHandle, id: string, launchState: 'reserved' | 'settled'): QueueWorkflowRecord {
+  const generation = handle.lease.fencing_generation
+  const initial = store.enqueue(workflowInput(id), handle)
+  return store.update(id, initial.state_revision, handle, (record) => {
     record.status = 'leased'
     record.launch_intent = {
       intent_id: `intent-${id}`,
@@ -100,7 +101,7 @@ describe('QueueScheduler', () => {
     const handle = scheduler.start()
     const generation = handle.generation
 
-    enqueueWith(test.store, generation, 'wf-1')
+    enqueueWith(test.store, handle.lease, 'wf-1')
     scheduler.start()
 
     assert.equal(loadStatus(test.store, 'wf-1'), 'leased')
@@ -124,8 +125,8 @@ describe('QueueScheduler', () => {
     const handle = scheduler.start()
     const generation = handle.generation
 
-    enqueueWith(test.store, generation, 'wf-a')
-    enqueueWith(test.store, generation, 'wf-b')
+    enqueueWith(test.store, handle.lease, 'wf-a')
+    enqueueWith(test.store, handle.lease, 'wf-b')
     scheduler.start()
 
     assert.deepEqual(ready.sort(), ['wf-a', 'wf-b'])
@@ -138,10 +139,10 @@ describe('QueueScheduler', () => {
     const handle = scheduler.start()
     const generation = handle.generation
 
-    enqueueWith(test.store, generation, 'wf-1')
-    enqueueWith(test.store, generation, 'wf-2')
-    enqueueWith(test.store, generation, 'wf-3')
-    enqueueWith(test.store, generation, 'wf-4')
+    enqueueWith(test.store, handle.lease, 'wf-1')
+    enqueueWith(test.store, handle.lease, 'wf-2')
+    enqueueWith(test.store, handle.lease, 'wf-3')
+    enqueueWith(test.store, handle.lease, 'wf-4')
     scheduler.start()
 
     const index = test.store.rebuildIndex()
@@ -159,15 +160,15 @@ describe('QueueScheduler', () => {
     const handle = scheduler.start()
     const generation = handle.generation
 
-    enqueueWith(test.store, generation, 'wf-1')
-    enqueueWith(test.store, generation, 'wf-2')
-    enqueueWith(test.store, generation, 'wf-3')
+    enqueueWith(test.store, handle.lease, 'wf-1')
+    enqueueWith(test.store, handle.lease, 'wf-2')
+    enqueueWith(test.store, handle.lease, 'wf-3')
     scheduler.start()
 
     assert.equal(loadStatus(test.store, 'wf-3'), 'queued')
 
     const leased1 = test.store.load('wf-1')!
-    test.store.update('wf-1', leased1.state_revision, leased1.fencing_generation, (record) => {
+    test.store.update('wf-1', leased1.state_revision, handle.lease, (record) => {
       record.status = 'completed'
       if (record.launch_intent) record.launch_intent = { ...record.launch_intent, launch_state: 'settled', settled_at: new Date(clock).toISOString() }
       return record
@@ -185,8 +186,7 @@ describe('QueueScheduler', () => {
 
     const schedulerA = new QueueScheduler({ store, config: queueConfig(2), now: clockNow })
     const handleA = schedulerA.start()
-    const genA = handleA.generation
-    enqueueWith(store, genA, 'wf-1')
+    enqueueWith(store, handleA.lease, 'wf-1')
     schedulerA.start()
     assert.equal(loadStatus(store, 'wf-1'), 'leased')
 
@@ -202,14 +202,13 @@ describe('QueueScheduler', () => {
     const dir = tempDir('queue-scheduler-crash-')
     const store = new QueueStore({ config_directory: dir, owner: 'proc-a', now: clockNow })
     const handleA = store.getLeaseStore().acquire()
-    const genA = handleA.lease.fencing_generation
-    seedLeasedWorkflow(store, genA, 'wf-1', 'reserved')
+    seedLeasedWorkflow(store, handleA, 'wf-1', 'reserved')
 
     advance(61_000)
 
     const schedulerB = new QueueScheduler({ store, config: queueConfig(2), now: clockNow })
     const handleB = schedulerB.start()
-    assert.notEqual(handleB.generation, genA)
+    assert.notEqual(handleB.generation, handleA.lease.fencing_generation)
     await handleB.recover()
 
     const record = store.load('wf-1')!
@@ -224,8 +223,7 @@ describe('QueueScheduler', () => {
     const dir = tempDir('queue-scheduler-settled-')
     const store = new QueueStore({ config_directory: dir, owner: 'proc-a', now: clockNow })
     const handleA = store.getLeaseStore().acquire()
-    const genA = handleA.lease.fencing_generation
-    seedLeasedWorkflow(store, genA, 'wf-1', 'settled')
+    seedLeasedWorkflow(store, handleA, 'wf-1', 'settled')
 
     advance(61_000)
 
@@ -293,9 +291,8 @@ describe('QueueScheduler', () => {
     const dir = tempDir('queue-scheduler-mixed-')
     const store = new QueueStore({ config_directory: dir, owner: 'proc-a', now: clockNow })
     const handleA = store.getLeaseStore().acquire()
-    const genA = handleA.lease.fencing_generation
-    seedLeasedWorkflow(store, genA, 'wf-reserved', 'reserved')
-    seedLeasedWorkflow(store, genA, 'wf-settled', 'settled')
+    seedLeasedWorkflow(store, handleA, 'wf-reserved', 'reserved')
+    seedLeasedWorkflow(store, handleA, 'wf-settled', 'settled')
 
     advance(61_000)
 

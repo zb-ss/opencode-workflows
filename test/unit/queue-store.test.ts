@@ -58,7 +58,7 @@ function workflowInput(id = 'wf-1') {
 describe('QueueStore', () => {
   it('enqueues a workflow with fencing generation and revision 1', () => {
     const test = fixture()
-    const record = test.store.enqueue(workflowInput(), test.generation)
+    const record = test.store.enqueue(workflowInput(), test.handle)
 
     assert.equal(record.status, 'queued')
     assert.equal(record.state_revision, 1)
@@ -68,7 +68,7 @@ describe('QueueStore', () => {
 
   it('loads an enqueued workflow by ID', () => {
     const test = fixture()
-    test.store.enqueue(workflowInput(), test.generation)
+    test.store.enqueue(workflowInput(), test.handle)
     const loaded = test.store.load('wf-1')
 
     assert.notEqual(loaded, null)
@@ -83,18 +83,18 @@ describe('QueueStore', () => {
 
   it('rejects duplicate enqueue with already_exists', () => {
     const test = fixture()
-    test.store.enqueue(workflowInput(), test.generation)
+    test.store.enqueue(workflowInput(), test.handle)
     assert.throws(
-      () => test.store.enqueue(workflowInput(), test.generation),
+      () => test.store.enqueue(workflowInput(), test.handle),
       (err: Error) => err instanceof QueueStoreError && err.code === 'already_exists',
     )
   })
 
   it('updates a workflow with CAS on revision and generation', () => {
     const test = fixture()
-    const initial = test.store.enqueue(workflowInput(), test.generation)
+    const initial = test.store.enqueue(workflowInput(), test.handle)
 
-    const updated = test.store.update('wf-1', initial.state_revision, test.generation, (record) => {
+    const updated = test.store.update('wf-1', initial.state_revision, test.handle, (record) => {
       record.status = 'leased'
       return record
     })
@@ -105,31 +105,44 @@ describe('QueueStore', () => {
 
   it('rejects update with stale revision', () => {
     const test = fixture()
-    const initial = test.store.enqueue(workflowInput(), test.generation)
+    const initial = test.store.enqueue(workflowInput(), test.handle)
 
     assert.throws(
-      () => test.store.update('wf-1', initial.state_revision + 99, test.generation, () => initial),
+      () => test.store.update('wf-1', initial.state_revision + 99, test.handle, () => initial),
       (err: Error) => err instanceof QueueStoreError && err.code === 'stale_revision',
     )
   })
 
   it('rejects update with stale fencing generation', () => {
     const test = fixture()
-    const initial = test.store.enqueue(workflowInput(), test.generation)
+    const initial = test.store.enqueue(workflowInput(), test.handle)
+
+    // Simulate this scheduler losing authority and a new scheduler taking over.
+    // Expire the current lease and acquire a new, higher-generation lease in a
+    // separate store; passing the original handle should be rejected.
+    advance(61_000)
+    const newLeaseStore = new FencingLeaseStore({
+      lease_directory: path.join(test.dir, 'lease'),
+      owner: 'test-scheduler-next',
+      lease_duration_ms: 60_000,
+      now: clockNow,
+    })
+    const newHandle = newLeaseStore.acquire()
+    assert.ok(newHandle.lease.fencing_generation > test.generation, 'new generation should exceed the original')
 
     assert.throws(
-      () => test.store.update('wf-1', initial.state_revision, test.generation + 99, () => initial),
-      (err: Error) => err instanceof Error && /generation/.test(err.message),
+      () => test.store.update('wf-1', initial.state_revision, test.handle, () => initial),
+      (err: Error) => err instanceof Error && /generation|lease/.test(err.message),
     )
   })
 
   it('rebuilds the index from persisted workflow records', () => {
     const test = fixture()
-    test.store.enqueue(workflowInput('wf-a'), test.generation)
+    test.store.enqueue(workflowInput('wf-a'), test.handle)
     advance(1000)
-    test.store.enqueue(workflowInput('wf-b'), test.generation)
+    test.store.enqueue(workflowInput('wf-b'), test.handle)
     advance(1000)
-    test.store.enqueue(workflowInput('wf-c'), test.generation)
+    test.store.enqueue(workflowInput('wf-c'), test.handle)
 
     const index = test.store.rebuildIndex()
     assert.equal(index.length, 3)
@@ -141,15 +154,16 @@ describe('QueueStore', () => {
 
   it('skips corrupt records during index rebuild', () => {
     const test = fixture()
-    test.store.enqueue(workflowInput('wf-a'), test.generation)
-    test.store.enqueue(workflowInput('wf-b'), test.generation)
+    test.store.enqueue(workflowInput('wf-a'), test.handle)
+    test.store.enqueue(workflowInput('wf-b'), test.handle)
 
     const corruptPath = path.join(test.dir, 'workflows', 'wf-corrupt.json')
     fs.writeFileSync(corruptPath, '{ invalid json', { mode: 0o600 })
 
-    const index = test.store.rebuildIndex()
-    assert.equal(index.length, 2)
-    assert.equal(index.every(e => e.workflow_id !== 'wf-corrupt'), true)
+    assert.throws(
+      () => test.store.rebuildIndex(),
+      (err: Error) => err instanceof QueueStoreError && err.code === 'record_corrupt',
+    )
   })
 
   it('returns empty index when no workflows exist', () => {
@@ -159,9 +173,9 @@ describe('QueueStore', () => {
 
   it('persists launch intent through update', () => {
     const test = fixture()
-    const initial = test.store.enqueue(workflowInput(), test.generation)
+    const initial = test.store.enqueue(workflowInput(), test.handle)
 
-    const updated = test.store.update('wf-1', initial.state_revision, test.generation, (record) => {
+    const updated = test.store.update('wf-1', initial.state_revision, test.handle, (record) => {
       record.status = 'leased'
       record.launch_intent = {
         intent_id: 'intent-1',
@@ -199,9 +213,9 @@ describe('QueueStore', () => {
     const gen = handle.lease.fencing_generation
 
     const store1 = new QueueStore({ config_directory: dir, owner: 'proc-a', now: clockNow })
-    store1.enqueue(workflowInput('wf-a'), gen)
-    const initial = store1.enqueue(workflowInput('wf-b'), gen)
-    store1.update('wf-b', initial.state_revision, gen, (r) => { r.status = 'leased'; return r })
+    store1.enqueue(workflowInput('wf-a'), handle)
+    const initial = store1.enqueue(workflowInput('wf-b'), handle)
+    store1.update('wf-b', initial.state_revision, handle, (r) => { r.status = 'leased'; return r })
 
     const store2 = new QueueStore({ config_directory: dir, owner: 'proc-b', now: clockNow })
     const index = store2.rebuildIndex()

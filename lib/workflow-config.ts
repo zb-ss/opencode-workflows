@@ -166,6 +166,11 @@ export function enabledValidationBroker(config: ValidationBrokerConfig): Enabled
   return config as EnabledValidationBrokerConfig
 }
 
+export function validationOperationNames(config: ValidationBrokerConfig): string[] {
+  if (!config.enabled) return []
+  return Object.keys(enabledValidationBroker(config).operations).sort()
+}
+
 const ReviewLoopSchema = z.object({
   enabled: z.boolean().default(false),
   max_iterations: z.number().int().positive().max(MAX_REVIEW_ITERATIONS).optional(),

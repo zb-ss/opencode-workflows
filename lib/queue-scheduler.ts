@@ -2,7 +2,6 @@ import { randomUUID } from 'node:crypto'
 import path from 'node:path'
 
 import {
-  assertFencingGeneration,
   type FencingLeaseHandle,
   type FencingLeaseRecord,
 } from './fencing-lease.ts'
@@ -30,13 +29,14 @@ export interface QueueSchedulerOptions {
   store: QueueStore
   config: EnabledQueueConfig
   now: () => number
-  onWorkflowReady?: (workflowId: string) => void
+  onWorkflowReady?: (workflowId: string, leaseHandle: FencingLeaseHandle) => void
   interval?: (callback: () => void, delayMs: number) => unknown
   clearInterval?: (handle: unknown) => void
 }
 
 export interface QueueSchedulerHandle {
   generation: number
+  lease: FencingLeaseHandle
   renew(): void
   dispose(): void
   recover(): Promise<QueueRecoveryResult>
@@ -53,7 +53,6 @@ export interface QueueRecoveryResult {
 const AMBIGUOUS_LAUNCH_STATES: ReadonlySet<QueueLaunchState> = new Set(['reserved', 'created', 'prompted'])
 const TERMINAL_LAUNCH_STATES: ReadonlySet<QueueLaunchState> = new Set(['settled', 'ambiguous'])
 const CAPACITY_CONSUMING_STATUSES: ReadonlySet<QueueWorkflowStatus> = new Set(['leased', 'recovering', 'running'])
-const SAFE_REQUEUE_LAUNCH_STATES: ReadonlySet<QueueLaunchState> = new Set()
 
 function assertConfig(config: EnabledQueueConfig): Required<Pick<EnabledQueueConfig, 'max_concurrent_workflows' | 'lease_duration_ms' | 'renewal_interval_ms' | 'recovery_attempt_limit'>> {
   if (config.max_concurrent_workflows === undefined) {
@@ -86,7 +85,7 @@ export class QueueScheduler {
   private readonly store: QueueStore
   private readonly config: Required<Pick<EnabledQueueConfig, 'max_concurrent_workflows' | 'lease_duration_ms' | 'renewal_interval_ms' | 'recovery_attempt_limit'>>
   private readonly now: () => number
-  private readonly onWorkflowReady?: (workflowId: string) => void
+  private readonly onWorkflowReady?: (workflowId: string, leaseHandle: FencingLeaseHandle) => void
   private readonly intervalFn: (callback: () => void, delayMs: number) => unknown
   private readonly clearIntervalFn: (handle: unknown) => void
   private readonly rateLimiter: QueueRateLimiter | null
@@ -138,9 +137,11 @@ export class QueueScheduler {
 
   private handleFromCurrentLease(): QueueSchedulerHandle {
     const generation = this.leaseRecord!.fencing_generation
+    const leaseHandle = this.leaseHandle!
     const self = this
     return {
       generation,
+      lease: leaseHandle,
       renew(): void { self.renew() },
       dispose(): void { self.dispose() },
       async recover(): Promise<QueueRecoveryResult> { return await self.recover() },
@@ -162,8 +163,8 @@ export class QueueScheduler {
     if (this.leaseHandle === null || this.leaseRecord === null) {
       throw new QueueSchedulerError('no_lease', 'recovery requires an active lease')
     }
+    const leaseHandle = this.leaseHandle
     const generation = this.leaseRecord.fencing_generation
-    assertFencingGeneration(this.store.getLeaseStore(), generation)
     const index = this.store.rebuildIndex()
     for (const entry of index) {
       if (entry.fencing_generation > generation) {
@@ -175,14 +176,25 @@ export class QueueScheduler {
     for (const entry of index) {
       const record = this.store.load(entry.workflow_id)
       if (record === null) continue
-      if (record.launch_intent === null) continue
+      if (record.launch_intent === null) {
+        // Re-stamp records without launch intent under the new generation.
+        try {
+          this.store.reconcile(record.workflow_id, record.state_revision, leaseHandle, (next) => {
+            next.fencing_generation = generation
+            return next
+          })
+          reconciled += 1
+        } catch (error) {
+          failures.push({ workflow_id: record.workflow_id, error: (error as Error).message })
+        }
+        continue
+      }
       if (record.launch_intent.fencing_generation > generation) {
         throw new QueueSchedulerError('stale_generation', `launch intent carries a newer generation ${record.launch_intent.fencing_generation}`)
       }
       if (TERMINAL_LAUNCH_STATES.has(record.launch_intent.launch_state)) {
-        // Re-stamp settled/ambiguous records under the new generation
         try {
-          this.store.reconcile(record.workflow_id, record.state_revision, generation, (next) => {
+          this.store.reconcile(record.workflow_id, record.state_revision, leaseHandle, (next) => {
             next.fencing_generation = generation
             return next
           })
@@ -195,7 +207,7 @@ export class QueueScheduler {
       const isAmbiguous = AMBIGUOUS_LAUNCH_STATES.has(record.launch_intent.launch_state)
       try {
         if (isAmbiguous) {
-          this.store.reconcile(record.workflow_id, record.state_revision, generation, (next) => {
+          this.store.reconcile(record.workflow_id, record.state_revision, leaseHandle, (next) => {
             next.status = 'paused'
             next.pause_reason = 'ambiguous launch intent during recovery'
             if (next.launch_intent !== null) {
@@ -204,11 +216,8 @@ export class QueueScheduler {
             return next
           })
         } else {
-          this.store.reconcile(record.workflow_id, record.state_revision, generation, (next) => {
-            next.status = 'queued'
-            next.launch_intent = null
-            return next
-          })
+          // Apply retry policy and recovery ceiling before requeueing.
+          this.store.applyRetryPolicy(record.workflow_id, record.state_revision, leaseHandle)
         }
         reconciled += 1
       } catch (error) {
@@ -241,14 +250,16 @@ export class QueueScheduler {
       this.handleLeaseLoss()
       return
     }
+    const leaseHandle = this.leaseHandle
     const generation = this.leaseRecord.fencing_generation
+    let index: QueueIndexEntry[]
     try {
-      assertFencingGeneration(this.store.getLeaseStore(), generation)
+      index = this.store.rebuildIndex()
     } catch {
+      // A corrupt index is fail-closed: stop scheduling until attended repair.
       this.handleLeaseLoss()
       return
     }
-    const index = this.store.rebuildIndex()
     const activeCount = this.countActive(index)
     const maxConcurrent = this.config.max_concurrent_workflows
     if (activeCount >= maxConcurrent) return
@@ -256,7 +267,7 @@ export class QueueScheduler {
     let slots = maxConcurrent - activeCount
     for (const entry of queued) {
       if (slots <= 0) break
-      if (this.admitWorkflow(entry, generation)) slots -= 1
+      if (this.admitWorkflow(entry, generation, leaseHandle)) slots -= 1
     }
   }
 
@@ -268,14 +279,13 @@ export class QueueScheduler {
     return count
   }
 
-  private admitWorkflow(entry: QueueIndexEntry, generation: number): boolean {
+  private admitWorkflow(entry: QueueIndexEntry, generation: number, leaseHandle: FencingLeaseHandle): boolean {
     const record = this.store.load(entry.workflow_id)
     if (record === null) return false
     if (record.status !== 'queued') return false
     if (record.launch_intent !== null) return false
-    try {
-      assertFencingGeneration(this.store.getLeaseStore(), generation)
-    } catch {
+    if (record.retry_not_before !== null && this.now() < Date.parse(record.retry_not_before)) return false
+    if (!this.leaseHandle?.is_valid()) {
       this.handleLeaseLoss()
       return false
     }
@@ -284,13 +294,13 @@ export class QueueScheduler {
     }
     const reservedIntent = this.createReservedIntent(record, generation)
     try {
-      const updated = this.store.update(record.workflow_id, record.state_revision, record.fencing_generation, (next) => {
+      const updated = this.store.update(record.workflow_id, record.state_revision, leaseHandle, (next) => {
         next.status = 'leased'
         next.launch_intent = reservedIntent
         return next
       })
       if (updated.status !== 'leased' || updated.launch_intent === null) return false
-      this.onWorkflowReady?.(record.workflow_id)
+      this.onWorkflowReady?.(record.workflow_id, leaseHandle)
       return true
     } catch {
       return false
@@ -315,7 +325,14 @@ export class QueueScheduler {
   }
 
   private preserveLaunchIntents(): void {
-    const index = this.store.rebuildIndex()
+    if (this.leaseHandle === null) return
+    const leaseHandle = this.leaseHandle
+    let index: QueueIndexEntry[]
+    try {
+      index = this.store.rebuildIndex()
+    } catch {
+      return
+    }
     for (const entry of index) {
       if (entry.status !== 'leased') continue
       const record = this.store.load(entry.workflow_id)
@@ -326,7 +343,7 @@ export class QueueScheduler {
       // ambiguous and must be preserved as paused.
       if (!TERMINAL_LAUNCH_STATES.has(record.launch_intent.launch_state)) {
         try {
-          this.store.update(record.workflow_id, record.state_revision, record.fencing_generation, (next) => {
+          this.store.update(record.workflow_id, record.state_revision, leaseHandle, (next) => {
             next.status = 'paused'
             next.pause_reason = 'ambiguous launch intent preserved during lease loss'
             if (next.launch_intent !== null) {

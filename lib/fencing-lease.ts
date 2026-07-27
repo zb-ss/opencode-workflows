@@ -51,8 +51,22 @@ function leasePath(directory: string): string {
   return path.join(directory, 'fencing-lease.json')
 }
 
-function lockPath(directory: string): string {
+function lockDirectoryPath(directory: string): string {
   return path.join(directory, '.fencing-lock')
+}
+
+function stagingDirectoryPath(directory: string): string {
+  return path.join(directory, '.fencing-staging')
+}
+
+function lockTokenPath(lockDirectory: string): string {
+  return path.join(lockDirectory, 'holder.token')
+}
+
+interface LockToken {
+  pid: number
+  nonce: string
+  start_time: number | null
 }
 
 function isLeaseRecord(value: unknown): value is FencingLeaseRecord {
@@ -151,77 +165,331 @@ function isExpired(record: FencingLeaseRecord, now: () => number): boolean {
   return now() >= Date.parse(record.expires_at)
 }
 
+function processStartTime(): number | null {
+  // Return a stable per-process-incarnation identifier from /proc/self/stat.
+  // Field 22 (starttime) is the number of jiffies since system boot when the
+  // process started. It is stable for the lifetime of a process and changes
+  // when a PID is reused, which is exactly the property we need to detect
+  // stale lock ownership without falsely declaring a live process dead.
+  try {
+    const stat = fs.readFileSync('/proc/self/stat', 'utf8')
+    const close = stat.lastIndexOf(')')
+    if (close < 0) return null
+    const fields = stat.slice(close + 2).split(' ')
+    const starttimeJiffies = Number.parseInt(fields[19] ?? '', 10)
+    if (!Number.isFinite(starttimeJiffies) || starttimeJiffies < 0) return null
+    return starttimeJiffies
+  } catch {
+    return null
+  }
+}
+
+function isProcessAlive(pid: number, startTime: number | null): boolean {
+  try {
+    process.kill(pid, 0)
+  } catch {
+    return false
+  }
+  // If we cannot read /proc (non-Linux platforms), fall back to signal-only
+  // liveness. This accepts a small PID-reuse risk on those platforms.
+  if (startTime === null || pid <= 0) return true
+  try {
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8')
+    const close = stat.lastIndexOf(')')
+    if (close < 0) return false
+    const fields = stat.slice(close + 2).split(' ')
+    // man proc: field 22 (starttime) is the 20th field after comm (0-indexed [19]).
+    const starttimeJiffies = Number.parseInt(fields[19] ?? '', 10)
+    if (!Number.isFinite(starttimeJiffies)) return false
+    // Compare raw jiffies directly — no wall-clock conversion needed.
+    return starttimeJiffies === startTime
+  } catch {
+    // Unable to verify start time; fall back to signal-only liveness.
+    return true
+  }
+}
+
+function readLockToken(lockDirectory: string): LockToken | null {
+  const tokenFile = lockTokenPath(lockDirectory)
+  let content: string
+  try {
+    content = fs.readFileSync(tokenFile, 'utf8')
+  } catch {
+    return null
+  }
+  try {
+    const parsed = JSON.parse(content) as unknown
+    if (typeof parsed !== 'object' || parsed === null) return null
+    const record = parsed as Record<string, unknown>
+    const pid = Number(record.pid)
+    const nonce = String(record.nonce ?? '')
+    const start_time = record.start_time === null || record.start_time === undefined ? null : Number(record.start_time)
+    if (!Number.isInteger(pid) || pid <= 0 || nonce.length === 0) return null
+    return { pid, nonce, start_time: Number.isFinite(start_time) ? start_time : null }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Evaluate whether a canonical lock directory is safe to take over.
+ *
+ * Returns:
+ * - 'stale' if the recorded owner is provably dead and the caller may try
+ *   to quarantine and replace the lock.
+ * - 'contended' if the lock is held by a live owner; the caller should
+ *   keep retrying.
+ * - 'corrupt' if the lock directory is in an unrecoverable state
+ *   (tokenless, unreadable, or not a directory). The caller must fail
+ *   immediately rather than retrying, because no amount of waiting will
+ *   fix corruption.
+ */
+function evaluateLockState(lockDirectory: string): 'stale' | 'contended' | 'corrupt' {
+  let stat: fs.Stats
+  try {
+    stat = fs.lstatSync(lockDirectory)
+  } catch {
+    // No lock present. The caller's rename will win or lose atomically;
+    // treat as contended so the caller retries its own rename.
+    return 'contended'
+  }
+  if (!stat.isDirectory()) {
+    return 'corrupt'
+  }
+
+  const token = readLockToken(lockDirectory)
+  if (token === null) {
+    return 'corrupt'
+  }
+
+  if (isProcessAlive(token.pid, token.start_time)) {
+    return 'contended'
+  }
+
+  return 'stale'
+}
+
+/**
+ * Cross-process lock built on atomic directory rename.
+ *
+ * Protocol:
+ *
+ * 1. Create a uniquely named private candidate directory.
+ * 2. Write holder.token completely into the candidate and fsync it.
+ * 3. Atomically rename the candidate onto the canonical .fencing-lock path.
+ *    POSIX guarantees rename replaces the target atomically: the canonical
+ *    path is either the old lock or our new lock, never empty and never two
+ *    directories at once.
+ *
+ * A canonical lock path therefore always holds a valid token; a tokenless
+ * canonical lock is treated as corruption and never auto-removed.
+ *
+ * Stale takeover:
+ * - Prove the recorded owner is dead (isStaleLock).
+ * - Atomically rename the canonical lock to a unique quarantine path.
+ * - Delete only the quarantine path owned by this takeover attempt.
+ * - The canonical lock path is never recursively rmSync'd directly.
+ *
+ * Release:
+ * - Verify the exact nonce and inode identity.
+ * - Atomically rename the canonical lock to a unique release path.
+ * - Delete only that release path.
+ * - Never remove a lock that no longer matches the holder.
+ */
 class CrossProcessLock {
-  private readonly lockFile: string
-  private readonly directory: string
-  private held = false
+  private readonly lockDirectory: string
+  private readonly stagingDirectory: string
+  private nonce: string | null = null
+  private heldInode: { dev: number; ino: number } | null = null
 
   constructor(directory: string) {
-    this.directory = directory
-    this.lockFile = lockPath(directory)
+    this.lockDirectory = lockDirectoryPath(directory)
+    this.stagingDirectory = stagingDirectoryPath(directory)
   }
 
   acquire(): void {
-    if (this.held) return
+    if (this.nonce !== null) return
+    fs.mkdirSync(this.stagingDirectory, { recursive: true, mode: DIR_MODE })
     const deadline = Date.now() + LOCK_STALE_MS
     let attempts = 0
     while (attempts < LOCK_RETRY_LIMIT) {
-      let fd: number | null = null
       try {
-        fd = fs.openSync(this.lockFile, fs.constants.O_WRONLY | fs.constants.O_CREAT | O_EXCL | O_NOFOLLOW, FILE_MODE)
-        fs.writeFileSync(fd, String(process.pid), { encoding: 'utf8' })
-        fs.fsyncSync(fd)
-        fs.closeSync(fd)
-        fd = null
-        this.held = true
+        this.tryAcquireOnce()
         return
       } catch (error) {
-        if (fd !== null) { try { fs.closeSync(fd) } catch {} }
-        if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
-          if (this.isStale()) {
-            try { fs.unlinkSync(this.lockFile) } catch {}
-            continue
-          }
-          if (Date.now() > deadline) {
-            throw new FencingLeaseError('lock_timeout', `could not acquire the cross-process lock within ${LOCK_STALE_MS}ms`)
-          }
-          const elapsed = Date.now() - deadline + LOCK_STALE_MS
-          if (elapsed > 0 && elapsed % 100 < LOCK_RETRY_MS) {
-            // Log nothing; this is a tight retry loop.
-          }
-          attempts += 1
-          const sleepMs = Math.min(LOCK_RETRY_MS * attempts, 50)
-          const end = Date.now() + sleepMs
-          while (Date.now() < end) { /* busy wait — operations are sub-millisecond */ }
-          continue
+        if (!(error instanceof FencingLeaseError) || (error.code !== 'lock_contended' && error.code !== 'lock_stale_retry')) {
+          throw error
         }
-        throw error
       }
+      if (Date.now() > deadline) {
+        throw new FencingLeaseError('lock_timeout', `could not acquire the cross-process lock within ${LOCK_STALE_MS}ms`)
+      }
+      attempts += 1
+      const sleepMs = Math.min(LOCK_RETRY_MS * attempts, 50)
+      const end = Date.now() + sleepMs
+      while (Date.now() < end) { /* busy wait — operations are sub-millisecond */ }
     }
     throw new FencingLeaseError('lock_timeout', `could not acquire the cross-process lock after ${LOCK_RETRY_LIMIT} attempts`)
   }
 
-  private isStale(): boolean {
+  private tryAcquireOnce(): void {
+    // 0. Evaluate the current state of the canonical lock path. This prevents
+    // rename from silently replacing an empty (tokenless) corrupt lock.
+    if (fs.existsSync(this.lockDirectory)) {
+      const lockState = evaluateLockState(this.lockDirectory)
+      if (lockState === 'corrupt') {
+        throw new FencingLeaseError('lock_corrupt', 'canonical lock is corrupt; manual intervention required')
+      }
+      if (lockState === 'contended') {
+        throw new FencingLeaseError('lock_contended', 'lock is held by a live owner')
+      }
+      // lockState === 'stale': quarantine the dead lock, then try to install
+      // our candidate below.
+      if (lockState === 'stale') {
+        this.quarantineStaleLock()
+        // After quarantine, the canonical path should be absent; the rename
+        // below will install our candidate. If a concurrent winner raced
+        // us, the rename will fail with ENOTEMPTY and we'll retry.
+      }
+    }
+
+    // 1. Build a fully initialized candidate directory with a unique name.
+    const candidate = path.join(this.stagingDirectory, `candidate-${process.pid}-${randomUUID()}`)
+    fs.mkdirSync(candidate, { recursive: false, mode: DIR_MODE })
+
+    this.nonce = randomUUID()
+    const token: LockToken = { pid: process.pid, nonce: this.nonce, start_time: processStartTime() }
+    const tokenFile = lockTokenPath(candidate)
+    let fd: number | null = null
     try {
-      const content = fs.readFileSync(this.lockFile, 'utf8').trim()
-      const pid = parseInt(content, 10)
-      if (!Number.isFinite(pid) || pid <= 0) return true
-      try { process.kill(pid, 0) } catch { return true }
-      return false
+      fd = fs.openSync(tokenFile, fs.constants.O_WRONLY | fs.constants.O_CREAT | O_EXCL | O_NOFOLLOW, FILE_MODE)
+      fs.writeFileSync(fd, JSON.stringify(token), { encoding: 'utf8' })
+      fs.fsyncSync(fd)
+      fs.closeSync(fd)
+      fd = null
+      fsyncDirectory(candidate)
+    } catch (error) {
+      if (fd !== null) { try { fs.closeSync(fd) } catch {} }
+      this.nonce = null
+      try { fs.rmSync(candidate, { recursive: true, force: true }) } catch {}
+      throw error
+    }
+
+    // 2. Attempt atomic rename onto the canonical lock path.
+    try {
+      fs.renameSync(candidate, this.lockDirectory)
+      fsyncDirectory(this.stagingDirectory)
+    } catch (error) {
+      // Candidate cleanup is safe: we own the uniquely named candidate.
+      this.nonce = null
+      try { fs.rmSync(candidate, { recursive: true, force: true }) } catch {}
+      const code = (error as NodeJS.ErrnoException).code
+      if (code === 'ENOTEMPTY' || code === 'EEXIST') {
+        // A concurrent winner installed a fresh lock between our state check
+        // and our rename. Re-evaluate and either retry or fail.
+        const lockState = evaluateLockState(this.lockDirectory)
+        if (lockState === 'corrupt') {
+          throw new FencingLeaseError('lock_corrupt', 'canonical lock is corrupt; manual intervention required')
+        }
+        if (lockState === 'stale') {
+          this.quarantineStaleLock()
+          throw new FencingLeaseError('lock_stale_retry', 'stale lock quarantined; retry acquisition')
+        }
+        throw new FencingLeaseError('lock_contended', 'lock is held by a live owner')
+      }
+      if (code === 'ENOENT') {
+        // The parent vanished between mkdir and rename; retry will recreate.
+        throw new FencingLeaseError('lock_contended', 'staging directory vanished; retry')
+      }
+      throw error
+    }
+
+    // 3. Capture the inode identity of the lock we now own, so release can
+    // prove it is removing the exact directory we created and not a later
+    // owner's lock that reused the canonical path after we lost authority.
+    try {
+      const stat = fs.statSync(this.lockDirectory, { bigint: true })
+      this.heldInode = { dev: Number(stat.dev), ino: Number(stat.ino) }
     } catch {
-      return true
+      // If we cannot stat our own lock, fail closed: we hold authority but
+      // cannot prove identity for safe release. Treat as acquisition failure.
+      this.nonce = null
+      try { fs.rmSync(this.lockDirectory, { recursive: true, force: true }) } catch {}
+      throw new FencingLeaseError('lock_corrupt', 'could not stat the acquired lock')
     }
   }
 
+  /**
+   * Quarantine a provably-stale canonical lock by renaming it to a unique
+   * quarantine path owned by this takeover attempt, then deleting only that
+   * quarantine path. The canonical lock path is never recursively rmSync'd
+   * directly, so a concurrent winner's lock cannot be destroyed by mistake.
+   */
+  private quarantineStaleLock(): void {
+    const quarantine = path.join(this.stagingDirectory, `quarantine-${process.pid}-${randomUUID()}`)
+    try {
+      fs.renameSync(this.lockDirectory, quarantine)
+      fsyncDirectory(this.stagingDirectory)
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code
+      if (code === 'ENOENT') {
+        // Another takeover already removed it; nothing to quarantine.
+        return
+      }
+      if (code === 'ENOTEMPTY' || code === 'EEXIST') {
+        // A concurrent winner renamed a fresh lock into place between our
+        // isStaleLock check and this rename. The fresh lock belongs to a live
+        // owner; do not touch it.
+        return
+      }
+      throw error
+    }
+    // Delete only the uniquely named quarantine directory we own.
+    try { fs.rmSync(quarantine, { recursive: true, force: true }) } catch {}
+  }
+
   release(): void {
-    if (!this.held) return
-    this.held = false
-    try { fs.unlinkSync(this.lockFile) } catch {}
-    fsyncDirectory(this.directory)
+    if (this.nonce === null || this.heldInode === null) return
+    const expectedNonce = this.nonce
+    const expectedInode = this.heldInode
+    this.nonce = null
+    this.heldInode = null
+
+    // Verify we still own the exact lock by nonce AND inode identity. If a
+    // later owner took over (we timed out, crashed, or lost authority), the
+    // canonical path now holds a different directory; we must not remove it.
+    let currentStat: fs.Stats | fs.BigIntStats
+    try {
+      currentStat = fs.statSync(this.lockDirectory, { bigint: true })
+    } catch {
+      // Already gone — nothing to release.
+      return
+    }
+    if (Number((currentStat as fs.BigIntStats).dev) !== expectedInode.dev || Number((currentStat as fs.BigIntStats).ino) !== expectedInode.ino) {
+      return
+    }
+    const token = readLockToken(this.lockDirectory)
+    if (token === null || token.nonce !== expectedNonce) {
+      return
+    }
+
+    // Atomically rename our lock to a uniquely named release path, then
+    // delete only that path. The canonical path is never recursively
+    // rmSync'd directly.
+    const releaseDir = path.join(this.stagingDirectory, `release-${process.pid}-${randomUUID()}`)
+    try {
+      fs.renameSync(this.lockDirectory, releaseDir)
+      fsyncDirectory(this.stagingDirectory)
+    } catch {
+      // If rename fails, leave the lock to expire naturally; do not risk
+      // removing someone else's directory.
+      return
+    }
+    try { fs.rmSync(releaseDir, { recursive: true, force: true }) } catch {}
   }
 }
 
-function withLock<T>(directory: string, fn: () => T): T {
+export function withLock<T>(directory: string, fn: () => T): T {
   const lock = new CrossProcessLock(directory)
   lock.acquire()
   try {
@@ -250,7 +518,7 @@ function withLock<T>(directory: string, fn: () => T): T {
  *
  * Platform assumptions:
  * - POSIX filesystem with atomic rename on the same filesystem.
- * - O_EXCL is atomic across processes (guaranteed by POSIX).
+ * - Directory creation is atomic across processes (guaranteed by POSIX).
  * - fsync is honored by the underlying storage.
  * - The lease directory is on a local filesystem (not NFS).
  */

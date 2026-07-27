@@ -137,14 +137,27 @@ export async function recoverEpic(options: EpicRecoveryOptions): Promise<EpicRec
       try { parents = options.runtime.mergeParents(options.project_root, head) } catch { /* ambiguous below */ }
       if (parents.length === 2 && parents[0] === intent.expected_target_commit && parents[1] === intent.expected_source_commit) {
         try {
-          options.runtime.verifyRecoveredIntegration({
-            project_root: options.project_root,
-            project_identity_sha256: next.project_identity_sha256,
-            integration_branch: next.integration_branch,
-            expected_target_commit: intent.expected_target_commit,
-            source_checkpoint_commit: intent.expected_source_commit,
-            result_commit: head,
-          })
+          try {
+            options.runtime.verifyRecoveredIntegration({
+              project_root: options.project_root,
+              project_identity_sha256: next.project_identity_sha256,
+              integration_branch: next.integration_branch,
+              expected_target_commit: intent.expected_target_commit,
+              source_checkpoint_commit: intent.expected_source_commit,
+              result_commit: head,
+            })
+          } catch {
+            // One-shot repair: if the reviewed merge commit is still published,
+            // force the canonical worktree/index to match it.
+            options.runtime.repairRecoveredIntegration({
+              project_root: options.project_root,
+              project_identity_sha256: next.project_identity_sha256,
+              integration_branch: next.integration_branch,
+              expected_target_commit: intent.expected_target_commit,
+              source_checkpoint_commit: intent.expected_source_commit,
+              result_commit: head,
+            })
+          }
           const item = next.items[intent.item_id]!
           next = transitionEpicItemToIntegrated(next, intent.item_id, {
             event_id: compositeId(intent.intent_id, 'recovered'),

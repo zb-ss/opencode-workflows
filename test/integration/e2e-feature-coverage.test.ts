@@ -362,13 +362,13 @@ describe('E2E: all new features', { concurrency: false }, () => {
       const wf1 = store.enqueue({
         workflow_id: 'wf-1', definition_id: 'dev', root_session_id: 'root-1',
         directory: '/project', worktree: '/project', mode: 'standard', task: 'Task 1',
-      }, gen)
+      }, handle.lease)
       assert.equal(wf1.status, 'queued')
 
       const wf2 = store.enqueue({
         workflow_id: 'wf-2', definition_id: 'dev', root_session_id: 'root-1',
         directory: '/project', worktree: '/project', mode: 'standard', task: 'Task 2',
-      }, gen)
+      }, handle.lease)
       assert.equal(wf2.status, 'queued')
 
       scheduler.schedule()
@@ -377,15 +377,15 @@ describe('E2E: all new features', { concurrency: false }, () => {
       assert.equal(indexAfterSchedule.filter(e => e.status === 'leased').length, 2)
 
       const loaded = store.load('wf-1')!
-      store.update('wf-1', loaded.state_revision, loaded.fencing_generation, (r) => { r.status = 'paused'; r.pause_reason = 'Manual pause'; return r })
+      store.update('wf-1', loaded.state_revision, handle.lease, (r) => { r.status = 'paused'; r.pause_reason = 'Manual pause'; return r })
       assert.equal(store.load('wf-1')!.status, 'paused')
 
       const paused = store.load('wf-1')!
-      store.update('wf-1', paused.state_revision, paused.fencing_generation, (r) => { r.status = 'queued'; r.pause_reason = null; return r })
+      store.update('wf-1', paused.state_revision, handle.lease, (r) => { r.status = 'queued'; r.pause_reason = null; return r })
       assert.equal(store.load('wf-1')!.status, 'queued')
 
       const resumed = store.load('wf-2')!
-      store.update('wf-2', resumed.state_revision, resumed.fencing_generation, (r) => { r.status = 'cancelled'; r.pause_reason = 'Not needed'; return r })
+      store.update('wf-2', resumed.state_revision, handle.lease, (r) => { r.status = 'cancelled'; r.pause_reason = 'Not needed'; return r })
       assert.equal(store.load('wf-2')!.status, 'cancelled')
 
       const finalIndex = store.rebuildIndex()

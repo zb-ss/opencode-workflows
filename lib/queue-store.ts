@@ -4,12 +4,12 @@ import path from 'node:path'
 
 import {
   FencingLeaseStore,
-  assertFencingGeneration,
+  FencingLeaseHandle,
+  withLock,
 } from './fencing-lease.ts'
 import {
   QUEUE_SCHEMA_VERSION,
   QueueWorkflowRecordSchema,
-  QueueWorkflowStatusSchema,
   isValidTransition,
   type QueueWorkflowRecord,
   type QueueWorkflowStatus,
@@ -17,6 +17,9 @@ import {
 } from './queue-contracts.ts'
 import { emptyAutomationUsageTelemetry } from './epic-budget-usage.ts'
 import { sha256Hex } from './canonical-json.ts'
+import type { EnabledQueueConfig, QueueBudget } from './queue-policy.ts'
+import { isFailureRetryable, transportBackoffDelayMs } from './automation-retry-policy.ts'
+import type { FailureClass } from './automation-policy-contracts.ts'
 
 const FILE_MODE = 0o600
 const DIR_MODE = 0o700
@@ -38,6 +41,9 @@ export interface QueueStoreOptions {
   now: () => number
   lease_duration_ms?: number
   max_workflows?: number
+  budgets?: QueueBudget[]
+  retry_policy?: EnabledQueueConfig['retry_policy']
+  recovery_attempt_limit?: number
 }
 
 export interface QueueWorkflowInput {
@@ -77,6 +83,51 @@ function validateDirectory(directory: string): void {
   }
 }
 
+function safeWorkflowFileName(workflowId: string): string {
+  // SafeIdentifierSchema guarantees this, but we also reject any path separators.
+  if (workflowId.includes('/') || workflowId.includes('\\') || workflowId.includes('\0')) {
+    throw new QueueStoreError('unsafe_workflow_id', `workflow ID contains path separators: ${workflowId}`)
+  }
+  return `${workflowId}.json`
+}
+
+function assertAuthority(leaseStore: FencingLeaseStore, handle: FencingLeaseHandle): void {
+  leaseStore.assertAuthority(handle.lease.fencing_generation, handle.lease.lease_id)
+}
+
+function incrementRetryCounters(record: QueueWorkflowRecord, failure: FailureClass | null): QueueWorkflowRecord['retry_counters'] {
+  const counters = record.retry_counters ?? { semantic_attempts: 0, contract_attempts: 0, transport_attempts: 0, consecutive_no_progress_attempts: 0 }
+  if (failure === 'semantic') return { ...counters, semantic_attempts: counters.semantic_attempts + 1 }
+  if (failure === 'contract') return { ...counters, contract_attempts: counters.contract_attempts + 1 }
+  if (failure === 'transport') return { ...counters, transport_attempts: counters.transport_attempts + 1 }
+  return counters
+}
+
+function transportRetryNotBefore(policy: NonNullable<QueueStoreOptions['retry_policy']>, now: number, retryIndex: number): string | null {
+  try {
+    const delay = transportBackoffDelayMs(policy, retryIndex)
+    return new Date(now + delay).toISOString()
+  } catch {
+    return null
+  }
+}
+
+function shouldRequeueAfterFailure(record: QueueWorkflowRecord, config: Pick<QueueStoreOptions, 'retry_policy' | 'recovery_attempt_limit'>): { requeue: boolean; reason: string | null } {
+  if (record.status !== 'failed' && record.status !== 'paused') return { requeue: true, reason: null }
+  if ((record.recovery_attempt_count ?? 0) >= (config.recovery_attempt_limit ?? Number.MAX_SAFE_INTEGER)) {
+    return { requeue: false, reason: 'recovery attempt limit exceeded' }
+  }
+  if (record.failure_classification === null) return { requeue: true, reason: null }
+  if (record.failure_classification === 'ambiguous_launch' || record.failure_classification === 'cancelled') {
+    return { requeue: false, reason: `failure classification ${record.failure_classification} is not retryable` }
+  }
+  const counters = incrementRetryCounters(record, record.failure_classification)!
+  if (config.retry_policy && !isFailureRetryable(record.failure_classification, counters, config.retry_policy)) {
+    return { requeue: false, reason: 'retry policy ceiling reached' }
+  }
+  return { requeue: true, reason: null }
+}
+
 export class QueueStore {
   private readonly directory: string
   private readonly workflowsDir: string
@@ -84,6 +135,9 @@ export class QueueStore {
   private readonly now: () => number
   private readonly owner: string
   private readonly maxWorkflows: number
+  private readonly budgets: QueueBudget[]
+  private readonly retryPolicy: EnabledQueueConfig['retry_policy'] | undefined
+  private readonly recoveryAttemptLimit: number
 
   constructor(options: QueueStoreOptions) {
     this.directory = path.resolve(options.config_directory)
@@ -91,6 +145,9 @@ export class QueueStore {
     this.owner = options.owner
     this.now = options.now
     this.maxWorkflows = options.max_workflows ?? 256
+    this.budgets = options.budgets ?? []
+    this.retryPolicy = options.retry_policy
+    this.recoveryAttemptLimit = options.recovery_attempt_limit ?? Number.MAX_SAFE_INTEGER
     validateDirectory(this.directory)
     fs.mkdirSync(this.workflowsDir, { recursive: true, mode: DIR_MODE })
     validateDirectory(this.workflowsDir)
@@ -102,37 +159,41 @@ export class QueueStore {
     })
   }
 
-  enqueue(input: QueueWorkflowInput, fencingGeneration: number): QueueWorkflowRecord {
-    assertFencingGeneration(this.leaseStore, fencingGeneration)
-    const index = this.rebuildIndex()
-    if (index.length >= this.maxWorkflows) {
-      throw new QueueStoreError('queue_full', `queue is at capacity (${this.maxWorkflows} workflows)`)
-    }
-    const nowIso = new Date(this.now()).toISOString()
-    const record: QueueWorkflowRecord = {
-      schema_version: QUEUE_SCHEMA_VERSION,
-      workflow_id: input.workflow_id,
-      definition_id: input.definition_id,
-      root_session_id: input.root_session_id,
-      directory: input.directory,
-      worktree: input.worktree,
-      mode: input.mode,
-      task: input.task,
-      status: 'queued',
-      pause_reason: null,
-      fencing_generation: fencingGeneration,
-      state_revision: 1,
-      launch_intent: null,
-      failure_classification: null,
-      retry_counters: null,
-      retry_not_before: null,
-      created_at: nowIso,
-      updated_at: nowIso,
-      usage: emptyAutomationUsageTelemetry(),
-    }
-    const parsed = QueueWorkflowRecordSchema.parse(record)
-    this.writeWorkflowRecord(parsed)
-    return parsed
+  enqueue(input: QueueWorkflowInput, leaseHandle: FencingLeaseHandle): QueueWorkflowRecord {
+    return withLock(this.directory, () => {
+      assertAuthority(this.leaseStore, leaseHandle)
+      const index = this.rebuildIndexLocked()
+      if (index.length >= this.maxWorkflows) {
+        throw new QueueStoreError('queue_full', `queue is at capacity (${this.maxWorkflows} workflows)`)
+      }
+      this.assertSessionsBudgetsLocked(index, input.definition_id)
+      const nowIso = new Date(this.now()).toISOString()
+      const record: QueueWorkflowRecord = {
+        schema_version: QUEUE_SCHEMA_VERSION,
+        workflow_id: input.workflow_id,
+        definition_id: input.definition_id,
+        root_session_id: input.root_session_id,
+        directory: input.directory,
+        worktree: input.worktree,
+        mode: input.mode,
+        task: input.task,
+        status: 'queued',
+        pause_reason: null,
+        fencing_generation: leaseHandle.lease.fencing_generation,
+        state_revision: 1,
+        launch_intent: null,
+        failure_classification: null,
+        retry_counters: null,
+        retry_not_before: null,
+        recovery_attempt_count: 0,
+        created_at: nowIso,
+        updated_at: nowIso,
+        usage: emptyAutomationUsageTelemetry(),
+      }
+      const parsed = QueueWorkflowRecordSchema.parse(record)
+      this.writeWorkflowRecord(parsed)
+      return parsed
+    })
   }
 
   load(workflowId: string): QueueWorkflowRecord | null {
@@ -151,80 +212,99 @@ export class QueueStore {
   update(
     workflowId: string,
     expectedRevision: number,
-    expectedGeneration: number,
+    leaseHandle: FencingLeaseHandle,
     mutate: (record: QueueWorkflowRecord) => QueueWorkflowRecord,
   ): QueueWorkflowRecord {
-    assertFencingGeneration(this.leaseStore, expectedGeneration)
-    const current = this.load(workflowId)
-    if (!current) throw new QueueStoreError('missing', `workflow ${workflowId} not found`)
-    if (current.state_revision !== expectedRevision) {
-      throw new QueueStoreError('stale_revision', `expected revision ${expectedRevision}, found ${current.state_revision}`)
-    }
-    if (current.fencing_generation !== expectedGeneration) {
-      throw new QueueStoreError('stale_generation', `expected generation ${expectedGeneration}, found ${current.fencing_generation}`)
-    }
-    const next = mutate(structuredClone(current))
-    if (!isValidTransition(current.status, next.status)) {
-      throw new QueueStoreError('invalid_transition', `transition from '${current.status}' to '${next.status}' is not permitted`)
-    }
-    next.state_revision = current.state_revision + 1
-    next.updated_at = new Date(this.now()).toISOString()
-    const parsed = QueueWorkflowRecordSchema.parse(next)
-    this.replaceWorkflowRecord(parsed)
-    return parsed
+    return withLock(this.directory, () => {
+      assertAuthority(this.leaseStore, leaseHandle)
+      const current = this.loadLocked(workflowId)
+      if (!current) throw new QueueStoreError('missing', `workflow ${workflowId} not found`)
+      if (current.state_revision !== expectedRevision) {
+        throw new QueueStoreError('stale_revision', `expected revision ${expectedRevision}, found ${current.state_revision}`)
+      }
+      const next = mutate(structuredClone(current))
+      if (!isValidTransition(current.status, next.status)) {
+        throw new QueueStoreError('invalid_transition', `transition from '${current.status}' to '${next.status}' is not permitted`)
+      }
+      next.state_revision = current.state_revision + 1
+      next.updated_at = new Date(this.now()).toISOString()
+      next.fencing_generation = leaseHandle.lease.fencing_generation
+      const parsed = QueueWorkflowRecordSchema.parse(next)
+      this.replaceWorkflowRecord(parsed)
+      return parsed
+    })
   }
 
+  /**
+   * Reconcile a workflow record during attended recovery. Unlike `update`,
+   * the CAS check compares the on-disk state_revision against the caller's
+   * expected revision. The caller MUST hold a valid lease and pass the
+   * current lease handle; the previous record's fencing_generation is
+   * overwritten with the lease's generation.
+   */
   reconcile(
     workflowId: string,
     expectedRevision: number,
-    newGeneration: number,
+    leaseHandle: FencingLeaseHandle,
     mutate: (record: QueueWorkflowRecord) => QueueWorkflowRecord,
   ): QueueWorkflowRecord {
-    assertFencingGeneration(this.leaseStore, newGeneration)
-    const current = this.load(workflowId)
-    if (!current) throw new QueueStoreError('missing', `workflow ${workflowId} not found`)
-    if (current.state_revision !== expectedRevision) {
-      throw new QueueStoreError('stale_revision', `expected revision ${expectedRevision}, found ${current.state_revision}`)
-    }
-    const next = mutate(structuredClone(current))
-    if (!isValidTransition(current.status, next.status)) {
-      throw new QueueStoreError('invalid_transition', `transition from '${current.status}' to '${next.status}' is not permitted`)
-    }
-    next.state_revision = current.state_revision + 1
-    next.fencing_generation = newGeneration
-    next.updated_at = new Date(this.now()).toISOString()
-    const parsed = QueueWorkflowRecordSchema.parse(next)
-    this.replaceWorkflowRecord(parsed)
-    return parsed
+    return withLock(this.directory, () => {
+      assertAuthority(this.leaseStore, leaseHandle)
+      const current = this.loadLocked(workflowId)
+      if (!current) throw new QueueStoreError('missing', `workflow ${workflowId} not found`)
+      if (current.state_revision !== expectedRevision) {
+        throw new QueueStoreError('stale_revision', `expected revision ${expectedRevision}, found ${current.state_revision}`)
+      }
+      const next = mutate(structuredClone(current))
+      if (!isValidTransition(current.status, next.status)) {
+        throw new QueueStoreError('invalid_transition', `transition from '${current.status}' to '${next.status}' is not permitted`)
+      }
+      next.state_revision = current.state_revision + 1
+      next.fencing_generation = leaseHandle.lease.fencing_generation
+      next.updated_at = new Date(this.now()).toISOString()
+      const parsed = QueueWorkflowRecordSchema.parse(next)
+      this.replaceWorkflowRecord(parsed)
+      return parsed
+    })
   }
 
-  rebuildIndex(): QueueIndexEntry[] {
-    const entries: QueueIndexEntry[] = []
-    let files: string[]
-    try { files = fs.readdirSync(this.workflowsDir) } catch { return [] }
-    for (const file of files) {
-      if (!file.endsWith('.json')) continue
-      const workflowId = file.slice(0, -5)
-      try {
-        const record = this.load(workflowId)
-        if (record) {
-          entries.push({
-            workflow_id: record.workflow_id,
-            status: record.status,
-            fencing_generation: record.fencing_generation,
-            state_revision: record.state_revision,
-            updated_at: record.updated_at,
-          })
-        }
-      } catch {
-        // Corrupt records are reported, not silently dropped.
-        // In a production system this would trigger a health alert.
-        // For now, we skip to avoid blocking the entire index rebuild.
-        // The load() method throws on corrupt records, so the caller
-        // can distinguish missing from corrupt.
+  /**
+   * Decide whether a failed/paused record should be requeued, applying the
+   * configured retry policy and recovery attempt ceiling. Returns the
+   * reconciled record if requeued, or a terminal record if retry is blocked.
+   */
+  applyRetryPolicy(
+    workflowId: string,
+    expectedRevision: number,
+    leaseHandle: FencingLeaseHandle,
+  ): QueueWorkflowRecord {
+    return this.update(workflowId, expectedRevision, leaseHandle, (record) => {
+      const decision = shouldRequeueAfterFailure(record, { retry_policy: this.retryPolicy, recovery_attempt_limit: this.recoveryAttemptLimit })
+      if (!decision.requeue) {
+        record.status = 'failed'
+        record.pause_reason = decision.reason
+        return record
       }
-    }
-    return entries.sort((a, b) => a.updated_at.localeCompare(b.updated_at))
+      record.status = 'queued'
+      record.pause_reason = null
+      record.failure_classification = null
+      record.retry_counters = incrementRetryCounters(record, record.failure_classification)
+      if (record.failure_classification === 'transport' && this.retryPolicy) {
+        const transportAttempts = record.retry_counters!.transport_attempts
+        record.retry_not_before = transportRetryNotBefore(this.retryPolicy, this.now(), Math.max(0, transportAttempts - 1))
+      } else {
+        record.retry_not_before = null
+      }
+      record.recovery_attempt_count = (record.recovery_attempt_count ?? 0) + 1
+      return record
+    })
+  }
+
+  /**
+   * Build the queue index. Throws on corrupt records (fail-closed).
+   */
+  rebuildIndex(): QueueIndexEntry[] {
+    return withLock(this.directory, () => this.rebuildIndexLocked())
   }
 
   getLeaseStore(): FencingLeaseStore {
@@ -240,7 +320,57 @@ export class QueueStore {
   }
 
   private workflowPath(workflowId: string): string {
-    return path.join(this.workflowsDir, `${workflowId}.json`)
+    return path.join(this.workflowsDir, safeWorkflowFileName(workflowId))
+  }
+
+  private loadLocked(workflowId: string): QueueWorkflowRecord | null {
+    const filePath = this.workflowPath(workflowId)
+    if (!fs.existsSync(filePath)) return null
+    try {
+      const content = fs.readFileSync(filePath, 'utf8')
+      const parsed = JSON.parse(content) as unknown
+      return QueueWorkflowRecordSchema.parse(parsed)
+    } catch (error) {
+      if (error instanceof QueueStoreError) throw error
+      throw new QueueStoreError('record_corrupt', `workflow ${workflowId} has a corrupt or unreadable record: ${(error as Error).message}`)
+    }
+  }
+
+  private rebuildIndexLocked(): QueueIndexEntry[] {
+    const entries: QueueIndexEntry[] = []
+    let files: string[]
+    try { files = fs.readdirSync(this.workflowsDir) } catch { return [] }
+    for (const file of files) {
+      if (!file.endsWith('.json')) continue
+      const workflowId = file.slice(0, -5)
+      const record = this.loadLocked(workflowId)
+      if (record) {
+        entries.push({
+          workflow_id: record.workflow_id,
+          status: record.status,
+          fencing_generation: record.fencing_generation,
+          state_revision: record.state_revision,
+          updated_at: record.updated_at,
+        })
+      }
+    }
+    return entries.sort((a, b) => a.updated_at.localeCompare(b.updated_at))
+  }
+
+  private assertSessionsBudgetsLocked(index: QueueIndexEntry[], definitionId: string): void {
+    const totalWorkflows = index.length
+    const definitionWorkflows = index.filter(entry => {
+      const record = this.loadLocked(entry.workflow_id)
+      return record?.definition_id === definitionId
+    }).length
+    for (const budget of this.budgets) {
+      if (budget.limit === null || budget.dimension !== 'sessions') continue
+      const limit = budget.limit
+      const current = budget.scope === 'global' ? totalWorkflows : definitionWorkflows
+      if (current >= limit) {
+        throw new QueueStoreError('budget_exhausted', `queue ${budget.scope} sessions budget exhausted (${current} / ${limit})`)
+      }
+    }
   }
 
   private writeWorkflowRecord(record: QueueWorkflowRecord): void {

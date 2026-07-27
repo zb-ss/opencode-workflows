@@ -52,10 +52,11 @@ export function validateBudgetsAndUsage(state: EpicState, issue: EpicIssueReport
 }
 
 function dimensionUsage(state: EpicState, usage: AutomationUsageTelemetry, dimension: EpicBudgetDimension): number | 'unknown' {
-  if (dimension === 'calendar_age_ms') return Date.now() - Date.parse(state.created_at)
+  const referenceTime = Date.parse(state.updated_at)
+  if (dimension === 'calendar_age_ms') return referenceTime - Date.parse(state.created_at)
   if (dimension === 'cost_usd') return usage.cost_evidence.kind === 'known' ? usage.cost_evidence.cost_usd : 'unknown'
   if (dimension === 'active_time_ms' && usage.last_active_checkpoint_at !== null) {
-    return usage.active_time_ms + Math.max(0, Date.now() - Date.parse(usage.last_active_checkpoint_at))
+    return usage.active_time_ms + Math.max(0, referenceTime - Date.parse(usage.last_active_checkpoint_at))
   }
   return usage[dimension]
 }

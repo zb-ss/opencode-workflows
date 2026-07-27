@@ -3,12 +3,11 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 import type { QueueRateWindow } from './queue-policy.ts'
+import { withLock, FencingLeaseError } from './fencing-lease.ts'
 
 const FILE_MODE = 0o600
 const O_EXCL = fs.constants?.O_EXCL ?? 0x40
 const O_NOFOLLOW = fs.constants?.O_NOFOLLOW ?? 0x20000
-const LOCK_STALE_MS = 10_000
-const LOCK_RETRY_LIMIT = 2000
 
 export interface QueueRateLimiterOptions {
   rate_directory: string
@@ -34,10 +33,6 @@ class QueueRateLimiterError extends Error {
 
 function counterPath(directory: string, index: number): string {
   return path.join(directory, `rate-window-${index}.json`)
-}
-
-function lockPath(directory: string): string {
-  return path.join(directory, '.rate-lock')
 }
 
 function isRateWindowCounter(value: unknown): value is RateWindowCounter {
@@ -125,72 +120,6 @@ function ensureCounter(directory: string, window: QueueRateWindow, index: number
   return existing
 }
 
-class CrossProcessLock {
-  private readonly lockFile: string
-  private readonly directory: string
-  private held = false
-
-  constructor(directory: string) {
-    this.directory = directory
-    this.lockFile = lockPath(directory)
-  }
-
-  acquire(): void {
-    if (this.held) return
-    const deadline = Date.now() + LOCK_STALE_MS
-    let attempts = 0
-    while (attempts < LOCK_RETRY_LIMIT) {
-      let fd: number | null = null
-      try {
-        fd = fs.openSync(this.lockFile, fs.constants.O_WRONLY | fs.constants.O_CREAT | O_EXCL | O_NOFOLLOW, FILE_MODE)
-        fs.writeFileSync(fd, String(process.pid), { encoding: 'utf8' })
-        fs.fsyncSync(fd)
-        fs.closeSync(fd)
-        fd = null
-        this.held = true
-        return
-      } catch (error) {
-        if (fd !== null) { try { fs.closeSync(fd) } catch {} }
-        if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
-          if (this.isStale()) {
-            try { fs.unlinkSync(this.lockFile) } catch {}
-            continue
-          }
-          if (Date.now() > deadline) {
-            throw new QueueRateLimiterError('lock_timeout', `could not acquire the rate limiter lock within ${LOCK_STALE_MS}ms`)
-          }
-          attempts += 1
-          const sleepMs = Math.min(5 * attempts, 50)
-          const end = Date.now() + sleepMs
-          while (Date.now() < end) { /* busy wait */ }
-          continue
-        }
-        throw error
-      }
-    }
-    throw new QueueRateLimiterError('lock_timeout', `could not acquire the rate limiter lock after ${LOCK_RETRY_LIMIT} attempts`)
-  }
-
-  private isStale(): boolean {
-    try {
-      const content = fs.readFileSync(this.lockFile, 'utf8').trim()
-      const pid = parseInt(content, 10)
-      if (!Number.isFinite(pid) || pid <= 0) return true
-      try { process.kill(pid, 0) } catch { return true }
-      return false
-    } catch {
-      return true
-    }
-  }
-
-  release(): void {
-    if (!this.held) return
-    this.held = false
-    try { fs.unlinkSync(this.lockFile) } catch {}
-    fsyncDirectory(this.directory)
-  }
-}
-
 export class QueueRateLimiter {
   private readonly directory: string
   private readonly windows: readonly QueueRateWindow[]
@@ -206,23 +135,26 @@ export class QueueRateLimiter {
 
   tryAcquire(): boolean {
     if (this.windows.length === 0) return true
-    const lock = new CrossProcessLock(this.directory)
-    lock.acquire()
     try {
-      const now = this.now()
-      const counters: RateWindowCounter[] = []
-      for (let index = 0; index < this.windows.length; index += 1) {
-        const window = this.windows[index]!
-        const counter = ensureCounter(this.directory, window, index, now)
-        if (counter.requests >= counter.max_requests) return false
-        counters.push({ ...counter, requests: counter.requests + 1 })
+      return withLock(this.directory, () => {
+        const now = this.now()
+        const counters: RateWindowCounter[] = []
+        for (let index = 0; index < this.windows.length; index += 1) {
+          const window = this.windows[index]!
+          const counter = ensureCounter(this.directory, window, index, now)
+          if (counter.requests >= counter.max_requests) return false
+          counters.push({ ...counter, requests: counter.requests + 1 })
+        }
+        for (let index = 0; index < counters.length; index += 1) {
+          writeCounter(counterPath(this.directory, index), counters[index]!)
+        }
+        return true
+      })
+    } catch (error) {
+      if (error instanceof FencingLeaseError) {
+        throw new QueueRateLimiterError('lock_timeout', error.message)
       }
-      for (let index = 0; index < counters.length; index += 1) {
-        writeCounter(counterPath(this.directory, index), counters[index]!)
-      }
-      return true
-    } finally {
-      lock.release()
+      throw error
     }
   }
 

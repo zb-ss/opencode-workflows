@@ -1,5 +1,5 @@
-import { sha256Hex } from './canonical-json.ts'
 import path from 'node:path'
+import { sha256Hex } from './canonical-json.ts'
 
 import {
   deriveEpicWorktreeIdentity,
@@ -197,8 +197,8 @@ export function cleanupIntegratedEpicAttemptWorktree(
       || reviewedCheckpointCommit === null
       || integrationCommit === null
       || inspected.head_commit !== reviewedCheckpointCommit
-      || !managedCommitIsAncestor(projectRoot, reviewedCheckpointCommit, integrationCommit)
-      || !managedCommitIsRetainedByAnotherBranch(projectRoot, integrationCommit, evidence.branch_name)) return false
+      || !managedCommitIsAncestor(projectRoot, reviewedCheckpointCommit, integrationCommit)) return false
+    if (!managedCommitIsRetainedByAnotherBranch(projectRoot, integrationCommit, evidence.branch_name)) return false
     removeManagedWorktree(projectRoot, worktreePath, evidence.worktree_name, evidence.branch_name)
     return true
   } catch (error) {

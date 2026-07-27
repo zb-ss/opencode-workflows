@@ -90,7 +90,9 @@ function installUpdateRefRace(root: string, parent: string, expectedTarget: stri
 const { spawnSync } = require('node:child_process')
 const fs = require('node:fs')
 const args = process.argv.slice(2)
-if (args[0] === 'update-ref' && args[1] === process.env.CAS_BRANCH && !fs.existsSync(process.env.CAS_MARKER)) {
+// Privileged Git calls now prepend sandboxed -c options, so match by subcommand.
+const updateRefIndex = args.indexOf('update-ref')
+if (updateRefIndex >= 0 && args[updateRefIndex + 1] === process.env.CAS_BRANCH && !fs.existsSync(process.env.CAS_MARKER)) {
   fs.writeFileSync(process.env.CAS_MARKER, 'injected')
   const raced = spawnSync(process.env.REAL_GIT, ['update-ref', process.env.CAS_BRANCH, process.env.CAS_COMMIT, process.env.CAS_EXPECTED], { cwd: process.cwd(), stdio: 'inherit' })
   if (raced.status !== 0) process.exit(raced.status || 1)
@@ -127,7 +129,9 @@ const fs = require('node:fs')
 const args = process.argv.slice(2)
 const result = spawnSync(process.env.REAL_GIT, args, { cwd: process.cwd(), env: process.env, stdio: 'inherit' })
 if (result.status !== 0) process.exit(result.status || 1)
-if (args[0] === 'update-ref' && args[1] === process.env.CAS_BRANCH) {
+// Privileged Git calls now prepend sandboxed -c options, so match by subcommand.
+const updateRefIndex = args.indexOf('update-ref')
+if (updateRefIndex >= 0 && args[updateRefIndex + 1] === process.env.CAS_BRANCH) {
   fs.writeFileSync(process.env.POST_CAS_EDIT, 'retained post-CAS edit\\n')
 }
 process.exit(0)

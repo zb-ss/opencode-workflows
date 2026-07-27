@@ -9,6 +9,7 @@ import {
   parseEpicWorktreeEvidence,
   type EpicWorktreeEvidence,
 } from './epic-worktree-manager.ts'
+import { sandboxedGitArgs, sandboxedGitEnv } from './git-sandbox.ts'
 
 const GIT_OID_PATTERN = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/
 const SHA256_PATTERN = /^[a-f0-9]{64}$/
@@ -101,10 +102,10 @@ interface TargetWorktreeIdentity {
 
 function runGit(args: string[], cwd: string, options: GitOptions = {}): SpawnSyncReturns<Buffer> {
   const maxOutputBytes = options.max_output_bytes ?? MAX_GIT_OUTPUT_BYTES
-  return spawnSync('git', args, {
+  return spawnSync('git', sandboxedGitArgs(args), {
     cwd,
     encoding: 'buffer',
-    env: options.env ? { ...process.env, ...options.env } : process.env,
+    env: sandboxedGitEnv(options.env ? { ...process.env, ...options.env } : process.env),
     input: options.input,
     maxBuffer: maxOutputBytes + 1,
     stdio: ['pipe', 'pipe', 'pipe'],
@@ -503,3 +504,29 @@ export function verifyRecoveredEpicIntegration(input: EpicRecoveredIntegrationVe
 }
 
 export const integrateReviewedEpicCheckpoint = integrateEpicCheckpoint
+
+/**
+ * One-shot repair of a recovered integration checkout mismatch.
+ *
+ * If the integration branch still points to the reviewed merge commit, force
+ * the canonical worktree/index to match it and re-verify. This is safe because
+ * the merge commit was already reviewed and published; only local stale state
+ * is being reset.
+ */
+export function repairRecoveredEpicIntegration(input: EpicRecoveredIntegrationVerificationInput): void {
+  validateOid(input.expected_target_commit, 'expected target commit')
+  validateOid(input.source_checkpoint_commit, 'source checkpoint commit')
+  validateOid(input.result_commit, 'result commit')
+  validateSha256(input.project_identity_sha256, 'project identity')
+  const projectRoot = resolveProjectRoot(input.project_root)
+  if (sha256Hex(projectRoot) !== input.project_identity_sha256) throw new Error('canonical project root does not match the expected project identity')
+  assertIntegrationBranch(projectRoot, input.integration_branch)
+  const head = git(['rev-parse', '--verify', `${input.integration_branch}^{commit}`], projectRoot)
+  if (head !== input.result_commit) {
+    throw new Error('integration branch no longer points to the reviewed merge commit; cannot repair checkout automatically')
+  }
+  // Force worktree and index to the reviewed merge commit. This discards any
+  // stale local changes that caused the mismatch.
+  git(['checkout', '-f', input.result_commit, '--', '.'], projectRoot)
+  verifyRecoveredEpicIntegration(input)
+}

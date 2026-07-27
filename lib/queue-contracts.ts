@@ -82,6 +82,7 @@ export interface QueueWorkflowRecord {
   failure_classification: FailureClass | null
   retry_counters: RetryAttemptCounters | null
   retry_not_before: string | null
+  recovery_attempt_count: number
   created_at: string
   updated_at: string
   usage: z.infer<typeof AutomationUsageTelemetrySchema>
@@ -104,6 +105,7 @@ export const QueueWorkflowRecordSchema = z.object({
   failure_classification: FailureClassSchema.nullable(),
   retry_counters: RetryAttemptCountersSchema.nullable(),
   retry_not_before: DateTimeSchema.nullable(),
+  recovery_attempt_count: safeNonNegativeInteger,
   created_at: DateTimeSchema,
   updated_at: DateTimeSchema,
   usage: AutomationUsageTelemetrySchema,

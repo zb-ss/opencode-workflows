@@ -59,7 +59,9 @@ const { spawnSync } = require('node:child_process')
 const args = process.argv.slice(2)
 const result = spawnSync(process.env.REAL_GIT, args, { cwd: process.cwd(), env: process.env, stdio: 'inherit' })
 if (result.status !== 0) process.exit(result.status || 1)
-if (args[0] === 'worktree' && args[1] === 'remove') {
+// Privileged Git calls now prepend sandboxed -c options, so match by subcommand.
+const worktreeIndex = args.indexOf('worktree')
+if (worktreeIndex >= 0 && args[worktreeIndex + 1] === 'remove') {
   const advanced = spawnSync(process.env.REAL_GIT, ['update-ref', process.env.RACE_BRANCH, process.env.RACE_COMMIT, process.env.RACE_EXPECTED], { cwd: process.cwd(), stdio: 'inherit' })
   if (advanced.status !== 0) process.exit(advanced.status || 1)
 }
