@@ -30,6 +30,7 @@ function fixture() {
   const dir = tempDir('queue-store-')
   const leaseStore = new FencingLeaseStore({
     lease_directory: path.join(dir, 'lease'),
+    lock_directory: dir,
     owner: 'test-scheduler',
     lease_duration_ms: 60_000,
     now: clockNow,
@@ -123,6 +124,7 @@ describe('QueueStore', () => {
     advance(61_000)
     const newLeaseStore = new FencingLeaseStore({
       lease_directory: path.join(test.dir, 'lease'),
+      lock_directory: test.dir,
       owner: 'test-scheduler-next',
       lease_duration_ms: 60_000,
       now: clockNow,
@@ -205,6 +207,7 @@ describe('QueueStore', () => {
     const dir = tempDir('queue-crash-')
     const leaseStore = new FencingLeaseStore({
       lease_directory: path.join(dir, 'lease'),
+      lock_directory: dir,
       owner: 'proc-a',
       lease_duration_ms: 60_000,
       now: clockNow,
@@ -225,5 +228,61 @@ describe('QueueStore', () => {
     const loaded = store2.load('wf-b')
     assert.equal(loaded!.status, 'leased')
     assert.equal(loaded!.state_revision, 2)
+  })
+
+  it('a stale generation cannot commit a queue record after a newer generation takes over', () => {
+    const dir = tempDir('queue-fence-takeover-')
+
+    // Process A acquires generation 1 and enqueues a workflow.
+    const leaseStoreA = new FencingLeaseStore({
+      lease_directory: path.join(dir, 'lease'),
+      lock_directory: dir,
+      owner: 'proc-a',
+      lease_duration_ms: 60_000,
+      now: clockNow,
+    })
+    const handleA = leaseStoreA.acquire()
+    assert.equal(handleA.lease.fencing_generation, 1)
+    const storeA = new QueueStore({ config_directory: dir, owner: 'proc-a', now: clockNow })
+    const initial = storeA.enqueue(workflowInput(), handleA)
+
+    // A's lease expires. Process B acquires generation 2.
+    advance(61_000)
+    const leaseStoreB = new FencingLeaseStore({
+      lease_directory: path.join(dir, 'lease'),
+      lock_directory: dir,
+      owner: 'proc-b',
+      lease_duration_ms: 60_000,
+      now: clockNow,
+    })
+    const handleB = leaseStoreB.acquire()
+    assert.equal(handleB.lease.fencing_generation, 2)
+
+    // A (with its stale generation 1 handle) must NOT be able to update
+    // the queue record. The shared lock guarantees that lease validation
+    // and queue writes are atomic: B's takeover happened under the same
+    // lock, so A's stale authority is detected before the write commits.
+    assert.throws(
+      () => storeA.update('wf-1', initial.state_revision, handleA, (record) => {
+        record.status = 'paused'
+        record.pause_reason = 'stale writer committed'
+        return record
+      }),
+      (err: Error) => err instanceof Error && /generation|lease|stale/.test(err.message),
+    )
+
+    // The record must still be in its original state (queued, revision 1).
+    const reloaded = storeA.load('wf-1')
+    assert.equal(reloaded!.status, 'queued')
+    assert.equal(reloaded!.state_revision, 1)
+    assert.equal(reloaded!.fencing_generation, 1)
+
+    // B (generation 2) can write successfully.
+    const updated = storeA.update('wf-1', initial.state_revision, handleB, (record) => {
+      record.status = 'leased'
+      return record
+    })
+    assert.equal(updated.status, 'leased')
+    assert.equal(updated.fencing_generation, 2)
   })
 })

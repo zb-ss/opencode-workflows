@@ -25,6 +25,18 @@ export interface FencingLeaseOptions {
   owner: string
   lease_duration_ms: number
   now: () => number
+  /**
+   * Optional shared lock directory. When provided, all lease operations
+   * (acquire, renew, release, assertAuthority) serialize through the
+   * cross-process lock at this directory's .fencing-lock path instead of
+   * the lease directory's. This allows the lease and a co-located store
+   * (e.g. QueueStore) to share one lock so that a stale scheduler cannot
+   * commit a queue record after a newer generation takes over.
+   *
+   * If omitted, the lease directory's own .fencing-lock is used (legacy
+   * behavior).
+   */
+  lock_directory?: string
 }
 
 export interface FencingLeaseHandle {
@@ -524,12 +536,16 @@ export function withLock<T>(directory: string, fn: () => T): T {
  */
 export class FencingLeaseStore {
   private readonly directory: string
+  private readonly lockDirectory: string
   private readonly owner: string
   private readonly duration_ms: number
   private readonly now: () => number
 
   constructor(options: FencingLeaseOptions) {
     this.directory = path.resolve(options.lease_directory)
+    this.lockDirectory = options.lock_directory
+      ? path.resolve(options.lock_directory)
+      : this.directory
     this.owner = options.owner
     this.duration_ms = options.lease_duration_ms
     this.now = options.now
@@ -546,7 +562,7 @@ export class FencingLeaseStore {
    * the lease file.
    */
   acquire(): FencingLeaseHandle {
-    return withLock(this.directory, () => {
+    return withLock(this.lockDirectory, () => {
       let existing: FencingLeaseRecord | null = null
       if (leaseExists(this.directory)) {
         existing = readLeaseFile(this.directory)
@@ -648,7 +664,7 @@ export class FencingLeaseStore {
       get lease() { return current },
       renew: (extendMs?: number): FencingLeaseRecord => {
         if (released) throw new FencingLeaseError('lease_released', 'lease has been released')
-        return withLock(this.directory, () => {
+        return withLock(this.lockDirectory, () => {
           const onDisk = readLeaseFile(this.directory)
           if (!onDisk || onDisk.lease_id !== current.lease_id) {
             throw new FencingLeaseError('lease_lost', 'lease no longer matches the on-disk record')
@@ -670,7 +686,7 @@ export class FencingLeaseStore {
         if (released) return
         released = true
         try {
-          withLock(this.directory, () => {
+          withLock(this.lockDirectory, () => {
             const onDisk = readLeaseFile(this.directory)
             if (onDisk && onDisk.lease_id === current.lease_id) {
               const expired = { ...onDisk, expires_at: new Date(this.now() - 1).toISOString() }

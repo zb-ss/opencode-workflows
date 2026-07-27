@@ -153,6 +153,7 @@ export class QueueStore {
     validateDirectory(this.workflowsDir)
     this.leaseStore = new FencingLeaseStore({
       lease_directory: path.join(this.directory, 'lease'),
+      lock_directory: this.directory,
       owner: this.owner,
       lease_duration_ms: options.lease_duration_ms ?? 60_000,
       now: this.now,
