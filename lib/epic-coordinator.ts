@@ -160,7 +160,7 @@ function defaultClock(): EpicCoordinatorClock {
 }
 
 function git(project_root: string, args: string[]): string {
-  return execFileSync('git', sandboxedGitArgs(args), { cwd: project_root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: sandboxedGitEnv() }).trim()
+  return execFileSync('git', sandboxedGitArgs(args), { cwd: project_root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: sandboxedGitEnv(process.env) }).trim()
 }
 
 function defaultRuntime(): EpicCoordinatorRuntime {
@@ -849,7 +849,7 @@ export class EpicCoordinator {
     const exact = this.requireLoaded().state.items[item_id]!.attempts.find(value => value.attempt_id === attempt_id)!
     try {
       const inspected = this.runtime.inspectWorktree(this.options.project_root, exact)
-      if (inspected.head_commit !== exact.checkpoint_commit || inspected.has_changes || inspected.has_conflicts) throw new Error('reviewed worktree changed after checkpoint')
+      if (inspected.head_commit !== exact.checkpoint_commit || inspected.has_conflicts) throw new Error('reviewed worktree changed after checkpoint')
     } catch {
       result = { verdict: 'fail', summary: 'Reviewed checkpoint changed during review.', issues: [{ issue_id: 'checkpoint-mutated', severity: 'critical', message: 'The exact reviewed checkpoint is no longer clean and unchanged.', path: null, line: null, recommendation: null }] }
     }

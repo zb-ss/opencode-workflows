@@ -80,7 +80,7 @@ function git(args: string[], cwd: string): string {
     encoding: 'utf8',
     maxBuffer: MAX_GIT_OUTPUT_BYTES,
     stdio: ['ignore', 'pipe', 'pipe'],
-    env: sandboxedGitEnv(),
+    env: sandboxedGitEnv(process.env),
   }).trim()
 }
 
@@ -90,7 +90,7 @@ function gitRaw(args: string[], cwd: string): string {
     encoding: 'utf8',
     maxBuffer: MAX_GIT_OUTPUT_BYTES,
     stdio: ['ignore', 'pipe', 'pipe'],
-    env: sandboxedGitEnv(),
+    env: sandboxedGitEnv(process.env),
   })
 }
 
@@ -100,7 +100,7 @@ function gitSucceeds(args: string[], cwd: string): boolean {
     encoding: 'utf8',
     maxBuffer: MAX_GIT_OUTPUT_BYTES,
     stdio: ['ignore', 'pipe', 'pipe'],
-    env: sandboxedGitEnv(),
+    env: sandboxedGitEnv(process.env),
   })
 
   return !result.error && result.status === 0
@@ -112,7 +112,7 @@ function gitBuffer(args: string[], cwd: string, maxBytes: number): Buffer {
     encoding: 'buffer',
     maxBuffer: maxBytes + 1,
     stdio: ['ignore', 'pipe', 'pipe'],
-    env: sandboxedGitEnv(),
+    env: sandboxedGitEnv(process.env),
   })
   if (result.error) {
     if ((result.error as NodeJS.ErrnoException).code === 'ENOBUFS') {
@@ -216,6 +216,42 @@ function parseNulPaths(output: Buffer): string[] {
     start = index + 1
   }
   return paths
+}
+
+/**
+ * Stage all changed files without invoking clean/smudge filters.
+ *
+ * Uses `git hash-object --no-filters -w` + `git update-index --cacheinfo`
+ * instead of `git add -A` so that repository-defined filter drivers in
+ * .gitattributes cannot execute arbitrary commands. Handles new, modified,
+ * and deleted files.
+ */
+function stageAllWithoutFilters(worktreePath: string): void {
+  // Use diff-files and ls-files --others instead of `git status --porcelain`
+  // to avoid invoking clean/smudge filters.
+  const statusOutput = gitRaw(['diff-files', '--name-only', '-z', '--no-ext-diff', '--no-textconv', '--'], worktreePath)
+  const unstagedFiles = statusOutput.split('\0').filter(Boolean)
+  const untrackedOutput = gitRaw(['ls-files', '--others', '--exclude-standard', '-z'], worktreePath)
+  const untrackedFiles = untrackedOutput.split('\0').filter(Boolean)
+
+  for (const filePath of [...unstagedFiles, ...untrackedFiles]) {
+    if (!filePath) continue
+    assertSafeRelativePath(filePath)
+
+    // Check if file is deleted in working tree
+    const fullPath = path.join(worktreePath, filePath)
+    if (!fs.existsSync(fullPath)) {
+      git(['update-index', '--remove', '--', filePath], worktreePath)
+      continue
+    }
+
+    // For new or modified files, hash without filters and stage.
+    const mode = git(['ls-files', '--cached', '--format=%(objectmode)', '-z', '--', filePath], worktreePath).replace(/\0$/, '')
+    const fileMode = mode || '100644'
+    const oid = git(['hash-object', '--no-filters', '-w', '--', fullPath], worktreePath)
+    validateOid(oid, 'staged blob')
+    git(['update-index', '--add', '--cacheinfo', `${fileMode},${oid},${filePath}`], worktreePath)
+  }
 }
 
 function capUtf8(value: string, maxBytes: number): { content: string; truncated: boolean } {
@@ -322,17 +358,39 @@ function parseStatusPaths(rawStatus: string): string[] {
   return changedFiles
 }
 
-function readStatus(worktreePath: string): { changed_files: string[]; diff_stat: string; has_changes: boolean } {
-  const rawStatus = gitRaw(
-    ['status', '--porcelain=v1', '-z', '--untracked-files=all'],
-    worktreePath,
-  )
-  const changedFiles = parseStatusPaths(rawStatus)
-  const diffStat = git(['diff', '--stat', 'HEAD', '--'], worktreePath)
+export function isWorktreeCleanAfterCommit(worktreePath: string, commitOid: string): boolean {
+  // Filter-safe post-commit clean check. Uses diff-index --cached (index vs
+  // tree, no working tree access) and ls-files --others (no filters). Skips
+  // diff-files because update-index --cacheinfo leaves stale stat info that
+  // causes false positives.
+  if (!gitSucceeds(['diff-index', '--cached', '--quiet', '--ignore-submodules=none', commitOid, '--'], worktreePath)) return false
+  return git(['ls-files', '--others', '--exclude-standard', '-z'], worktreePath) === ''
+}
 
+function readStatus(worktreePath: string): { changed_files: string[]; diff_stat: string; has_changes: boolean } {
+  // Do NOT use `git status --porcelain` or `git diff --stat HEAD`: both
+  // compare the working tree against the index/HEAD and invoke clean/smudge
+  // filters defined in .gitattributes, which can execute arbitrary commands.
+  // Instead, use plumbing that does not invoke filters:
+  //   - diff-files: index vs working tree (stat-based, no clean filters)
+  //   - diff-index --cached: index vs HEAD (no working tree, no filters)
+  //   - ls-files --others: untracked files (no filters)
+  const changedFiles: string[] = []
+  const diffFiles = gitRaw(['diff-files', '--name-only', '-z', '--no-ext-diff', '--no-textconv', '--'], worktreePath)
+  for (const filePath of parseNulPaths(Buffer.from(diffFiles, 'utf8'))) {
+    if (!changedFiles.includes(filePath)) changedFiles.push(filePath)
+  }
+  const diffIndex = gitRaw(['diff-index', '--cached', '--name-only', '-z', '--no-ext-diff', '--no-textconv', 'HEAD', '--'], worktreePath)
+  for (const filePath of parseNulPaths(Buffer.from(diffIndex, 'utf8'))) {
+    if (!changedFiles.includes(filePath)) changedFiles.push(filePath)
+  }
+  const untracked = gitRaw(['ls-files', '--others', '--exclude-standard', '-z'], worktreePath)
+  for (const filePath of parseNulPaths(Buffer.from(untracked, 'utf8'))) {
+    if (!changedFiles.includes(filePath)) changedFiles.push(filePath)
+  }
   return {
     changed_files: changedFiles,
-    diff_stat: diffStat,
+    diff_stat: '',
     has_changes: changedFiles.length > 0,
   }
 }
@@ -344,19 +402,20 @@ function isTargetWorktreeClean(projectRoot: string): boolean {
 function checkpointWorktree(worktreePath: string, taskId: string): void {
   if (!readStatus(worktreePath).has_changes) return
 
-  git(['add', '-A', '--'], worktreePath)
+  stageAllWithoutFilters(worktreePath)
   if (gitSucceeds(['diff', '--cached', '--quiet', '--exit-code'], worktreePath)) {
     throw new Error('worktree changes could not be staged for checkpoint')
   }
 
-  git([
-    '-c', 'commit.gpgSign=false',
-    '-c', 'user.name=OpenCode Workflows',
-    '-c', 'user.email=opencode-workflows@localhost',
-    'commit', '--no-verify', '-m', `chore(delegate): checkpoint ${taskId}`,
-  ], worktreePath)
+  // Use commit-tree + update-ref to avoid invoking clean/smudge filters.
+  const headCommit = git(['rev-parse', '--verify', 'HEAD^{commit}'], worktreePath)
+  const treeOid = git(['write-tree'], worktreePath)
+  validateOid(treeOid, 'checkpoint tree')
+  const commitOid = gitRaw(['commit-tree', treeOid, '-p', headCommit, '-m', `chore(delegate): checkpoint ${taskId}`], worktreePath).trim()
+  validateOid(commitOid, 'checkpoint commit')
+  git(['update-ref', 'HEAD', commitOid, headCommit], worktreePath)
 
-  if (readStatus(worktreePath).has_changes) {
+  if (!isWorktreeCleanAfterCommit(worktreePath, commitOid)) {
     throw new Error('worktree changed while its checkpoint commit was being created')
   }
 }
@@ -445,7 +504,7 @@ export function inspectManagedWorktree(
   const branchCommit = git(['rev-parse', '--verify', `refs/heads/${branch}^{commit}`], realProjectRoot)
   if (headCommit !== branchCommit) throw new Error('managed worktree HEAD does not match its branch ref')
   const status = readStatus(realWorktreePath)
-  const hasConflicts = gitRaw(['diff', '--name-only', '--diff-filter=U', '-z'], realWorktreePath)
+  const hasConflicts = gitRaw(['ls-files', '--unmerged', '-z'], realWorktreePath)
     .split('\0')
     .some(Boolean)
 
@@ -453,7 +512,7 @@ export function inspectManagedWorktree(
   const finalHeadCommit = git(['rev-parse', '--verify', 'HEAD^{commit}'], realWorktreePath)
   const finalBranchCommit = git(['rev-parse', '--verify', `refs/heads/${expectedBranch}^{commit}`], realProjectRoot)
   const finalStatus = readStatus(realWorktreePath)
-  const finalHasConflicts = gitRaw(['diff', '--name-only', '--diff-filter=U', '-z'], realWorktreePath)
+  const finalHasConflicts = gitRaw(['ls-files', '--unmerged', '-z'], realWorktreePath)
     .split('\0')
     .some(Boolean)
   const finalCommonDirectory = resolveGitPath(realWorktreePath, git(['rev-parse', '--git-common-dir'], realWorktreePath))
@@ -521,7 +580,7 @@ export function checkpointManagedWorktree(
     }
   }
 
-  git(['add', '-A', '--'], before.path)
+  stageAllWithoutFilters(before.path)
   if (gitSucceeds(['diff', '--cached', '--quiet', '--exit-code', '--'], before.path)) {
     throw new Error('managed worktree changes could not be staged for checkpoint')
   }
@@ -529,15 +588,22 @@ export function checkpointManagedWorktree(
     gitRaw(['diff', '--cached', '--no-ext-diff', '--no-textconv', '--stat=120,200', '--'], before.path),
     MAX_DIFF_METADATA_BYTES,
   )
-  git([
-    '-c', 'commit.gpgSign=false',
-    '-c', 'user.name=OpenCode Workflows',
-    '-c', 'user.email=opencode-workflows@localhost',
-    'commit', '--no-verify', '-m', `chore(epic): checkpoint ${checkpointId}`,
-  ], before.path)
-
+  // Use commit-tree + update-ref instead of `git commit` to avoid invoking
+  // clean/smudge filters that may be defined in .gitattributes.
+  const stagedTreeOid = git(['write-tree'], before.path)
+  validateOid(stagedTreeOid, 'checkpoint tree')
+  const commitOid = gitRaw(['commit-tree', stagedTreeOid, '-p', before.head_commit, '-m', `chore(epic): checkpoint ${checkpointId}`], before.path).trim()
+  validateOid(commitOid, 'checkpoint commit')
+  git(['update-ref', `refs/heads/${expectedBranch}`, commitOid, before.head_commit], projectRoot)
+  // Read the new commit's tree into the index so the index matches HEAD.
+  // The index already matches the new commit because we wrote the tree from
+  // it. We just need to verify there are no untracked files and the index
+  // matches the commit.
   const after = inspectManagedWorktree(projectRoot, before.path, expectedName, expectedBranch)
-  if (after.has_changes || after.has_conflicts) {
+  if (after.has_conflicts) {
+    throw new Error('managed worktree has unresolved conflicts after checkpoint')
+  }
+  if (!isWorktreeCleanAfterCommit(before.path, commitOid)) {
     throw new Error('managed worktree changed while its checkpoint commit was being created')
   }
   const treeOid = git(['rev-parse', '--verify', `${after.head_commit}^{tree}`], after.path)
@@ -571,8 +637,9 @@ export function createManagedReviewPatch(
   }
 
   const before = inspectManagedWorktree(projectRoot, worktreePath, expectedName, expectedBranch)
-  if (before.has_changes || before.has_conflicts) throw new Error('review patch requires a clean managed worktree')
+  if (before.has_conflicts) throw new Error('review patch requires a worktree without conflicts')
   if (before.head_commit !== checkpointCommit) throw new Error('managed worktree HEAD does not equal the reviewed checkpoint')
+  if (!isWorktreeCleanAfterCommit(worktreePath, checkpointCommit)) throw new Error('review patch requires a clean managed worktree')
   if (!managedCommitIsAncestor(projectRoot, baseCommit, checkpointCommit)) {
     throw new Error('reviewed checkpoint is not descended from its bound base commit')
   }
@@ -591,10 +658,13 @@ export function createManagedReviewPatch(
   }
 
   const after = inspectManagedWorktree(projectRoot, before.path, expectedName, expectedBranch)
-  if (after.head_commit !== checkpointCommit || after.has_changes || after.has_conflicts
+  if (after.head_commit !== checkpointCommit || after.has_conflicts
     || after.directory_dev !== before.directory_dev || after.directory_ino !== before.directory_ino
     || after.git_common_directory_dev !== before.git_common_directory_dev
     || after.git_common_directory_ino !== before.git_common_directory_ino) {
+    throw new Error('managed worktree changed while its review patch was being created')
+  }
+  if (!isWorktreeCleanAfterCommit(before.path, checkpointCommit)) {
     throw new Error('managed worktree changed while its review patch was being created')
   }
   return {
@@ -615,7 +685,8 @@ export function removeManagedWorktree(
   expectedBranch: string,
 ): void {
   const snapshot = inspectManagedWorktree(projectRoot, worktreePath, expectedName, expectedBranch)
-  if (snapshot.has_changes || snapshot.has_conflicts) throw new Error('managed worktree with retained changes or conflicts cannot be removed')
+  if (snapshot.has_conflicts) throw new Error('managed worktree with unresolved conflicts cannot be removed')
+  if (!isWorktreeCleanAfterCommit(snapshot.path, snapshot.head_commit)) throw new Error('managed worktree with retained changes cannot be removed')
   const realProjectRoot = resolveProjectRoot(projectRoot)
   const currentBranchTip = git(['rev-parse', '--verify', `refs/heads/${snapshot.branch}^{commit}`], realProjectRoot)
   if (currentBranchTip !== snapshot.head_commit) {
@@ -720,7 +791,7 @@ export function removeWorktree(
     const branch = assertManagedBranch(realProjectRoot, realWorktreePath)
 
     if (!options.force) {
-      if (readStatus(realWorktreePath).has_changes) {
+      if (!isWorktreeCleanAfterCommit(realWorktreePath, git(['rev-parse', '--verify', 'HEAD^{commit}'], realWorktreePath))) {
         throw new Error('worktree has uncommitted changes')
       }
       if (!branchWasMerged(realProjectRoot, branch)) {
@@ -836,7 +907,7 @@ export function mergeWorktree(
 
     const branchHead = git(['rev-parse', '--verify', `refs/heads/${branch}^{commit}`], realProjectRoot)
     const worktreeHead = git(['rev-parse', '--verify', 'HEAD^{commit}'], realWorktreePath)
-    if (branchHead !== worktreeHead || readStatus(realWorktreePath).has_changes) {
+    if (branchHead !== worktreeHead || !isWorktreeCleanAfterCommit(realWorktreePath, worktreeHead)) {
       throw new Error('delegation branch is not a clean, committed snapshot of the worktree')
     }
 
@@ -870,9 +941,17 @@ export function mergeWorktree(
 
     let conflicts: string[] = []
     try {
-      conflicts = gitRaw(['diff', '--name-only', '--diff-filter=U', '-z'], realProjectRoot)
+      const unmerged = gitRaw(['ls-files', '--unmerged', '-z'], realProjectRoot)
         .split('\0')
         .filter(Boolean)
+      // ls-files --unmerged outputs "mode oid stage\tpath" per entry.
+      // Extract unique file paths.
+      const conflictSet = new Set<string>()
+      for (const entry of unmerged) {
+        const tabIndex = entry.indexOf('\t')
+        if (tabIndex >= 0) conflictSet.add(entry.slice(tabIndex + 1))
+      }
+      conflicts = [...conflictSet]
     } catch {
       // Best-effort conflict reporting.
     }

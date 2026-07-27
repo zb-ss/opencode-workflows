@@ -10,6 +10,7 @@ import {
   type EpicWorktreeEvidence,
 } from './epic-worktree-manager.ts'
 import { sandboxedGitArgs, sandboxedGitEnv } from './git-sandbox.ts'
+import { isWorktreeCleanAfterCommit } from './worktree-manager.ts'
 
 const GIT_OID_PATTERN = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/
 const SHA256_PATTERN = /^[a-f0-9]{64}$/
@@ -231,7 +232,10 @@ function assertTargetReady(projectRoot: string, integrationBranch: string, expec
 
 function assertSourceReady(projectRoot: string, input: EpicIntegrationInput): void {
   const source = inspectEpicAttemptWorktree(projectRoot, input.source_worktree_path, input.worktree_evidence)
-  if (source.head_commit !== input.source_checkpoint_commit || source.has_changes || source.has_conflicts) {
+  if (source.head_commit !== input.source_checkpoint_commit || source.has_conflicts) {
+    throw new Error('source worktree is not at the exact reviewed checkpoint')
+  }
+  if (!isWorktreeCleanAfterCommit(source.path, input.source_checkpoint_commit)) {
     throw new Error('source worktree is not clean at the exact reviewed checkpoint')
   }
 }

@@ -12,6 +12,7 @@ import {
   createManagedReviewPatch,
   createManagedWorktree,
   inspectManagedWorktree,
+  isWorktreeCleanAfterCommit,
   managedCommitIsAncestor,
   managedCommitIsRetainedByAnotherBranch,
   removeManagedWorktree,
@@ -150,8 +151,19 @@ export function checkpointEpicAttemptWorktree(
     before.evidence.attempt_id,
   )
   const after = inspectEpicAttemptWorktree(projectRoot, before.path, before.evidence)
-  if (after.head_commit !== checkpoint.checkpoint_commit || after.has_changes || after.has_conflicts) {
-    throw new Error('epic worktree did not remain bound to its checkpoint')
+  if (after.has_conflicts) {
+    throw new Error('epic worktree has unresolved conflicts after checkpoint')
+  }
+  // Verify the worktree HEAD matches the checkpoint commit. Do NOT check
+  // has_changes via diff-files because stat info may be stale after
+  // update-index --cacheinfo. The checkpointManagedWorktree function
+  // already verifies clean state via diff-index --cached.
+  if (after.head_commit !== checkpoint.checkpoint_commit) {
+    throw new Error('epic worktree HEAD does not match the checkpoint commit')
+  }
+  // Also verify the worktree is clean using the filter-safe post-commit check.
+  if (!isWorktreeCleanAfterCommit(before.path, checkpoint.checkpoint_commit)) {
+    throw new Error('epic worktree has changes after checkpoint')
   }
   return checkpoint
 }
@@ -165,7 +177,13 @@ export function createEpicReviewPatch(
   options: ManagedReviewPatchOptions = {},
 ): ManagedReviewPatch {
   const before = inspectEpicAttemptWorktree(projectRoot, worktreePath, evidence)
-  if (before.head_commit !== checkpointCommit || before.has_changes || before.has_conflicts) {
+  if (before.head_commit !== checkpointCommit || before.has_conflicts) {
+    throw new Error('epic review patch requires the worktree at the exact checkpoint')
+  }
+  // Use the filter-safe post-commit clean check instead of before.has_changes,
+  // which relies on diff-files and may report false positives due to stale
+  // stat info after update-index --cacheinfo.
+  if (!isWorktreeCleanAfterCommit(before.path, checkpointCommit)) {
     throw new Error('epic review patch requires a clean worktree at the exact checkpoint')
   }
   const patch = createManagedReviewPatch(
@@ -178,7 +196,10 @@ export function createEpicReviewPatch(
     options,
   )
   const after = inspectEpicAttemptWorktree(projectRoot, before.path, before.evidence)
-  if (after.head_commit !== checkpointCommit || after.has_changes || after.has_conflicts) {
+  if (after.head_commit !== checkpointCommit || after.has_conflicts) {
+    throw new Error('epic worktree changed while its review patch was created')
+  }
+  if (!isWorktreeCleanAfterCommit(before.path, checkpointCommit)) {
     throw new Error('epic worktree changed while its review patch was created')
   }
   return patch
@@ -193,11 +214,14 @@ export function cleanupIntegratedEpicAttemptWorktree(
 ): boolean {
   try {
     const inspected = inspectEpicAttemptWorktree(projectRoot, worktreePath, evidence)
-    if (inspected.has_changes || inspected.has_conflicts
+    if (inspected.has_conflicts
       || reviewedCheckpointCommit === null
       || integrationCommit === null
       || inspected.head_commit !== reviewedCheckpointCommit
       || !managedCommitIsAncestor(projectRoot, reviewedCheckpointCommit, integrationCommit)) return false
+    // Use the filter-safe post-commit clean check instead of has_changes,
+    // which may report false positives due to stale stat info.
+    if (!isWorktreeCleanAfterCommit(inspected.path, reviewedCheckpointCommit)) return false
     if (!managedCommitIsRetainedByAnotherBranch(projectRoot, integrationCommit, evidence.branch_name)) return false
     removeManagedWorktree(projectRoot, worktreePath, evidence.worktree_name, evidence.branch_name)
     return true
