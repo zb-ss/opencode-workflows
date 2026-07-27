@@ -946,6 +946,23 @@ export class WorkflowEngine {
       }
       state.status = 'cancelled'
       state.pause_reason = null
+      this.schedulingEnabled = false
+      this.clearWallTimer()
+      this.persist()
+      await Promise.all(running.map((stage) => this.adapter.abort(stage.session_id!).catch(() => undefined)))
+      return cloneState(state)
+    })
+  }
+
+  pause(reason: string): Promise<AutomaticWorkflowState> {
+    return this.serial(async () => {
+      this.assertNotDisposed()
+      const state = this.requiredState()
+      if (TERMINAL_WORKFLOW_STATUSES.has(state.status)) return cloneState(state)
+      const running = Object.values(state.stages).filter((stage) => stage.status === 'running' && stage.session_id)
+      this.schedulingEnabled = false
+      state.status = 'paused'
+      state.pause_reason = reason
       this.clearWallTimer()
       this.persist()
       await Promise.all(running.map((stage) => this.adapter.abort(stage.session_id!).catch(() => undefined)))

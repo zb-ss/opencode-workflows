@@ -30,6 +30,7 @@ export interface QueueSchedulerOptions {
   config: EnabledQueueConfig
   now: () => number
   onWorkflowReady?: (workflowId: string, leaseHandle: FencingLeaseHandle) => void
+  onLeaseLost?: () => void
   interval?: (callback: () => void, delayMs: number) => unknown
   clearInterval?: (handle: unknown) => void
 }
@@ -86,6 +87,7 @@ export class QueueScheduler {
   private readonly config: Required<Pick<EnabledQueueConfig, 'max_concurrent_workflows' | 'lease_duration_ms' | 'renewal_interval_ms' | 'recovery_attempt_limit'>>
   private readonly now: () => number
   private readonly onWorkflowReady?: (workflowId: string, leaseHandle: FencingLeaseHandle) => void
+  private readonly onLeaseLost?: () => void
   private readonly intervalFn: (callback: () => void, delayMs: number) => unknown
   private readonly clearIntervalFn: (handle: unknown) => void
   private readonly rateLimiter: QueueRateLimiter | null
@@ -99,6 +101,7 @@ export class QueueScheduler {
     this.config = assertConfig(options.config)
     this.now = options.now
     this.onWorkflowReady = options.onWorkflowReady
+    this.onLeaseLost = options.onLeaseLost
     this.intervalFn = options.interval ?? defaultInterval
     this.clearIntervalFn = options.clearInterval ?? defaultClearInterval
     this.rateLimiter = options.config.rate_windows && options.config.rate_windows.length > 0
@@ -110,11 +113,12 @@ export class QueueScheduler {
       : null
   }
 
-  start(): QueueSchedulerHandle {
+  start(options?: { schedule?: boolean }): QueueSchedulerHandle {
+    const shouldSchedule = options?.schedule ?? true
     if (this.disposed) throw new QueueSchedulerError('disposed', 'scheduler has been disposed')
     if (this.leaseHandle !== null) {
       if (this.leaseHandle.is_valid()) {
-        this.schedule()
+        if (shouldSchedule) this.schedule()
         return this.handleFromCurrentLease()
       }
       this.handleLeaseLoss()
@@ -123,7 +127,7 @@ export class QueueScheduler {
     this.leaseHandle = leaseStore.acquire()
     this.leaseRecord = this.leaseHandle.lease
     this.startRenewalTimer()
-    this.schedule()
+    if (shouldSchedule) this.schedule()
     return this.handleFromCurrentLease()
   }
 
@@ -364,6 +368,9 @@ export class QueueScheduler {
     this.preserveLaunchIntents()
     this.leaseHandle = null
     this.leaseRecord = null
+    // Notify the owner that lease authority was lost so it can cancel any
+    // running engines that were dispatched under the expired lease.
+    this.onLeaseLost?.()
   }
 
   private startRenewalTimer(): void {

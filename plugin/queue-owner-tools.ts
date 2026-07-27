@@ -138,6 +138,18 @@ export async function createQueueOwnerTools(input: PluginInput) {
       onWorkflowReady: (workflowId, leaseHandle) => {
         void dispatchWorkflow(workflowId, leaseHandle, store, projectRoot, context.sessionID)
       },
+      onLeaseLost: () => {
+        // Cancel and dispose all engines dispatched under the lost lease.
+        for (const [workflowId, { engine }] of engines.entries()) {
+          void engine.cancel().then(() => {
+            try { engine.dispose() } catch {}
+            engines.delete(workflowId)
+          }).catch(() => {
+            try { engine.dispose() } catch {}
+            engines.delete(workflowId)
+          })
+        }
+      },
     })
     instances.set(key, { store, scheduler })
     return { store, scheduler }
@@ -188,6 +200,7 @@ export async function createQueueOwnerTools(input: PluginInput) {
       })
       engines.set(workflowId, { engine, leaseHandle, store })
       // Transition launch intent to created before starting the engine.
+      let createdIntent = false
       try {
         store.update(workflowId, loaded.state_revision, leaseHandle, (record) => {
           if (record.launch_intent !== null) {
@@ -195,8 +208,15 @@ export async function createQueueOwnerTools(input: PluginInput) {
           }
           return record
         })
+        createdIntent = true
       } catch {
-        // Best-effort state transition; the engine is still dispatched.
+        // The CAS failed: the record was modified by another process, the
+        // lease was lost, or the record was cancelled/paused. Do NOT start
+        // the engine. Dispose it and remove it from the registry so it
+        // cannot create child sessions or respond to events.
+        engines.delete(workflowId)
+        try { engine.dispose() } catch {}
+        return
       }
       await engine.start({
         workflowId: loaded.workflow_id,
@@ -279,6 +299,21 @@ export async function createQueueOwnerTools(input: PluginInput) {
         settleWorkflowRecord(workflowId, engine, leaseHandle, store)
         return
       }
+    }
+  }
+
+  async function controlEngine(workflowId: string, action: 'pause' | 'cancel', reason: string): Promise<void> {
+    const entry = engines.get(workflowId)
+    if (!entry) return
+    const { engine } = entry
+    try {
+      if (action === 'pause') {
+        await engine.pause(reason)
+      } else {
+        await engine.cancel()
+      }
+    } catch {
+      // Best-effort: the queue record transition still proceeds.
     }
   }
 
@@ -391,7 +426,8 @@ export async function createQueueOwnerTools(input: PluginInput) {
           assertOwnership(loaded, context, projectRoot)
           assertExpected(loaded, args.expected_revision, args.expected_generation)
           await operationAsk(context, 'queue_pause', { workflow_id: args.workflow_id })
-          const handle = scheduler.start()
+          const handle = scheduler.start({ schedule: false })
+          await controlEngine(args.workflow_id, 'pause', args.reason)
           const updated = store.update(args.workflow_id, args.expected_revision, handle.lease, (wfRecord) => {
             wfRecord.status = 'paused'
             wfRecord.pause_reason = args.reason
@@ -434,7 +470,8 @@ export async function createQueueOwnerTools(input: PluginInput) {
           assertOwnership(loaded, context, projectRoot)
           assertExpected(loaded, args.expected_revision, args.expected_generation)
           await operationAsk(context, 'queue_cancel', { workflow_id: args.workflow_id })
-          const handle = scheduler.start()
+          const handle = scheduler.start({ schedule: false })
+          await controlEngine(args.workflow_id, 'cancel', args.reason)
           const updated = store.update(args.workflow_id, args.expected_revision, handle.lease, (wfRecord) => {
             wfRecord.status = 'cancelled'
             wfRecord.pause_reason = args.reason
@@ -456,7 +493,7 @@ export async function createQueueOwnerTools(input: PluginInput) {
           await operationAsk(context, 'queue_recover', { former_runtime_terminated: args.former_runtime_terminated })
           const queueConfig = enabledQueue(config.queue)
           const { store, scheduler } = getOrCreate(context, projectRoot, queueConfig)
-          const handle = scheduler.hasLease ? scheduler.start() : scheduler.start()
+          const handle = scheduler.start({ schedule: false })
           const result: QueueRecoveryResult = await scheduler.recover()
           return JSON.stringify({ recovered: result.recovered, reconciled: result.reconciled, failed: result.failed, failures: result.failures })
         },
@@ -489,7 +526,12 @@ export async function createQueueOwnerTools(input: PluginInput) {
     },
     dispose: async () => {
       const errors: Error[] = []
+      // Cancel and dispose all engines before releasing scheduler leases.
+      // Awaiting cancellation ensures child sessions are aborted before
+      // the plugin process exits.
       for (const [workflowId, { engine, leaseHandle, store }] of engines.entries()) {
+        try { await engine.cancel() }
+        catch (error) { errors.push(error as Error) }
         try { settleWorkflowRecord(workflowId, engine, leaseHandle, store) }
         catch (error) { errors.push(error as Error) }
         try { engine.dispose() }
