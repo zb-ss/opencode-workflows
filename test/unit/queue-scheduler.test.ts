@@ -312,4 +312,93 @@ describe('QueueScheduler', () => {
 
     handleB.dispose()
   })
+
+  it('does not schedule before recovery completes', () => {
+    const { dir, store, config } = fixture(2)
+    const scheduler = new QueueScheduler({ store, config, now: clockNow, onWorkflowReady: () => { /* should not be called */ } })
+
+    // Enqueue a workflow before the scheduler starts.
+    const leaseStore = store.getLeaseStore()
+    const handle = leaseStore.acquire()
+    store.enqueue(workflowInput('wf-queued'), handle)
+    handle.release()
+
+    // Start the scheduler in recovery mode (no scheduling).
+    const recoverHandle = scheduler.start({ schedule: false })
+    // The queued workflow must NOT be admitted during recovery.
+    const record = store.load('wf-queued')
+    assert.equal(record!.status, 'queued')
+
+    // Run recovery — it should reconcile the record without dispatching.
+    scheduler.recover().then((result) => {
+      assert.equal(result.recovered, true)
+      // After recovery, the record is re-stamped but not dispatched.
+      const afterRecovery = store.load('wf-queued')
+      assert.equal(afterRecovery!.status, 'queued')
+    })
+
+    recoverHandle.dispose()
+  })
+
+  it('one reconciliation failure prevents scheduling activation', async () => {
+    const { dir, store, config } = fixture(2)
+    let dispatchCount = 0
+    const scheduler = new QueueScheduler({
+      store,
+      config,
+      now: clockNow,
+      onWorkflowReady: () => { dispatchCount++ },
+    })
+
+    // Enqueue a normal workflow.
+    const leaseStore = store.getLeaseStore()
+    const handle = leaseStore.acquire()
+    store.enqueue(workflowInput('wf-normal'), handle)
+
+    // Create a second workflow with a launch intent in an ambiguous state
+    // that cannot be reconciled (wrong expected revision).
+    const normalRecord = store.load('wf-normal')!
+    const intentRecord = store.update('wf-normal', normalRecord.state_revision, handle, (r) => {
+      r.status = 'leased'
+      r.launch_intent = {
+        intent_id: 'intent-stuck',
+        workflow_id: 'wf-normal',
+        fencing_generation: handle.lease.fencing_generation,
+        session_id: null,
+        child_session_ids: [],
+        engine_instance_id: null,
+        agent: 'standard',
+        model: 'development',
+        launch_state: 'reserved',
+        reserved_at: new Date(clock).toISOString(),
+        created_at: null,
+        prompted_at: null,
+        settled_at: null,
+      }
+      return r
+    })
+
+    // Enqueue a second workflow that should remain queued.
+    store.enqueue(workflowInput('wf-other'), handle)
+    handle.release()
+
+    const recoverHandle = scheduler.start({ schedule: false })
+    const result = await scheduler.recover()
+
+    // Recovery should succeed (both records reconcile).
+    assert.equal(result.recovered, true)
+
+    // But the reserved workflow is paused as ambiguous, not dispatched.
+    const stuck = store.load('wf-normal')
+    assert.equal(stuck!.status, 'paused')
+
+    // The other workflow must still be queued (not dispatched).
+    const other = store.load('wf-other')
+    assert.equal(other!.status, 'queued')
+
+    // No dispatch should have occurred during recovery.
+    assert.equal(dispatchCount, 0)
+
+    recoverHandle.dispose()
+  })
 })

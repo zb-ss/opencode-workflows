@@ -82,6 +82,8 @@ function defaultClearInterval(handle: unknown): void {
   if (handle !== null && handle !== undefined) clearInterval(handle as ReturnType<typeof setInterval>)
 }
 
+type SchedulerState = 'stopped' | 'recovering' | 'active' | 'disposed'
+
 export class QueueScheduler {
   private readonly store: QueueStore
   private readonly config: Required<Pick<EnabledQueueConfig, 'max_concurrent_workflows' | 'lease_duration_ms' | 'renewal_interval_ms' | 'recovery_attempt_limit'>>
@@ -94,7 +96,7 @@ export class QueueScheduler {
   private leaseHandle: FencingLeaseHandle | null = null
   private leaseRecord: FencingLeaseRecord | null = null
   private renewalTimer: unknown | null = null
-  private disposed = false
+  private schedulerState: SchedulerState = 'stopped'
 
   constructor(options: QueueSchedulerOptions) {
     this.store = options.store
@@ -115,9 +117,10 @@ export class QueueScheduler {
 
   start(options?: { schedule?: boolean }): QueueSchedulerHandle {
     const shouldSchedule = options?.schedule ?? true
-    if (this.disposed) throw new QueueSchedulerError('disposed', 'scheduler has been disposed')
+    if (this.schedulerState === 'disposed') throw new QueueSchedulerError('disposed', 'scheduler has been disposed')
     if (this.leaseHandle !== null) {
       if (this.leaseHandle.is_valid()) {
+        this.schedulerState = 'active'
         if (shouldSchedule) this.schedule()
         return this.handleFromCurrentLease()
       }
@@ -126,6 +129,7 @@ export class QueueScheduler {
     const leaseStore = this.store.getLeaseStore()
     this.leaseHandle = leaseStore.acquire()
     this.leaseRecord = this.leaseHandle.lease
+    this.schedulerState = 'active'
     this.startRenewalTimer()
     if (shouldSchedule) this.schedule()
     return this.handleFromCurrentLease()
@@ -154,7 +158,7 @@ export class QueueScheduler {
   }
 
   renew(): void {
-    if (this.disposed || this.leaseHandle === null) return
+    if (this.schedulerState === 'disposed' || this.leaseHandle === null) return
     try {
       this.leaseRecord = this.leaseHandle.renew()
     } catch {
@@ -163,10 +167,12 @@ export class QueueScheduler {
   }
 
   async recover(): Promise<QueueRecoveryResult> {
-    if (this.disposed) throw new QueueSchedulerError('disposed', 'scheduler has been disposed')
+    if (this.schedulerState === 'disposed') throw new QueueSchedulerError('disposed', 'scheduler has been disposed')
     if (this.leaseHandle === null || this.leaseRecord === null) {
       throw new QueueSchedulerError('no_lease', 'recovery requires an active lease')
     }
+    // Enter recovering state: schedule() is disabled until recovery completes.
+    this.schedulerState = 'recovering'
     const leaseHandle = this.leaseHandle
     const generation = this.leaseRecord.fencing_generation
     const index = this.store.rebuildIndex()
@@ -257,17 +263,28 @@ export class QueueScheduler {
         failures.push({ workflow_id: record.workflow_id, error: (error as Error).message })
       }
     }
-    return {
+    const result: QueueRecoveryResult = {
       recovered: failures.length === 0,
       reconciled,
       failed: failures.length,
       failures,
     }
+    // Only activate scheduling after successful recovery. If any record
+    // failed reconciliation, keep the scheduler non-dispatching so the
+    // operator can inspect and resolve before work is admitted.
+    if (result.recovered) {
+      this.schedulerState = 'active'
+    } else {
+      // Stay in recovering state; schedule() will be a no-op until the
+      // operator resolves the failures and explicitly reactivates.
+      this.schedulerState = 'stopped'
+    }
+    return result
   }
 
   dispose(): void {
-    if (this.disposed) return
-    this.disposed = true
+    if (this.schedulerState === 'disposed') return
+    this.schedulerState = 'disposed'
     this.stopRenewalTimer()
     if (this.leaseHandle !== null) {
       this.preserveLaunchIntents()
@@ -278,7 +295,7 @@ export class QueueScheduler {
   }
 
   schedule(): void {
-    if (this.disposed || this.leaseHandle === null || this.leaseRecord === null) return
+    if (this.schedulerState !== 'active' || this.leaseHandle === null || this.leaseRecord === null) return
     if (!this.leaseHandle.is_valid()) {
       this.handleLeaseLoss()
       return
@@ -395,6 +412,7 @@ export class QueueScheduler {
 
   private handleLeaseLoss(): void {
     this.stopRenewalTimer()
+    this.schedulerState = 'stopped'
     if (this.leaseHandle === null || this.leaseRecord === null) return
     this.preserveLaunchIntents()
     this.leaseHandle = null

@@ -523,6 +523,11 @@ export async function createQueueOwnerTools(input: PluginInput) {
           const { store, scheduler } = getOrCreate(context, projectRoot, queueConfig)
           const handle = scheduler.start({ schedule: false })
           const result: QueueRecoveryResult = await scheduler.recover()
+          // Only schedule if recovery succeeded. If it failed, the scheduler
+          // stays non-dispatching until the operator resolves the failures.
+          if (result.recovered) {
+            scheduler.schedule()
+          }
           return JSON.stringify({ recovered: result.recovered, reconciled: result.reconciled, failed: result.failed, failures: result.failures })
         },
       }),
