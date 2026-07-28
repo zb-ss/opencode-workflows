@@ -19,7 +19,7 @@ import { emptyAutomationUsageTelemetry } from './epic-budget-usage.ts'
 import { sha256Hex } from './canonical-json.ts'
 import type { EnabledQueueConfig, QueueBudget } from './queue-policy.ts'
 import { isFailureRetryable, transportBackoffDelayMs } from './automation-retry-policy.ts'
-import type { FailureClass } from './automation-policy-contracts.ts'
+import type { FailureClass, RetryAttemptCounters } from './automation-policy-contracts.ts'
 
 const FILE_MODE = 0o600
 const DIR_MODE = 0o700
@@ -95,37 +95,70 @@ function assertAuthority(leaseStore: FencingLeaseStore, handle: FencingLeaseHand
   leaseStore.assertAuthority(handle.lease.fencing_generation, handle.lease.lease_id)
 }
 
-function incrementRetryCounters(record: QueueWorkflowRecord, failure: FailureClass | null): QueueWorkflowRecord['retry_counters'] {
-  const counters = record.retry_counters ?? { semantic_attempts: 0, contract_attempts: 0, transport_attempts: 0, consecutive_no_progress_attempts: 0 }
+function incrementRetryCounters(counters: RetryAttemptCounters, failure: FailureClass): RetryAttemptCounters {
   if (failure === 'semantic') return { ...counters, semantic_attempts: counters.semantic_attempts + 1 }
   if (failure === 'contract') return { ...counters, contract_attempts: counters.contract_attempts + 1 }
   if (failure === 'transport') return { ...counters, transport_attempts: counters.transport_attempts + 1 }
   return counters
 }
 
-function transportRetryNotBefore(policy: NonNullable<QueueStoreOptions['retry_policy']>, now: number, retryIndex: number): string | null {
-  try {
-    const delay = transportBackoffDelayMs(policy, retryIndex)
-    return new Date(now + delay).toISOString()
-  } catch {
-    return null
-  }
+function transportRetryNotBefore(policy: NonNullable<QueueStoreOptions['retry_policy']>, now: number, retryIndex: number): string {
+  const delay = transportBackoffDelayMs(policy, retryIndex)
+  return new Date(now + delay).toISOString()
 }
 
-function shouldRequeueAfterFailure(record: QueueWorkflowRecord, config: Pick<QueueStoreOptions, 'retry_policy' | 'recovery_attempt_limit'>): { requeue: boolean; reason: string | null } {
-  if (record.status !== 'failed' && record.status !== 'paused') return { requeue: true, reason: null }
+interface RetryDecision {
+  requeue: boolean
+  reason: string | null
+  updatedCounters: RetryAttemptCounters
+  retryNotBefore: string | null
+}
+
+function evaluateRetryDecision(
+  record: QueueWorkflowRecord,
+  config: Pick<QueueStoreOptions, 'retry_policy' | 'recovery_attempt_limit'>,
+  now: number,
+): RetryDecision {
+  const baseCounters: RetryAttemptCounters = record.retry_counters ?? { semantic_attempts: 0, contract_attempts: 0, transport_attempts: 0, consecutive_no_progress_attempts: 0 }
+
+  // Non-failed/paused records (e.g. queued by owner resume) requeue without
+  // incrementing counters.
+  if (record.status !== 'failed' && record.status !== 'paused') {
+    return { requeue: true, reason: null, updatedCounters: baseCounters, retryNotBefore: null }
+  }
+
+  // Recovery attempt ceiling.
   if ((record.recovery_attempt_count ?? 0) >= (config.recovery_attempt_limit ?? Number.MAX_SAFE_INTEGER)) {
-    return { requeue: false, reason: 'recovery attempt limit exceeded' }
+    return { requeue: false, reason: 'recovery attempt limit exceeded', updatedCounters: baseCounters, retryNotBefore: null }
   }
-  if (record.failure_classification === null) return { requeue: true, reason: null }
+
+  // No failure classification (e.g. owner-initiated resume from pause).
+  if (record.failure_classification === null) {
+    return { requeue: true, reason: null, updatedCounters: baseCounters, retryNotBefore: null }
+  }
+
+  // Ambiguous and cancelled failures are never retried.
   if (record.failure_classification === 'ambiguous_launch' || record.failure_classification === 'cancelled') {
-    return { requeue: false, reason: `failure classification ${record.failure_classification} is not retryable` }
+    return { requeue: false, reason: `failure classification ${record.failure_classification} is not retryable`, updatedCounters: baseCounters, retryNotBefore: null }
   }
-  const counters = incrementRetryCounters(record, record.failure_classification)!
-  if (config.retry_policy && !isFailureRetryable(record.failure_classification, counters, config.retry_policy)) {
-    return { requeue: false, reason: 'retry policy ceiling reached' }
+
+  // Increment the matching counter exactly once for this failure.
+  const failure = record.failure_classification
+  const updatedCounters = incrementRetryCounters(baseCounters, failure)
+
+  // Check retry policy ceiling using the incremented counters.
+  if (config.retry_policy && !isFailureRetryable(failure, updatedCounters, config.retry_policy)) {
+    return { requeue: false, reason: 'retry policy ceiling reached', updatedCounters, retryNotBefore: null }
   }
-  return { requeue: true, reason: null }
+
+  // Calculate transport backoff from the incremented transport attempt index.
+  let retryNotBefore: string | null = null
+  if (failure === 'transport' && config.retry_policy) {
+    const transportAttempts = updatedCounters.transport_attempts
+    retryNotBefore = transportRetryNotBefore(config.retry_policy, now, Math.max(0, transportAttempts - 1))
+  }
+
+  return { requeue: true, reason: null, updatedCounters, retryNotBefore }
 }
 
 export class QueueStore {
@@ -280,22 +313,22 @@ export class QueueStore {
     leaseHandle: FencingLeaseHandle,
   ): QueueWorkflowRecord {
     return this.update(workflowId, expectedRevision, leaseHandle, (record) => {
-      const decision = shouldRequeueAfterFailure(record, { retry_policy: this.retryPolicy, recovery_attempt_limit: this.recoveryAttemptLimit })
+      const decision = evaluateRetryDecision(record, { retry_policy: this.retryPolicy, recovery_attempt_limit: this.recoveryAttemptLimit }, this.now())
+      // Always persist the updated counters, even when retry is blocked.
+      // This ensures the ceiling is recorded durably.
+      record.retry_counters = decision.updatedCounters
       if (!decision.requeue) {
         record.status = 'failed'
         record.pause_reason = decision.reason
+        record.retry_not_before = null
         return record
       }
       record.status = 'queued'
       record.pause_reason = null
+      record.retry_not_before = decision.retryNotBefore
+      // Clear the failure classification only after all retry evidence
+      // (counters, backoff) has been derived from it.
       record.failure_classification = null
-      record.retry_counters = incrementRetryCounters(record, record.failure_classification)
-      if (record.failure_classification === 'transport' && this.retryPolicy) {
-        const transportAttempts = record.retry_counters!.transport_attempts
-        record.retry_not_before = transportRetryNotBefore(this.retryPolicy, this.now(), Math.max(0, transportAttempts - 1))
-      } else {
-        record.retry_not_before = null
-      }
       record.recovery_attempt_count = (record.recovery_attempt_count ?? 0) + 1
       return record
     })

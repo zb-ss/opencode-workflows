@@ -4,7 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, it } from 'node:test'
 
-import { FencingLeaseStore } from '../../lib/fencing-lease.ts'
+import { FencingLeaseStore, type FencingLeaseHandle } from '../../lib/fencing-lease.ts'
 import { QueueStore, QueueStoreError } from '../../lib/queue-store.ts'
 import type { QueueWorkflowRecord } from '../../lib/queue-contracts.ts'
 
@@ -284,5 +284,169 @@ describe('QueueStore', () => {
     })
     assert.equal(updated.status, 'leased')
     assert.equal(updated.fencing_generation, 2)
+  })
+})
+
+function retryFixture() {
+  const dir = tempDir('queue-retry-')
+  const leaseStore = new FencingLeaseStore({
+    lease_directory: path.join(dir, 'lease'),
+    lock_directory: dir,
+    owner: 'test-scheduler',
+    lease_duration_ms: 60_000,
+    now: clockNow,
+  })
+  const handle = leaseStore.acquire()
+  const store = new QueueStore({
+    config_directory: dir,
+    owner: 'test-scheduler',
+    now: clockNow,
+    retry_policy: {
+      max_semantic_attempts: 3,
+      max_contract_attempts: 3,
+      max_transport_attempts: 3,
+      max_no_progress_attempts: 2,
+      transport_backoff: { strategy: 'exponential', initial_delay_ms: 1000, maximum_delay_ms: 8000, multiplier: 2 },
+    },
+    recovery_attempt_limit: 10,
+  })
+  return { dir, leaseStore, handle, store }
+}
+
+function failRecord(store: QueueStore, workflowId: string, revision: number, handle: FencingLeaseHandle, classification: string): QueueWorkflowRecord {
+  return store.update(workflowId, revision, handle, (r) => {
+    r.status = 'failed'
+    r.failure_classification = classification as never
+    return r
+  })
+}
+
+describe('QueueStore applyRetryPolicy', () => {
+  it('repeated transport failures increment counters and use exponential backoff', () => {
+    const test = retryFixture()
+    const initial = test.store.enqueue(workflowInput(), test.handle)
+
+    const f1 = failRecord(test.store, 'wf-1', initial.state_revision, test.handle, 'transport')
+    const r1 = test.store.applyRetryPolicy('wf-1', f1.state_revision, test.handle)
+    assert.equal(r1.status, 'queued')
+    assert.equal(r1.retry_counters!.transport_attempts, 1)
+    assert.equal(r1.retry_not_before, new Date(clock + 1000).toISOString())
+    assert.equal(r1.recovery_attempt_count, 1)
+
+    const f2 = failRecord(test.store, 'wf-1', r1.state_revision, test.handle, 'transport')
+    const r2 = test.store.applyRetryPolicy('wf-1', f2.state_revision, test.handle)
+    assert.equal(r2.retry_counters!.transport_attempts, 2)
+    assert.equal(r2.retry_not_before, new Date(clock + 2000).toISOString())
+    assert.equal(r2.recovery_attempt_count, 2)
+
+    const f3 = failRecord(test.store, 'wf-1', r2.state_revision, test.handle, 'transport')
+    const r3 = test.store.applyRetryPolicy('wf-1', f3.state_revision, test.handle)
+    assert.equal(r3.status, 'failed')
+    assert.equal(r3.retry_counters!.transport_attempts, 3)
+    assert.equal(r3.retry_not_before, null)
+    assert.match(r3.pause_reason!, /retry policy ceiling/)
+  })
+
+  it('semantic and contract counters are independent', () => {
+    const test = retryFixture()
+    const initial = test.store.enqueue(workflowInput(), test.handle)
+
+    // First semantic failure
+    const f1 = failRecord(test.store, 'wf-1', initial.state_revision, test.handle, 'semantic')
+    const r1 = test.store.applyRetryPolicy('wf-1', f1.state_revision, test.handle)
+    assert.equal(r1.retry_counters!.semantic_attempts, 1)
+    assert.equal(r1.retry_counters!.contract_attempts, 0)
+    assert.equal(r1.retry_counters!.transport_attempts, 0)
+    assert.equal(r1.retry_not_before, null)
+
+    // Then a contract failure — only contract counter increments
+    const f2 = failRecord(test.store, 'wf-1', r1.state_revision, test.handle, 'contract')
+    const r2 = test.store.applyRetryPolicy('wf-1', f2.state_revision, test.handle)
+    assert.equal(r2.retry_counters!.semantic_attempts, 1)
+    assert.equal(r2.retry_counters!.contract_attempts, 1)
+    assert.equal(r2.retry_counters!.transport_attempts, 0)
+    assert.equal(r2.retry_not_before, null)
+  })
+
+  it('ambiguous_launch and cancelled are never retried', () => {
+    const test = retryFixture()
+    const initial = test.store.enqueue(workflowInput(), test.handle)
+
+    const f1 = failRecord(test.store, 'wf-1', initial.state_revision, test.handle, 'ambiguous_launch')
+    const r1 = test.store.applyRetryPolicy('wf-1', f1.state_revision, test.handle)
+    assert.equal(r1.status, 'failed')
+    assert.match(r1.pause_reason!, /not retryable/)
+
+    // Reset to failed with cancelled classification
+    const f2 = failRecord(test.store, 'wf-1', r1.state_revision, test.handle, 'cancelled')
+    const r2 = test.store.applyRetryPolicy('wf-1', f2.state_revision, test.handle)
+    assert.equal(r2.status, 'failed')
+    assert.match(r2.pause_reason!, /not retryable/)
+  })
+
+  it('persisted counters survive QueueStore reconstruction', () => {
+    const dir = tempDir('queue-retry-reconstruct-')
+    const leaseStore = new FencingLeaseStore({
+      lease_directory: path.join(dir, 'lease'),
+      lock_directory: dir,
+      owner: 'proc-a',
+      lease_duration_ms: 60_000,
+      now: clockNow,
+    })
+    const handle = leaseStore.acquire()
+    const store1 = new QueueStore({
+      config_directory: dir,
+      owner: 'proc-a',
+      now: clockNow,
+      retry_policy: {
+        max_semantic_attempts: 3, max_contract_attempts: 3, max_transport_attempts: 3,
+        max_no_progress_attempts: 2,
+        transport_backoff: { strategy: 'exponential', initial_delay_ms: 1000, maximum_delay_ms: 8000, multiplier: 2 },
+      },
+      recovery_attempt_limit: 10,
+    })
+    const initial = store1.enqueue(workflowInput(), handle)
+    const f1 = failRecord(store1, 'wf-1', initial.state_revision, handle, 'transport')
+    const r1 = store1.applyRetryPolicy('wf-1', f1.state_revision, handle)
+    assert.equal(r1.retry_counters!.transport_attempts, 1)
+
+    // Reconstruct store from same directory
+    const store2 = new QueueStore({
+      config_directory: dir,
+      owner: 'proc-b',
+      now: clockNow,
+      retry_policy: {
+        max_semantic_attempts: 3, max_contract_attempts: 3, max_transport_attempts: 3,
+        max_no_progress_attempts: 2,
+        transport_backoff: { strategy: 'exponential', initial_delay_ms: 1000, maximum_delay_ms: 8000, multiplier: 2 },
+      },
+      recovery_attempt_limit: 10,
+    })
+    const loaded = store2.load('wf-1')
+    assert.equal(loaded!.retry_counters!.transport_attempts, 1)
+    assert.equal(loaded!.recovery_attempt_count, 1)
+
+    // Second failure on reconstructed store increments from 1 to 2
+    const f2 = failRecord(store2, 'wf-1', loaded!.state_revision, handle, 'transport')
+    const r2 = store2.applyRetryPolicy('wf-1', f2.state_revision, handle)
+    assert.equal(r2.retry_counters!.transport_attempts, 2)
+  })
+
+  it('stale revision does not double-increment counters', () => {
+    const test = retryFixture()
+    const initial = test.store.enqueue(workflowInput(), test.handle)
+    const f1 = failRecord(test.store, 'wf-1', initial.state_revision, test.handle, 'transport')
+    const r1 = test.store.applyRetryPolicy('wf-1', f1.state_revision, test.handle)
+    assert.equal(r1.retry_counters!.transport_attempts, 1)
+
+    // Try to apply retry policy with the old (stale) revision
+    assert.throws(
+      () => test.store.applyRetryPolicy('wf-1', f1.state_revision, test.handle),
+      (err: Error) => err instanceof QueueStoreError && err.code === 'stale_revision',
+    )
+
+    // Counters must not have been double-incremented
+    const loaded = test.store.load('wf-1')
+    assert.equal(loaded!.retry_counters!.transport_attempts, 1)
   })
 })
