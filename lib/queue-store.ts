@@ -10,6 +10,7 @@ import {
 import {
   QUEUE_SCHEMA_VERSION,
   QueueWorkflowRecordSchema,
+  parseQueueWorkflowRecord,
   isValidTransition,
   type QueueWorkflowRecord,
   type QueueWorkflowStatus,
@@ -236,7 +237,7 @@ export class QueueStore {
     try {
       const content = fs.readFileSync(filePath, 'utf8')
       const parsed = JSON.parse(content) as unknown
-      return QueueWorkflowRecordSchema.parse(parsed)
+      return parseQueueWorkflowRecord(parsed)
     } catch (error) {
       if (error instanceof QueueStoreError) throw error
       throw new QueueStoreError('record_corrupt', `workflow ${workflowId} has a corrupt or unreadable record: ${(error as Error).message}`)
@@ -363,7 +364,7 @@ export class QueueStore {
     try {
       const content = fs.readFileSync(filePath, 'utf8')
       const parsed = JSON.parse(content) as unknown
-      return QueueWorkflowRecordSchema.parse(parsed)
+      return parseQueueWorkflowRecord(parsed)
     } catch (error) {
       if (error instanceof QueueStoreError) throw error
       throw new QueueStoreError('record_corrupt', `workflow ${workflowId} has a corrupt or unreadable record: ${(error as Error).message}`)

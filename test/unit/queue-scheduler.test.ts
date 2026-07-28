@@ -76,6 +76,8 @@ function seedLeasedWorkflow(store: QueueStore, handle: import('../../lib/fencing
       workflow_id: id,
       fencing_generation: generation,
       session_id: null,
+      child_session_ids: [],
+      engine_instance_id: null,
       agent: 'standard',
       model: 'development',
       launch_state: launchState,

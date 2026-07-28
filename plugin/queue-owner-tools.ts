@@ -1,5 +1,6 @@
 import { tool, type Plugin, type PluginInput, type ToolContext } from '@opencode-ai/plugin'
 import { createOpencodeClient as createOpencodeClientV2 } from '@opencode-ai/sdk/v2/client'
+import { randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -198,22 +199,24 @@ export async function createQueueOwnerTools(input: PluginInput) {
         validationOperations: validationOperationNames(config.validation_broker),
         autonomy: config.automation.autonomy,
       })
+      const engineInstanceId = `engine-${randomUUID()}`
       engines.set(workflowId, { engine, leaseHandle, store })
       // Transition launch intent to created before starting the engine.
       let createdIntent = false
       try {
         store.update(workflowId, loaded.state_revision, leaseHandle, (record) => {
           if (record.launch_intent !== null) {
-            record.launch_intent = { ...record.launch_intent, launch_state: 'created' }
+            record.launch_intent = {
+              ...record.launch_intent,
+              launch_state: 'created',
+              engine_instance_id: engineInstanceId,
+              created_at: new Date().toISOString(),
+            }
           }
           return record
         })
         createdIntent = true
       } catch {
-        // The CAS failed: the record was modified by another process, the
-        // lease was lost, or the record was cancelled/paused. Do NOT start
-        // the engine. Dispose it and remove it from the registry so it
-        // cannot create child sessions or respond to events.
         engines.delete(workflowId)
         try { engine.dispose() } catch {}
         return
@@ -226,13 +229,21 @@ export async function createQueueOwnerTools(input: PluginInput) {
         mode: loaded.mode,
         task: loaded.task,
       })
-      // Transition launch intent to prompted after the engine has started.
+      // Transition to prompted and running after the engine has started.
       try {
         const current = store.load(workflowId)
         if (current) {
           store.update(workflowId, current.state_revision, leaseHandle, (record) => {
             if (record.launch_intent !== null) {
-              record.launch_intent = { ...record.launch_intent, launch_state: 'prompted' }
+              record.launch_intent = {
+                ...record.launch_intent,
+                launch_state: 'prompted',
+                prompted_at: new Date().toISOString(),
+              }
+            }
+            // Transition outer status to running now that the engine is launched.
+            if (record.status === 'leased') {
+              record.status = 'running'
             }
             return record
           })
@@ -450,8 +461,25 @@ export async function createQueueOwnerTools(input: PluginInput) {
           assertOwnership(loaded, context, projectRoot)
           assertExpected(loaded, args.expected_revision, args.expected_generation)
           await operationAsk(context, 'queue_resume', { workflow_id: args.workflow_id })
+          // Reject ambiguous launch intents: resuming an ambiguous record
+          // would requeue it with a non-null intent, which admission rejects,
+          // leaving it permanently stuck.
+          if (loaded.launch_intent !== null && loaded.launch_intent.launch_state === 'ambiguous') {
+            throw new QueueInputError('ambiguous_intent', 'cannot resume a workflow with an ambiguous launch intent; require explicit owner resolution')
+          }
           const handle = scheduler.start()
           const updated = store.applyRetryPolicy(args.workflow_id, args.expected_revision, handle.lease)
+          // Clear the launch intent when resuming so the record can be
+          // re-admitted from queued.
+          if (updated.status === 'queued' && updated.launch_intent !== null) {
+            const current = store.load(args.workflow_id)
+            if (current) {
+              store.update(args.workflow_id, current.state_revision, handle.lease, (record) => {
+                record.launch_intent = null
+                return record
+              })
+            }
+          }
           scheduler.schedule()
           return JSON.stringify({ updated: true, workflow: { workflow_id: updated.workflow_id, status: updated.status, revision: updated.state_revision } })
         },

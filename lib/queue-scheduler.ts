@@ -196,34 +196,63 @@ export class QueueScheduler {
       if (record.launch_intent.fencing_generation > generation) {
         throw new QueueSchedulerError('stale_generation', `launch intent carries a newer generation ${record.launch_intent.fencing_generation}`)
       }
-      if (TERMINAL_LAUNCH_STATES.has(record.launch_intent.launch_state)) {
-        try {
-          this.store.reconcile(record.workflow_id, record.state_revision, leaseHandle, (next) => {
-            next.fencing_generation = generation
-            return next
-          })
-          reconciled += 1
-        } catch (error) {
-          failures.push({ workflow_id: record.workflow_id, error: (error as Error).message })
-        }
-        continue
-      }
-      const isAmbiguous = AMBIGUOUS_LAUNCH_STATES.has(record.launch_intent.launch_state)
+      const launchState = record.launch_intent.launch_state
       try {
-        if (isAmbiguous) {
-          this.store.reconcile(record.workflow_id, record.state_revision, leaseHandle, (next) => {
-            next.status = 'paused'
-            next.pause_reason = 'ambiguous launch intent during recovery'
-            if (next.launch_intent !== null) {
-              next.launch_intent = { ...next.launch_intent, launch_state: 'ambiguous' }
-            }
-            return next
-          })
-        } else {
-          // Apply retry policy and recovery ceiling before requeueing.
-          this.store.applyRetryPolicy(record.workflow_id, record.state_revision, leaseHandle)
+        switch (launchState) {
+          case 'settled': {
+            // Terminal: the engine completed. Re-stamp the generation and
+            // let settlement finalize the outer status.
+            this.store.reconcile(record.workflow_id, record.state_revision, leaseHandle, (next) => {
+              next.fencing_generation = generation
+              return next
+            })
+            reconciled += 1
+            break
+          }
+          case 'ambiguous': {
+            // Terminal: the launch was ambiguous. Re-stamp and preserve
+            // the paused status for attended resolution.
+            this.store.reconcile(record.workflow_id, record.state_revision, leaseHandle, (next) => {
+              next.fencing_generation = generation
+              return next
+            })
+            reconciled += 1
+            break
+          }
+          case 'reserved': {
+            // Ambiguous: a reservation was made but no child session was
+            // created. We cannot prove whether the launch occurred.
+            this.store.reconcile(record.workflow_id, record.state_revision, leaseHandle, (next) => {
+              next.status = 'paused'
+              next.pause_reason = 'ambiguous launch intent during recovery'
+              if (next.launch_intent !== null) {
+                next.launch_intent = { ...next.launch_intent, launch_state: 'ambiguous' }
+              }
+              return next
+            })
+            reconciled += 1
+            break
+          }
+          case 'created':
+          case 'prompted': {
+            // Ambiguous: a child session may have been created. We cannot
+            // prove whether the engine launched or produced side effects.
+            this.store.reconcile(record.workflow_id, record.state_revision, leaseHandle, (next) => {
+              next.status = 'paused'
+              next.pause_reason = 'ambiguous launch intent during recovery'
+              if (next.launch_intent !== null) {
+                next.launch_intent = { ...next.launch_intent, launch_state: 'ambiguous' }
+              }
+              return next
+            })
+            reconciled += 1
+            break
+          }
+          default: {
+            // Exhaustive: any future launch state must be handled explicitly.
+            failures.push({ workflow_id: record.workflow_id, error: `unhandled launch state: ${launchState}` })
+          }
         }
-        reconciled += 1
       } catch (error) {
         failures.push({ workflow_id: record.workflow_id, error: (error as Error).message })
       }
@@ -318,6 +347,8 @@ export class QueueScheduler {
       workflow_id: record.workflow_id,
       fencing_generation: generation,
       session_id: null,
+      child_session_ids: [],
+      engine_instance_id: null,
       agent: record.mode,
       model: record.definition_id,
       launch_state: 'reserved',

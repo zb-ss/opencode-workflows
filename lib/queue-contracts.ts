@@ -15,7 +15,7 @@ import { SafeIdentifierSchema } from './safe-identifier.ts'
 
 const DateTimeSchema = z.string().min(1).max(64).check(z.iso.datetime({ offset: true }))
 
-export const QUEUE_SCHEMA_VERSION = 1
+export const QUEUE_SCHEMA_VERSION = 2
 
 export type QueueWorkflowStatus =
   | 'queued'
@@ -42,6 +42,8 @@ export interface QueueLaunchIntent {
   workflow_id: string
   fencing_generation: number
   session_id: string | null
+  child_session_ids: string[]
+  engine_instance_id: string | null
   agent: string
   model: string
   launch_state: QueueLaunchState
@@ -56,6 +58,8 @@ export const QueueLaunchIntentSchema = z.object({
   workflow_id: SafeIdentifierSchema,
   fencing_generation: safePositiveInteger,
   session_id: SafeIdentifierSchema.nullable(),
+  child_session_ids: z.array(SafeIdentifierSchema).max(256),
+  engine_instance_id: SafeIdentifierSchema.nullable(),
   agent: SafeIdentifierSchema,
   model: z.string().min(1).max(256),
   launch_state: QueueLaunchStateSchema,
@@ -110,6 +114,79 @@ export const QueueWorkflowRecordSchema = z.object({
   updated_at: DateTimeSchema,
   usage: AutomationUsageTelemetrySchema,
 }).strict()
+
+/**
+ * Legacy v1 record schema (before recovery_attempt_count, child_session_ids,
+ * and engine_instance_id were added). Used for one-way migration to v2.
+ */
+const LegacyV1LaunchIntentSchema = z.object({
+  intent_id: SafeIdentifierSchema,
+  workflow_id: SafeIdentifierSchema,
+  fencing_generation: safePositiveInteger,
+  session_id: SafeIdentifierSchema.nullable(),
+  agent: SafeIdentifierSchema,
+  model: z.string().min(1).max(256),
+  launch_state: QueueLaunchStateSchema,
+  reserved_at: DateTimeSchema,
+  created_at: DateTimeSchema.nullable(),
+  prompted_at: DateTimeSchema.nullable(),
+  settled_at: DateTimeSchema.nullable(),
+}).strict()
+
+const LegacyV1RecordSchema = z.object({
+  schema_version: z.literal(1),
+  workflow_id: SafeIdentifierSchema,
+  definition_id: SafeIdentifierSchema,
+  root_session_id: SafeIdentifierSchema,
+  directory: z.string().min(1).max(4096),
+  worktree: z.string().min(1).max(4096),
+  mode: SafeIdentifierSchema,
+  task: z.string().min(1).max(20000),
+  status: QueueWorkflowStatusSchema,
+  pause_reason: z.string().min(1).max(4096).nullable(),
+  fencing_generation: safePositiveInteger,
+  state_revision: safePositiveInteger,
+  launch_intent: LegacyV1LaunchIntentSchema.nullable(),
+  failure_classification: FailureClassSchema.nullable(),
+  retry_counters: RetryAttemptCountersSchema.nullable(),
+  retry_not_before: DateTimeSchema.nullable(),
+  created_at: DateTimeSchema,
+  updated_at: DateTimeSchema,
+  usage: AutomationUsageTelemetrySchema,
+}).strict()
+
+/**
+ * Parse a raw JSON value as a queue workflow record, migrating legacy v1
+ * records to v2. v1 records lack recovery_attempt_count, child_session_ids,
+ * and engine_instance_id; these are defaulted during migration.
+ *
+ * Malformed records (wrong schema version, missing required fields, or
+ * structurally invalid) fail closed by throwing.
+ */
+export function parseQueueWorkflowRecord(raw: unknown): QueueWorkflowRecord {
+  // Try v2 first.
+  const v2Result = QueueWorkflowRecordSchema.safeParse(raw)
+  if (v2Result.success) return v2Result.data
+
+  // Try v1 migration.
+  const v1Result = LegacyV1RecordSchema.safeParse(raw)
+  if (!v1Result.success) {
+    // Neither v1 nor v2 — re-throw the v2 error for the caller.
+    throw v2Result.error
+  }
+
+  const v1 = v1Result.data
+  const migrated: QueueWorkflowRecord = {
+    ...v1,
+    schema_version: QUEUE_SCHEMA_VERSION,
+    recovery_attempt_count: 0,
+    launch_intent: v1.launch_intent
+      ? { ...v1.launch_intent, child_session_ids: [], engine_instance_id: null }
+      : null,
+  }
+  // Validate the migrated record against the v2 schema.
+  return QueueWorkflowRecordSchema.parse(migrated)
+}
 
 export const QueueIndexEntrySchema = z.object({
   workflow_id: SafeIdentifierSchema,

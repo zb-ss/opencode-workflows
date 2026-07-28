@@ -6,7 +6,7 @@ import { afterEach, describe, it } from 'node:test'
 
 import { FencingLeaseStore, type FencingLeaseHandle } from '../../lib/fencing-lease.ts'
 import { QueueStore, QueueStoreError } from '../../lib/queue-store.ts'
-import type { QueueWorkflowRecord } from '../../lib/queue-contracts.ts'
+import { parseQueueWorkflowRecord, QUEUE_SCHEMA_VERSION, type QueueWorkflowRecord } from '../../lib/queue-contracts.ts'
 
 const temporaryDirectories = new Set<string>()
 const FIXED_NOW = Date.parse('2026-07-24T12:00:00.000Z')
@@ -184,6 +184,8 @@ describe('QueueStore', () => {
         workflow_id: 'wf-1',
         fencing_generation: test.generation,
         session_id: null,
+        child_session_ids: [],
+        engine_instance_id: null,
         agent: 'wf-executor',
         model: 'provider/model',
         launch_state: 'reserved',
@@ -448,5 +450,123 @@ describe('QueueStore applyRetryPolicy', () => {
     // Counters must not have been double-incremented
     const loaded = test.store.load('wf-1')
     assert.equal(loaded!.retry_counters!.transport_attempts, 1)
+  })
+})
+
+describe('QueueStore schema migration', () => {
+  it('migrates a legacy v1 record without data loss', () => {
+    const dir = tempDir('queue-v1-migrate-')
+    const leaseStore = new FencingLeaseStore({
+      lease_directory: path.join(dir, 'lease'),
+      lock_directory: dir,
+      owner: 'proc-a',
+      lease_duration_ms: 60_000,
+      now: clockNow,
+    })
+    const handle = leaseStore.acquire()
+    const store = new QueueStore({ config_directory: dir, owner: 'proc-a', now: clockNow })
+
+    // Write a legacy v1 record directly to disk (no recovery_attempt_count,
+    // no child_session_ids, no engine_instance_id).
+    const v1Record = {
+      schema_version: 1,
+      workflow_id: 'wf-legacy',
+      definition_id: 'development',
+      root_session_id: 'root-1',
+      directory: '/project',
+      worktree: '/project',
+      mode: 'standard',
+      task: 'Legacy workflow.',
+      status: 'queued',
+      pause_reason: null,
+      fencing_generation: handle.lease.fencing_generation,
+      state_revision: 1,
+      launch_intent: null,
+      failure_classification: null,
+      retry_counters: null,
+      retry_not_before: null,
+      created_at: new Date(clock).toISOString(),
+      updated_at: new Date(clock).toISOString(),
+      usage: {
+        sessions: 0, attempts: 0, input_tokens: 0, output_tokens: 0,
+        bounded_read_bytes: 0, bounded_write_bytes: 0, validation_runs: 0,
+        active_time_ms: 0, cost_evidence: { kind: 'unknown' },
+        active_interval_started_at: null, last_active_checkpoint_at: null,
+      },
+    }
+    fs.writeFileSync(path.join(dir, 'workflows', 'wf-legacy.json'), JSON.stringify(v1Record) + '\n', { mode: 0o600 })
+
+    // Load through the store — should migrate to v2.
+    const loaded = store.load('wf-legacy')
+    assert.equal(loaded!.schema_version, QUEUE_SCHEMA_VERSION)
+    assert.equal(loaded!.recovery_attempt_count, 0)
+    assert.equal(loaded!.workflow_id, 'wf-legacy')
+    assert.equal(loaded!.status, 'queued')
+  })
+
+  it('migrates a legacy v1 record with a launch intent', () => {
+    const v1WithIntent = {
+      schema_version: 1,
+      workflow_id: 'wf-intent',
+      definition_id: 'development',
+      root_session_id: 'root-1',
+      directory: '/project',
+      worktree: '/project',
+      mode: 'standard',
+      task: 'Legacy with intent.',
+      status: 'leased',
+      pause_reason: null,
+      fencing_generation: 1,
+      state_revision: 2,
+      launch_intent: {
+        intent_id: 'intent-legacy',
+        workflow_id: 'wf-intent',
+        fencing_generation: 1,
+        session_id: 'child-1',
+        agent: 'standard',
+        model: 'development',
+        launch_state: 'prompted',
+        reserved_at: new Date(clock).toISOString(),
+        created_at: new Date(clock).toISOString(),
+        prompted_at: new Date(clock).toISOString(),
+        settled_at: null,
+      },
+      failure_classification: null,
+      retry_counters: null,
+      retry_not_before: null,
+      created_at: new Date(clock).toISOString(),
+      updated_at: new Date(clock).toISOString(),
+      usage: {
+        sessions: 1, attempts: 1, input_tokens: 100, output_tokens: 50,
+        bounded_read_bytes: 0, bounded_write_bytes: 0, validation_runs: 0,
+        active_time_ms: 5000, cost_evidence: { kind: 'unknown' },
+        active_interval_started_at: null, last_active_checkpoint_at: null,
+      },
+    }
+
+    const migrated = parseQueueWorkflowRecord(v1WithIntent)
+    assert.equal(migrated.schema_version, QUEUE_SCHEMA_VERSION)
+    assert.equal(migrated.recovery_attempt_count, 0)
+    assert.deepEqual(migrated.launch_intent!.child_session_ids, [])
+    assert.equal(migrated.launch_intent!.engine_instance_id, null)
+    assert.equal(migrated.launch_intent!.session_id, 'child-1')
+    assert.equal(migrated.launch_intent!.launch_state, 'prompted')
+  })
+
+  it('malformed v1 record fails closed', () => {
+    const malformed = {
+      schema_version: 1,
+      workflow_id: 'wf-bad',
+      // missing required fields
+    }
+    assert.throws(() => parseQueueWorkflowRecord(malformed))
+  })
+
+  it('unknown schema version fails closed', () => {
+    const unknown = {
+      schema_version: 99,
+      workflow_id: 'wf-unknown',
+    }
+    assert.throws(() => parseQueueWorkflowRecord(unknown))
   })
 })
