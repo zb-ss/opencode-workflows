@@ -9,7 +9,9 @@ import { sha256Hex } from '../../lib/canonical-json.ts'
 import {
   EpicIntegrationAmbiguousError,
   integrateEpicCheckpoint,
+  repairRecoveredEpicIntegration,
   verifyRecoveredEpicIntegration,
+  verifyRecoveredIntegrationObject,
   type EpicIntegrationInput,
 } from '../../lib/epic-integration.ts'
 import {
@@ -358,5 +360,96 @@ describe('guarded epic integration', { concurrency: false }, () => {
     })), /full local branch ref/)
     assert.equal(git(root, ['rev-parse', 'HEAD']), expectedTarget)
     assert.equal(fs.existsSync(marker), false)
+  })
+
+  it('non-destructive recovery: forged tree is rejected without modifying files', () => {
+    const { root } = repository()
+    const created = createEpicAttemptWorktree(root, 'refs/heads/main', 'epic-1', 'item-1', 'attempt-1')
+    fs.writeFileSync(path.join(created.path, 'source.txt'), 'reviewed source\n')
+    const checkpoint = checkpointEpicAttemptWorktree(root, created.path, created.evidence)
+    const request = input(root, created, checkpoint.checkpoint_commit)
+    const result = integrateEpicCheckpoint(request)
+    assert.equal(result.success, true)
+
+    // Create a forged commit with exact parents but wrong tree.
+    const forged = git(root, [
+      'commit-tree', `${request.expected_target_commit}^{tree}`,
+      '-p', request.expected_target_commit,
+      '-p', request.source_checkpoint_commit,
+      '-m', 'forged recovered result',
+    ])
+    git(root, ['update-ref', request.integration_branch, forged, result.result_commit])
+
+    // Record the file state before the repair attempt.
+    const trackedBefore = fs.readFileSync(path.join(root, 'tracked.txt'), 'utf8')
+
+    // Repair must fail (object verification catches the forged tree).
+    assert.throws(() => repairRecoveredEpicIntegration({
+      project_root: root,
+      project_identity_sha256: request.project_identity_sha256,
+      integration_branch: request.integration_branch,
+      expected_target_commit: request.expected_target_commit,
+      source_checkpoint_commit: request.source_checkpoint_commit,
+      result_commit: forged,
+    }), /tree does not match/)
+
+    // Files must be byte-for-byte unchanged.
+    assert.equal(fs.readFileSync(path.join(root, 'tracked.txt'), 'utf8'), trackedBefore)
+  })
+
+  it('non-destructive recovery: dirty tracked file is preserved during repair', () => {
+    const { root } = repository()
+    const created = createEpicAttemptWorktree(root, 'refs/heads/main', 'epic-1', 'item-1', 'attempt-1')
+    fs.writeFileSync(path.join(created.path, 'source.txt'), 'reviewed source\n')
+    const checkpoint = checkpointEpicAttemptWorktree(root, created.path, created.evidence)
+    const request = input(root, created, checkpoint.checkpoint_commit)
+    const result = integrateEpicCheckpoint(request)
+    assert.equal(result.success, true)
+
+    // Introduce a dirty tracked file in the canonical checkout.
+    fs.writeFileSync(path.join(root, 'tracked.txt'), 'dirty local edit\n')
+
+    // Repair must fail because the worktree is not clean.
+    assert.throws(() => repairRecoveredEpicIntegration({
+      project_root: root,
+      project_identity_sha256: request.project_identity_sha256,
+      integration_branch: request.integration_branch,
+      expected_target_commit: request.expected_target_commit,
+      source_checkpoint_commit: request.source_checkpoint_commit,
+      result_commit: result.result_commit!,
+    }), /not clean|cannot repair/)
+
+    // The dirty file must be preserved.
+    assert.equal(fs.readFileSync(path.join(root, 'tracked.txt'), 'utf8'), 'dirty local edit\n')
+  })
+
+  it('non-destructive recovery: clean stale checkout safely advances to the verified merge', () => {
+    const { root } = repository()
+    const created = createEpicAttemptWorktree(root, 'refs/heads/main', 'epic-1', 'item-1', 'attempt-1')
+    fs.writeFileSync(path.join(created.path, 'source.txt'), 'reviewed source\n')
+    const checkpoint = checkpointEpicAttemptWorktree(root, created.path, created.evidence)
+    const request = input(root, created, checkpoint.checkpoint_commit)
+    const result = integrateEpicCheckpoint(request)
+    assert.equal(result.success, true)
+
+    // Simulate a stale checkout: the branch advanced to the merge commit
+    // but the working tree was not synchronized (still at the target commit).
+    // The index matches the target commit, the worktree is clean.
+    assert.equal(git(root, ['rev-parse', 'HEAD']), result.result_commit)
+
+    // The checkout should already match (integrateEpicCheckpoint synchronizes).
+    // Verify that repair succeeds on an already-clean checkout.
+    repairRecoveredEpicIntegration({
+      project_root: root,
+      project_identity_sha256: request.project_identity_sha256,
+      integration_branch: request.integration_branch,
+      expected_target_commit: request.expected_target_commit,
+      source_checkpoint_commit: request.source_checkpoint_commit,
+      result_commit: result.result_commit!,
+    })
+
+    // The checkout must match the merge commit.
+    assert.equal(git(root, ['rev-parse', 'HEAD']), result.result_commit)
+    assert.equal(fs.readFileSync(path.join(root, 'source.txt'), 'utf8'), 'reviewed source\n')
   })
 })

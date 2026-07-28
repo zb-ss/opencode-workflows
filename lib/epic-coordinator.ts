@@ -20,6 +20,7 @@ import {
   integrateEpicCheckpoint,
   repairRecoveredEpicIntegration,
   verifyRecoveredEpicIntegration,
+  verifyRecoveredIntegrationObject,
   type EpicIntegrationInput,
   type EpicIntegrationResult,
 } from './epic-integration.ts'
@@ -105,6 +106,7 @@ export interface EpicCoordinatorRuntime {
   integrate(input: EpicIntegrationInput): EpicIntegrationResult
   mergeParents(project_root: string, commit: string): string[]
   verifyRecoveredIntegration(input: Parameters<typeof verifyRecoveredEpicIntegration>[0]): void
+  verifyRecoveredIntegrationObject(input: Parameters<typeof verifyRecoveredEpicIntegration>[0]): void
   repairRecoveredIntegration(input: Parameters<typeof repairRecoveredEpicIntegration>[0]): void
 }
 
@@ -176,6 +178,7 @@ function defaultRuntime(): EpicCoordinatorRuntime {
     integrate: integrateEpicCheckpoint,
     mergeParents: (project_root, commit) => git(project_root, ['rev-list', '--parents', '-n', '1', commit]).split(/\s+/).slice(1),
     verifyRecoveredIntegration: verifyRecoveredEpicIntegration,
+    verifyRecoveredIntegrationObject,
     repairRecoveredIntegration: repairRecoveredEpicIntegration,
   }
 }

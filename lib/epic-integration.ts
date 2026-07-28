@@ -476,8 +476,16 @@ export function integrateEpicCheckpoint(inputValue: EpicIntegrationInput): EpicI
   }
 }
 
-/** Recomputes the reviewed merge tree before accepting a published result after restart. */
-export function verifyRecoveredEpicIntegration(input: EpicRecoveredIntegrationVerificationInput): void {
+/**
+ * Verify the immutable properties of a recovered integration commit:
+ * project identity, branch head, exact parents, and recomputed merge tree.
+ *
+ * This performs NO filesystem mutation and does not touch the working tree
+ * or index. It only inspects Git object database state.
+ *
+ * Throws if any immutable property does not match the reviewed merge.
+ */
+export function verifyRecoveredIntegrationObject(input: EpicRecoveredIntegrationVerificationInput): void {
   validateOid(input.expected_target_commit, 'expected target commit')
   validateOid(input.source_checkpoint_commit, 'source checkpoint commit')
   validateOid(input.result_commit, 'result commit')
@@ -497,8 +505,18 @@ export function verifyRecoveredEpicIntegration(input: EpicRecoveredIntegrationVe
   if (parents.length !== 3 || parents[1] !== input.expected_target_commit || parents[2] !== input.source_checkpoint_commit) {
     throw new Error('recovered integration result does not have the exact expected parents')
   }
-  // Verify the canonical checkout matches the published merge commit.
-  // If the worktree or index is stale or dirty, the integration is ambiguous.
+}
+
+/**
+ * Verify that the canonical checkout matches the published merge commit.
+ *
+ * This checks for incomplete Git operations and verifies the index and
+ * worktree match the result commit. It performs NO filesystem mutation.
+ *
+ * Throws if the checkout is stale, dirty, or has an incomplete operation.
+ */
+export function verifyRecoveredCheckout(input: EpicRecoveredIntegrationVerificationInput): void {
+  const projectRoot = resolveProjectRoot(input.project_root)
   if (hasOperationState(projectRoot)) {
     throw new Error('recovered integration target has an incomplete Git operation')
   }
@@ -507,30 +525,63 @@ export function verifyRecoveredEpicIntegration(input: EpicRecoveredIntegrationVe
   }
 }
 
+/** Recomputes the reviewed merge tree before accepting a published result after restart. */
+export function verifyRecoveredEpicIntegration(input: EpicRecoveredIntegrationVerificationInput): void {
+  verifyRecoveredIntegrationObject(input)
+  verifyRecoveredCheckout(input)
+}
+
 export const integrateReviewedEpicCheckpoint = integrateEpicCheckpoint
 
 /**
- * One-shot repair of a recovered integration checkout mismatch.
+ * Safely synchronize the canonical checkout to a verified recovered merge
+ * commit. This is non-destructive: it refuses to touch a dirty or stale
+ * checkout and never runs `git checkout -f`.
  *
- * If the integration branch still points to the reviewed merge commit, force
- * the canonical worktree/index to match it and re-verify. This is safe because
- * the merge commit was already reviewed and published; only local stale state
- * is being reset.
+ * Prerequisites:
+ * - The result commit must be fully verified via verifyRecoveredIntegrationObject.
+ * - The integration branch must still point to the result commit.
+ * - The worktree must be at the expected target commit with no local changes.
+ * - There must be no incomplete Git operation.
+ *
+ * If any prerequisite fails, the function throws without modifying any files.
  */
 export function repairRecoveredEpicIntegration(input: EpicRecoveredIntegrationVerificationInput): void {
-  validateOid(input.expected_target_commit, 'expected target commit')
-  validateOid(input.source_checkpoint_commit, 'source checkpoint commit')
-  validateOid(input.result_commit, 'result commit')
-  validateSha256(input.project_identity_sha256, 'project identity')
+  // First, verify the immutable object properties (parents, tree, identity).
+  // If the commit is forged or has an unreviewed tree, fail without any
+  // filesystem mutation.
+  verifyRecoveredIntegrationObject(input)
+
   const projectRoot = resolveProjectRoot(input.project_root)
-  if (sha256Hex(projectRoot) !== input.project_identity_sha256) throw new Error('canonical project root does not match the expected project identity')
   assertIntegrationBranch(projectRoot, input.integration_branch)
-  const head = git(['rev-parse', '--verify', `${input.integration_branch}^{commit}`], projectRoot)
-  if (head !== input.result_commit) {
-    throw new Error('integration branch no longer points to the reviewed merge commit; cannot repair checkout automatically')
+
+  // Verify the worktree is clean and matches either the expected target
+  // (stale checkout that needs synchronization) or the result commit
+  // (already synchronized). We will not discard local changes.
+  if (hasOperationState(projectRoot)) {
+    throw new Error('recovered integration target has an incomplete Git operation; cannot repair')
   }
-  // Force worktree and index to the reviewed merge commit. This discards any
-  // stale local changes that caused the mismatch.
-  git(['checkout', '-f', input.result_commit, '--', '.'], projectRoot)
-  verifyRecoveredEpicIntegration(input)
+  if (!isClean(projectRoot)) {
+    throw new Error('recovered integration target is not clean; cannot repair without discarding changes')
+  }
+  const head = git(['rev-parse', '--verify', 'HEAD^{commit}'], projectRoot)
+  if (head !== input.expected_target_commit && head !== input.result_commit) {
+    throw new Error('recovered integration target HEAD is not at the expected target or result commit; cannot repair')
+  }
+  if (head === input.result_commit) {
+    // Checkout already matches the merge commit. Just verify it.
+    verifyRecoveredCheckout(input)
+    return
+  }
+  if (!indexAndWorktreeMatchCommit(projectRoot, input.expected_target_commit)) {
+    throw new Error('recovered integration index or worktree does not match the expected target commit; cannot repair')
+  }
+
+  // Safely advance the checkout from the expected target to the verified merge.
+  // read-tree -m -u performs a merge-style update that preserves no local
+  // changes (we already verified the tree is clean).
+  git(['read-tree', '-m', '-u', input.expected_target_commit, input.result_commit], projectRoot)
+
+  // Re-verify the checkout now matches the merge commit.
+  verifyRecoveredCheckout(input)
 }
