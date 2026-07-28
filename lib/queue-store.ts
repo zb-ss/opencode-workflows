@@ -18,7 +18,7 @@ import {
 } from './queue-contracts.ts'
 import { emptyAutomationUsageTelemetry } from './epic-budget-usage.ts'
 import { sha256Hex } from './canonical-json.ts'
-import type { EnabledQueueConfig, QueueBudget } from './queue-policy.ts'
+import type { EnabledQueueConfig } from './queue-policy.ts'
 import { isFailureRetryable, transportBackoffDelayMs } from './automation-retry-policy.ts'
 import type { FailureClass, RetryAttemptCounters } from './automation-policy-contracts.ts'
 
@@ -42,7 +42,6 @@ export interface QueueStoreOptions {
   now: () => number
   lease_duration_ms?: number
   max_workflows?: number
-  budgets?: QueueBudget[]
   retry_policy?: EnabledQueueConfig['retry_policy']
   recovery_attempt_limit?: number
 }
@@ -169,7 +168,6 @@ export class QueueStore {
   private readonly now: () => number
   private readonly owner: string
   private readonly maxWorkflows: number
-  private readonly budgets: QueueBudget[]
   private readonly retryPolicy: EnabledQueueConfig['retry_policy'] | undefined
   private readonly recoveryAttemptLimit: number
 
@@ -179,7 +177,6 @@ export class QueueStore {
     this.owner = options.owner
     this.now = options.now
     this.maxWorkflows = options.max_workflows ?? 256
-    this.budgets = options.budgets ?? []
     this.retryPolicy = options.retry_policy
     this.recoveryAttemptLimit = options.recovery_attempt_limit ?? Number.MAX_SAFE_INTEGER
     validateDirectory(this.directory)
@@ -201,7 +198,6 @@ export class QueueStore {
       if (index.length >= this.maxWorkflows) {
         throw new QueueStoreError('queue_full', `queue is at capacity (${this.maxWorkflows} workflows)`)
       }
-      this.assertSessionsBudgetsLocked(index, input.definition_id)
       const nowIso = new Date(this.now()).toISOString()
       const record: QueueWorkflowRecord = {
         schema_version: QUEUE_SCHEMA_VERSION,
@@ -390,22 +386,6 @@ export class QueueStore {
       }
     }
     return entries.sort((a, b) => a.updated_at.localeCompare(b.updated_at))
-  }
-
-  private assertSessionsBudgetsLocked(index: QueueIndexEntry[], definitionId: string): void {
-    const totalWorkflows = index.length
-    const definitionWorkflows = index.filter(entry => {
-      const record = this.loadLocked(entry.workflow_id)
-      return record?.definition_id === definitionId
-    }).length
-    for (const budget of this.budgets) {
-      if (budget.limit === null || budget.dimension !== 'sessions') continue
-      const limit = budget.limit
-      const current = budget.scope === 'global' ? totalWorkflows : definitionWorkflows
-      if (current >= limit) {
-        throw new QueueStoreError('budget_exhausted', `queue ${budget.scope} sessions budget exhausted (${current} / ${limit})`)
-      }
-    }
   }
 
   private writeWorkflowRecord(record: QueueWorkflowRecord): void {

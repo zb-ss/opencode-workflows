@@ -256,6 +256,76 @@ describe('workflow config', () => {
     )
   })
 
+  it('rejects queue enabled without automation enabled', () => {
+    const queueConfig = {
+      enabled: true,
+      max_concurrent_workflows: 2,
+      lease_duration_ms: 60_000,
+      renewal_interval_ms: 20_000,
+      recovery_attempt_limit: 3,
+      retry_policy: {
+        max_semantic_attempts: 3, max_contract_attempts: 3, max_transport_attempts: 3,
+        max_no_progress_attempts: 2,
+        transport_backoff: { strategy: 'exponential', initial_delay_ms: 100, maximum_delay_ms: 1000, multiplier: 2 },
+      },
+    }
+    assert.equal(
+      WorkflowConfigSchema.safeParse({ queue: queueConfig, automation: { enabled: false } }).success,
+      false,
+      'queue enabled without automation enabled must be rejected',
+    )
+  })
+
+  it('rejects queue enabled without mandatory automation limits', () => {
+    const queueConfig = {
+      enabled: true,
+      max_concurrent_workflows: 2,
+      lease_duration_ms: 60_000,
+      renewal_interval_ms: 20_000,
+      recovery_attempt_limit: 3,
+      retry_policy: {
+        max_semantic_attempts: 3, max_contract_attempts: 3, max_transport_attempts: 3,
+        max_no_progress_attempts: 2,
+        transport_backoff: { strategy: 'exponential', initial_delay_ms: 100, maximum_delay_ms: 1000, multiplier: 2 },
+      },
+    }
+    // automation.enabled=true but missing max_sessions
+    assert.equal(
+      WorkflowConfigSchema.safeParse({
+        queue: queueConfig,
+        automation: { enabled: true, max_parallel_sessions: 2, max_attempts_per_stage: 3 },
+      }).success,
+      false,
+      'queue enabled without all mandatory automation limits must be rejected',
+    )
+  })
+
+  it('accepts queue enabled with complete automation configuration', () => {
+    const queueConfig = {
+      enabled: true,
+      max_concurrent_workflows: 2,
+      lease_duration_ms: 60_000,
+      renewal_interval_ms: 20_000,
+      recovery_attempt_limit: 3,
+      retry_policy: {
+        max_semantic_attempts: 3, max_contract_attempts: 3, max_transport_attempts: 3,
+        max_no_progress_attempts: 2,
+        transport_backoff: { strategy: 'exponential', initial_delay_ms: 100, maximum_delay_ms: 1000, multiplier: 2 },
+      },
+    }
+    const parsed = WorkflowConfigSchema.parse({
+      queue: queueConfig,
+      automation: {
+        enabled: true,
+        max_parallel_sessions: 2,
+        max_sessions: 10,
+        max_attempts_per_stage: 3,
+      },
+    })
+    assert.equal(parsed.queue.enabled, true)
+    assert.equal(parsed.automation.enabled, true)
+  })
+
   it('defaults guarded publication to a disabled empty policy', () => {
     assert.deepEqual(WorkflowConfigSchema.parse({}).publication, {
       enabled: false,

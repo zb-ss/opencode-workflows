@@ -128,7 +128,6 @@ export async function createQueueOwnerTools(input: PluginInput) {
       now: Date.now,
       lease_duration_ms: queueConfig.lease_duration_ms,
       max_workflows: 256,
-      budgets: queueConfig.budgets,
       retry_policy: queueConfig.retry_policy,
       recovery_attempt_limit: queueConfig.recovery_attempt_limit,
     })
@@ -252,9 +251,27 @@ export async function createQueueOwnerTools(input: PluginInput) {
         // Best-effort state transition.
       }
     } catch (error) {
-      // Dispatch failure is recorded by the engine state; the scheduler will
-      // observe the record as leased with a non-terminal intent until recovery.
-      // Fire-and-forget: do not throw back into the scheduler.
+      // Definitive dispatch failures (missing definition, disabled automation,
+      // invalid routing) must not leave the record stuck as leased. Transition
+      // to failed so capacity is released.
+      if (error instanceof QueueInputError) {
+        try {
+          const current = store.load(workflowId)
+          if (current && current.status === 'leased') {
+            store.update(workflowId, current.state_revision, leaseHandle, (record) => {
+              record.status = 'failed'
+              record.pause_reason = `dispatch failed: ${error.message}`
+              if (record.launch_intent !== null) {
+                record.launch_intent = { ...record.launch_intent, launch_state: 'settled', settled_at: new Date().toISOString() }
+              }
+              return record
+            })
+          }
+        } catch {
+          // Best-effort: the record may have been modified concurrently.
+        }
+      }
+      // Non-definitive failures (ambiguous) leave the record leased for recovery.
     }
   }
 
@@ -328,6 +345,26 @@ export async function createQueueOwnerTools(input: PluginInput) {
     }
   }
 
+  function validateDispatchPrerequisites(config: ReturnType<typeof loadWorkflowConfig>, definitionId: string, mode: string): void {
+    if (!config.automation.enabled) {
+      throw new QueueInputError('automation_disabled', 'automation must be enabled to dispatch queued workflows')
+    }
+    const sourcePath = path.join(getConfigDir(), 'workflow', `${definitionId}.json`)
+    if (!fs.existsSync(sourcePath)) {
+      throw new QueueInputError('missing_definition', `workflow definition ${definitionId} not found`)
+    }
+    try {
+      loadWorkflowDefinition(sourcePath)
+    } catch (error) {
+      throw new QueueInputError('invalid_definition', `workflow definition ${definitionId} is invalid: ${(error as Error).message}`)
+    }
+    try {
+      loadModeRouting(mode)
+    } catch (error) {
+      throw new QueueInputError('invalid_mode', `mode ${mode} routing is invalid: ${(error as Error).message}`)
+    }
+  }
+
   const identifier = () => tool.schema.string().min(1).max(MAX_SAFE_IDENTIFIER_LENGTH).regex(SAFE_IDENTIFIER_PATTERN)
   const casArgs = {
     workflow_id: identifier(),
@@ -361,6 +398,7 @@ export async function createQueueOwnerTools(input: PluginInput) {
           if (!config.queue.enabled) return JSON.stringify({ enqueued: false, disabled: true })
           const projectRoot = await ownerContext(context)
           await operationAsk(context, 'queue_enqueue', { workflow_id: args.workflow_id })
+          validateDispatchPrerequisites(config, args.definition_id, config.default_mode)
           const queueConfig = enabledQueue(config.queue)
           const { store, scheduler } = getOrCreate(context, projectRoot, queueConfig)
           const handle = scheduler.start()

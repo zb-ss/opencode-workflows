@@ -460,7 +460,25 @@ export const WorkflowConfigSchema = z.object({
     mcp_code_mode: 'disabled',
     references: 'disabled',
   }),
-}).passthrough()
+}).passthrough().superRefine((config, context) => {
+  // Cross-field validation: queue requires automation to be enabled
+  // with all mandatory limits, because the queue dispatches workflows
+  // through the automatic workflow engine.
+  if (config.queue.enabled) {
+    if (!config.automation.enabled) {
+      context.addIssue({ code: 'custom', path: ['automation', 'enabled'], message: 'automation.enabled must be true when queue is enabled' })
+    }
+    if (config.automation.max_parallel_sessions === undefined) {
+      context.addIssue({ code: 'custom', path: ['automation', 'max_parallel_sessions'], message: 'automation.max_parallel_sessions is required when queue is enabled' })
+    }
+    if (config.automation.max_attempts_per_stage === undefined) {
+      context.addIssue({ code: 'custom', path: ['automation', 'max_attempts_per_stage'], message: 'automation.max_attempts_per_stage is required when queue is enabled' })
+    }
+    if (config.automation.max_sessions === undefined) {
+      context.addIssue({ code: 'custom', path: ['automation', 'max_sessions'], message: 'automation.max_sessions is required when queue is enabled' })
+    }
+  }
+})
 
 export type RawWorkflowConfig = z.input<typeof WorkflowConfigSchema>
 export type WorkflowConfig = z.output<typeof WorkflowConfigSchema>

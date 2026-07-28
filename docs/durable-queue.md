@@ -18,7 +18,6 @@ The queue requires `automation.enabled = true` to dispatch workflow stages. The 
 | `recovery_attempt_limit` | Yes | Maximum recovery attempts before pausing |
 | `retry_policy` | Yes | Per-class retry ceilings (transport, contract, semantic, no-progress) with backoff |
 | `rate_windows` | No | Request rate limits per time window (e.g., 50 requests per minute) |
-| `budgets` | No | Optional global or workflow-scoped budget limits |
 
 ## Lifecycle
 
@@ -44,29 +43,9 @@ All tools are root-session only and require explicit authorization:
 
 Every mutating operation requires `expected_revision` and `expected_generation` from the latest status. Stale calls fail rather than rebasing silently.
 
-## Budget Modes
+## Budgets
 
-Budgets are optional and independently scoped to `global` or `workflow`. Omitting a dimension means telemetry-only; a limit of zero blocks immediately. Supported dimensions: `sessions`, `input_tokens`, `output_tokens`, `cost_usd`, `active_time_ms`, `calendar_age_ms`.
-
-### Unbudgeted
-
-Omit `budgets` from the queue config. Usage telemetry remains available but no dimension stops scheduling. Concurrency, retry, fencing, and safety controls remain mandatory.
-
-### Selective Limits
-
-Configure only the dimensions you want enforced:
-
-```json
-{
-  "budgets": [
-    { "dimension": "sessions", "scope": "global", "limit": 200 }
-  ]
-}
-```
-
-### Metered API
-
-Configure `cost_usd` only when the provider reports trustworthy cost. Missing cost evidence pauses rather than treating unknown as zero.
+Per-workflow budgets (sessions, tokens, cost, active time, calendar age) are enforced by the `automation` configuration, not the queue. The queue manages scheduling authority; the automatic workflow engine handles stage execution and budgets. Configure `automation.max_sessions`, `automation.max_input_tokens`, `automation.max_cost_usd`, etc. when enabling the queue.
 
 ## Rate Windows
 

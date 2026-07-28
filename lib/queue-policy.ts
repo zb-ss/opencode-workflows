@@ -11,7 +11,6 @@ export const MAX_QUEUE_WORKFLOWS = 256
 export const MAX_QUEUE_CONCURRENCY = 256
 export const MAX_QUEUE_PROVIDER_POLICIES = 64
 export const MAX_QUEUE_RATE_WINDOWS = 8
-export const MAX_QUEUE_BUDGET_RECORDS = 4096
 export const MIN_QUEUE_LEASE_DURATION_MS = 5_000
 export const MAX_QUEUE_LEASE_DURATION_MS = 60 * 60 * 1000
 export const MAX_QUEUE_RENEWAL_INTERVAL_MS = 60 * 60 * 1000
@@ -21,12 +20,6 @@ const QueueModelTierSchema = z.enum(['low', 'mid', 'high'])
 export const QueueRateWindowSchema = z.object({
   window_ms: safePositiveInteger.max(60 * 60 * 1000),
   max_requests: safePositiveInteger,
-}).strict()
-
-export const QueueBudgetSchema = z.object({
-  dimension: z.enum(['sessions', 'input_tokens', 'output_tokens', 'cost_usd', 'active_time_ms', 'calendar_age_ms']),
-  scope: z.enum(['global', 'workflow']),
-  limit: z.number().nullable(),
 }).strict()
 
 const DisabledQueueConfigSchema = z.object({
@@ -53,7 +46,6 @@ const EnabledQueueConfigSchema = z.object({
   recovery_attempt_limit: EnabledQueueConfigFields.recovery_attempt_limit.optional(),
   retry_policy: EnabledQueueConfigFields.retry_policy.optional(),
   rate_windows: z.array(QueueRateWindowSchema).max(MAX_QUEUE_RATE_WINDOWS).optional(),
-  budgets: z.array(QueueBudgetSchema).max(MAX_QUEUE_BUDGET_RECORDS).optional(),
 }).strict().superRefine((config, context) => {
   for (const field of REQUIRED_ENABLED_QUEUE_FIELDS) {
     if (config[field] === undefined) {
@@ -77,7 +69,6 @@ export const QueueConfigSchema = z.union([DisabledQueueConfigSchema, EnabledQueu
 export type QueueConfig = z.infer<typeof QueueConfigSchema>
 export type EnabledQueueConfig = z.infer<typeof EnabledQueueConfigSchema>
 export type QueueRateWindow = z.infer<typeof QueueRateWindowSchema>
-export type QueueBudget = z.infer<typeof QueueBudgetSchema>
 
 export function enabledQueue(config: QueueConfig): EnabledQueueConfig {
   if (!config.enabled) throw new Error('queue is not enabled')

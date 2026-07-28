@@ -100,7 +100,6 @@ const QUEUE_CONFIG = {
     transport_backoff: { strategy: 'exponential' as const, initial_delay_ms: 100, maximum_delay_ms: 1_000, multiplier: 2 },
   },
   rate_windows: [{ window_ms: 60_000, max_requests: 100 }],
-  budgets: [{ dimension: 'sessions' as const, scope: 'global' as const, limit: 50 }],
 }
 
 class FakeEpicSessionAdapter implements EpicSessionAdapter {
