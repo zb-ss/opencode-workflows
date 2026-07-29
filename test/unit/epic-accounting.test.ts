@@ -360,4 +360,119 @@ describe('review and observed usage accounting', () => {
     active.usage = active.usage.map(record => ({ ...record, usage: { ...record.usage, input_tokens: Number.MAX_SAFE_INTEGER } }))
     assert.throws(() => applyEpicUsageDelta(active, { item_id: 'item-a', observed_at: LATER, input_tokens: 1, output_tokens: 0, cost_usd: 0 }), /represented safely/)
   })
+
+  it('enforces identical session budget semantics for execution and review reservations', () => {
+    // Table-driven: for each limit, verify execution and review both use the
+    // same > limit rule (not >= limit). A limit of N must allow exactly N
+    // sessions total (execution + review).
+    for (const limit of [0, 1, 2, 3]) {
+      for (const scope of ['epic', 'item'] as const) {
+        const state = baseState({
+          status: 'pending',
+          budgets: [budget(scope, limit, scope === 'item' ? 'item-a' : null)],
+          usage: [
+            { scope: 'epic', item_id: null, usage: emptyAutomationUsageTelemetry() },
+            ...(scope === 'item' ? [{ scope: 'item' as const, item_id: 'item-a', usage: emptyAutomationUsageTelemetry() }] : []),
+          ],
+        })
+
+        // Attempt execution reservation: sessions go from 0 to 1.
+        if (limit === 0) {
+          // Limit 0: even the first session is rejected.
+          assert.throws(() => reserveEpicAttempt(state, reservation()), /budget/, `limit ${limit} ${scope}: execution should be rejected`)
+          continue
+        }
+
+        const afterExec = reserveEpicAttempt(state, reservation())
+        assert.equal(afterExec.usage[0]!.usage.sessions, 1, `limit ${limit} ${scope}: execution reserved session 1`)
+
+        // Checkpoint the execution so a review can be reserved.
+        const evidence = worktreeEvidence()
+        const execAttempt: EpicAttempt = {
+          attempt_id: 'attempt-1',
+          worktree_evidence: evidence,
+          agent: 'executor-example',
+          model: 'example/executor',
+          child_session_id: 'child-1',
+          started_at: NOW,
+          completed_at: null,
+          checkpoint_commit: OID('1'),
+          review_evidence_digest: null,
+          result_summary: null,
+          failure_classification: null,
+          status: 'checkpointed',
+          launch_id: 'launch-1',
+          launch_state: 'prompted',
+          progress_commit: OID('1'),
+          progress_tree_sha256: SHA('3'),
+          checkpoint_tree_sha256: SHA('3'),
+          review: null,
+        }
+        const active = { ...emptyAutomationUsageTelemetry(), sessions: 1, attempts: 1, active_interval_started_at: NOW, last_active_checkpoint_at: NOW }
+        const checkpointed = {
+          ...afterExec,
+          items: {
+            'item-a': {
+              ...afterExec.items['item-a']!,
+              status: 'running',
+              attempts: [execAttempt],
+              worktree_name: evidence.worktree_name,
+              branch_name: evidence.branch_name,
+            },
+          },
+          usage: [
+            { scope: 'epic', item_id: null, usage: active },
+            { scope: 'item', item_id: 'item-a', usage: active },
+          ],
+        }
+
+        // Attempt review reservation: sessions go from 1 to 2.
+        if (limit < 2) {
+          // Limit 1: execution consumed 1, review should be rejected (1 > 1 is false but 1 >= 1 was the old bug).
+          // With the fix, sessions use > limit, so consumed=1 > limit=1 is false, BUT after review
+          // reservation increments to 2, and 2 > 1 is true. Wait — the check happens BEFORE
+          // incrementing. The check is on the POST-increment value (consumed after reservation).
+          // Actually, reserveScopedUsage increments first, then asserts. So for limit 1:
+          // after exec, sessions=1. Review increments to 2, then checks 2 > 1 = true → rejected.
+          assert.throws(
+            () => reserveEpicReviewSession(checkpointed, {
+              item_id: 'item-a', attempt_id: 'attempt-1', review_id: 'review-1',
+              agent: 'reviewer-example', model: 'example/reviewer', reserved_at: LATER,
+            }),
+            /budget/,
+            `limit ${limit} ${scope}: review should be rejected`,
+          )
+          continue
+        }
+
+        const afterReview = reserveEpicReviewSession(checkpointed, {
+          item_id: 'item-a', attempt_id: 'attempt-1', review_id: 'review-1',
+          agent: 'reviewer-example', model: 'example/reviewer', reserved_at: LATER,
+        })
+        assert.equal(afterReview.state.usage[0]!.usage.sessions, 2, `limit ${limit} ${scope}: review reserved session 2`)
+
+        // If limit is 2, a third session should be rejected.
+        if (limit === 2) {
+          const targetItem = scope === 'item' ? 'item-a' : 'item-b'
+          const saturatedItems: Record<string, EpicItem> = scope === 'item'
+            ? { 'item-a': item('item-a') }
+            : { 'item-a': item('item-a'), 'item-b': item('item-b') }
+          const saturated = baseState({
+            status: 'pending',
+            budgets: [budget(scope, limit, scope === 'item' ? 'item-a' : null)],
+            usage: [
+              { scope: 'epic', item_id: null, usage: { ...emptyAutomationUsageTelemetry(), sessions: 2 } },
+              ...(scope === 'item' ? [{ scope: 'item' as const, item_id: 'item-a', usage: { ...emptyAutomationUsageTelemetry(), sessions: 2 } }] : []),
+            ],
+            items: saturatedItems,
+          })
+          assert.throws(
+            () => reserveEpicAttempt(saturated, reservation(targetItem, `attempt-${targetItem}`)),
+            /budget/,
+            `limit ${limit} ${scope}: third session should be rejected`,
+          )
+        }
+      }
+    }
+  })
 })

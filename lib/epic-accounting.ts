@@ -159,44 +159,56 @@ function budgetLabel(budget: EpicBudgetRecord): string {
     : `epic ${budget.dimension}`
 }
 
-function exhaustedBudgets(state: EpicState, itemId: string, usage: EpicScopedUsage[], at: string): EpicBudgetRecord[] {
-  return applicableBudgets(state, itemId).filter((budget) => {
-    const index = usageIndex(usage, budget.scope as 'epic' | 'item', budget.item_id)
-    if (index < 0) throw new EpicValidationError(`configured ${budgetLabel(budget)} budget lacks usage telemetry`)
-    const consumed = dimensionUsage(state, usage[index]!.usage, budget.dimension, at)
-    return consumed === 'unknown' || consumed >= budget.limit!
-  }).sort((left, right) => budgetLabel(left).localeCompare(budgetLabel(right), 'en'))
-}
-
-function assertReservationBudgets(state: EpicState, itemId: string, usage: EpicScopedUsage[], at: string): void {
-  const exhausted = exhaustedBudgets(state, itemId, usage, at)
-  if (exhausted.length > 0) {
-    throw new EpicValidationError(`reservation blocked by configured ${budgetLabel(exhausted[0]!)} budget`)
+/**
+ * Check whether a budget is exhausted after consuming the proposed reservation.
+ *
+ * Semantics:
+ * - sessions: exhausted only when consumed > limit (a limit of N allows N sessions)
+ * - input_tokens, output_tokens, active_time_ms, calendar_age_ms: exhausted when consumed >= limit
+ * - cost_usd: unknown cost is not exhausted here (handled by applyUsage), but known
+ *   cost >= limit is exhausted
+ *
+ * This unified function is used by both execution and review reservations so
+ * they enforce identical exact-limit semantics.
+ */
+function isReservationExhausted(budget: EpicBudgetRecord, consumed: number | 'unknown'): boolean {
+  if (budget.limit === null) return false
+  if (consumed === 'unknown') {
+    // Cost budgets cannot be enforced without evidence; other dimensions
+    // should always have a known value at reservation time.
+    if (budget.dimension === 'cost_usd') return false
+    // Non-cost unknown is unexpected and should fail closed.
+    return true
   }
+  if (budget.dimension === 'sessions') return consumed > budget.limit
+  return consumed >= budget.limit
 }
 
-function assertPreReservationBudgets(state: EpicState, itemId: string, usage: EpicScopedUsage[], at: string): void {
+function assertReservationBudgetsUnified(state: EpicState, itemId: string, usage: EpicScopedUsage[], at: string): void {
   const applicable = applicableBudgets(state, itemId)
   for (const budget of applicable) {
     if (budget.limit === null) continue
     const index = usageIndex(usage, budget.scope as 'epic' | 'item', budget.item_id)
     if (index < 0) throw new EpicValidationError(`configured ${budgetLabel(budget)} budget lacks usage telemetry`)
     const consumed = dimensionUsage(state, usage[index]!.usage, budget.dimension, at)
-    if (consumed === 'unknown') {
-      // Cost budgets cannot be enforced without evidence; calendar/active are always known here.
-      if (budget.dimension === 'cost_usd') continue
-      throw new EpicValidationError(`reservation blocked by unmeasurable ${budgetLabel(budget)} budget`)
-    }
-    if (budget.dimension === 'sessions') {
-      if (consumed > budget.limit) {
-        throw new EpicValidationError(`reservation blocked by configured ${budgetLabel(budget)} budget`)
-      }
-      continue
-    }
-    if (consumed >= budget.limit) {
+    if (isReservationExhausted(budget, consumed)) {
       throw new EpicValidationError(`reservation blocked by configured ${budgetLabel(budget)} budget`)
     }
   }
+}
+
+/**
+ * Find budgets that are exhausted after applying a usage delta. This uses
+ * >= limit for ALL dimensions including sessions, because post-usage
+ * exhaustion means no further work can be admitted.
+ */
+function postUsageExhaustedBudgets(state: EpicState, itemId: string, usage: EpicScopedUsage[], at: string): EpicBudgetRecord[] {
+  return applicableBudgets(state, itemId).filter((budget) => {
+    const index = usageIndex(usage, budget.scope as 'epic' | 'item', budget.item_id)
+    if (index < 0) throw new EpicValidationError(`configured ${budgetLabel(budget)} budget lacks usage telemetry`)
+    const consumed = dimensionUsage(state, usage[index]!.usage, budget.dimension, at)
+    return consumed === 'unknown' || consumed >= budget.limit!
+  }).sort((left, right) => budgetLabel(left).localeCompare(budgetLabel(right), 'en'))
 }
 
 function assertCoordinationEnabled(state: EpicState): NonNullable<EpicState['coordination_policy']> {
@@ -254,7 +266,7 @@ export function reserveEpicAttempt(stateInput: unknown, input: EpicAttemptReserv
   }
 
   const usage = reserveScopedUsage(state, item.item_id, input.reserved_at, true)
-  assertPreReservationBudgets(state, item.item_id, usage, input.reserved_at)
+  assertReservationBudgetsUnified(state, item.item_id, usage, input.reserved_at)
   const attempt = {
     attempt_id: input.attempt_id,
     worktree_evidence: evidence,
@@ -329,7 +341,7 @@ export function reserveEpicReviewSession(
     }
   }
   const usage = reserveScopedUsage(state, item.item_id, input.reserved_at, false)
-  assertReservationBudgets(state, item.item_id, usage, input.reserved_at)
+  assertReservationBudgetsUnified(state, item.item_id, usage, input.reserved_at)
   const next = validateEpicTransition(state, {
     ...state,
     state_revision: state.state_revision + 1,
@@ -494,7 +506,7 @@ export function applyEpicUsageDelta(stateInput: unknown, input: EpicUsageDeltaIn
     usage[index] = { ...usage[index]!, usage: applyDelta(usage[index]!.usage, delta, observation.observed_at) }
   }
 
-  const exhausted = exhaustedBudgets(state, observation.item_id, usage, observation.observed_at)
+  const exhausted = postUsageExhaustedBudgets(state, observation.item_id, usage, observation.observed_at)
   let status = state.status
   let pause_reason = state.pause_reason
   let pause_code = state.pause_code ?? null
