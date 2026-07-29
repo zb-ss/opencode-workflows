@@ -885,14 +885,18 @@ export class EpicCoordinator {
   }
 
   private async failAttempt(item_id: string, attempt_id: string, classification: 'transport' | 'contract' | 'semantic', summary: string, progress_commit: string | null = null, progress_tree_sha256: string | null = null): Promise<void> {
-    const loaded = this.requireLoaded(); const at = this.timestamp(loaded.state); const next = cloneState(loaded.state)
-    const uncertain = await this.abortKnownChildren(next)
+    const loaded = this.requireLoaded()
+    const uncertain = await this.abortAttemptChildren(loaded.state, item_id, attempt_id)
+    // Reload after await to avoid stale CAS: another item may have completed
+    // during the abort, changing the state revision.
+    const current = this.requireLoaded()
+    const at = this.timestamp(current.state); const next = cloneState(current.state)
     const item = next.items[item_id]!; const attempt = item.attempts.find(value => value.attempt_id === attempt_id)!
     attempt.status = 'failed'; attempt.completed_at = at; attempt.launch_state = 'settled'; attempt.failure_classification = classification; attempt.result_summary = cap(summary); attempt.progress_commit = progress_commit; attempt.progress_tree_sha256 = progress_tree_sha256
     item.status = 'failed'; item.completed_at = at; item.retry_not_before = null
     next.state_revision++; next.updated_at = at
     this.closeItemIntervals(next, item_id, at)
-    this.persistFailureDecision(loaded, next, item_id, uncertain)
+    this.persistFailureDecision(current, next, item_id, uncertain)
   }
 
   private async blockAttempt(item_id: string, attempt_id: string, summary: string, reason: string): Promise<void> {
@@ -973,15 +977,18 @@ export class EpicCoordinator {
   }
 
   private async markAmbiguous(item_id: string, attempt_id: string, reviewer: boolean): Promise<void> {
-    const loaded = this.requireLoaded(); const at = this.timestamp(loaded.state); const next = cloneState(loaded.state)
-    const uncertain = await this.abortKnownChildren(next)
+    const loaded = this.requireLoaded()
+    const uncertain = await this.abortAttemptChildren(loaded.state, item_id, attempt_id)
+    // Reload after await to avoid stale CAS.
+    const current = this.requireLoaded()
+    const at = this.timestamp(current.state); const next = cloneState(current.state)
     const item = next.items[item_id]!; const attempt = item.attempts.find(value => value.attempt_id === attempt_id)!
     attempt.status = 'failed'; attempt.completed_at = at; attempt.failure_classification = 'ambiguous_launch'; attempt.result_summary = 'Session launch or execution outcome is ambiguous.'; attempt.launch_state = reviewer ? 'settled' : 'ambiguous'
     if (reviewer && attempt.review) attempt.review.launch_state = 'ambiguous'
     item.status = 'failed'; item.completed_at = at
     next.state_revision++; next.updated_at = at; next.status = 'paused'; next.pause_code = uncertain.review ? 'ambiguous_reviewer_launch' : 'ambiguous_execution_launch'; next.pause_reason = 'Attended reconciliation is required before more work can be scheduled.'
     this.closeIntervals(next, at)
-    this.options.store.append(validateEpicTransition(loaded.state, next), loaded.revision, loaded.state_sha256, loaded.ownership_generation)
+    this.options.store.append(validateEpicTransition(current.state, next), current.revision, current.state_sha256, current.ownership_generation)
   }
 
   private updateAttempt(item_id: string, attempt_id: string, mutate: (attempt: EpicAttempt) => EpicAttempt, source = this.requireLoaded()): EpicLoadResult {
@@ -1237,6 +1244,39 @@ export class EpicCoordinator {
 
   private notify(): void {
     if (this.disposed || this.isQuiescent()) for (const waiter of [...this.waiters]) waiter()
+  }
+
+  private async abortAttemptChildren(state: EpicState, itemId: string, attemptId: string): Promise<{ execution: boolean; review: boolean }> {
+    const uncertain = { execution: false, review: false }
+    const item = state.items[itemId]
+    if (!item) return uncertain
+    const attempt = item.attempts.find(a => a.attempt_id === attemptId)
+    if (!attempt) return uncertain
+    const worktreePath = this.runtime.worktreePath(this.options.project_root, attempt)
+    const checks: Promise<void>[] = []
+    const queueCheck = (session_id: string | null, reviewer: boolean) => {
+      if (!session_id) {
+        if (reviewer) uncertain.review = true
+        else uncertain.execution = true
+        return
+      }
+      checks.push(this.withDeadline((async () => {
+        await this.options.session.abort(session_id, worktreePath)
+        const inspection = await this.options.session.inspect(session_id, worktreePath)
+        if (inspection.status === 'running' || inspection.status === 'unknown') throw new Error('child termination remains uncertain')
+      })(), state.coordination_policy!.max_attempt_duration_ms).catch(() => {
+        if (reviewer) uncertain.review = true
+        else uncertain.execution = true
+      }))
+    }
+    if (attempt.status === 'running' && ['reserved', 'created', 'prompted'].includes(attempt.launch_state ?? '')) {
+      queueCheck(attempt.child_session_id, false)
+    }
+    if (attempt.status === 'reviewing' && attempt.review && ['reserved', 'created', 'prompted'].includes(attempt.review.launch_state)) {
+      queueCheck(attempt.review.child_session_id, true)
+    }
+    await Promise.all(checks)
+    return uncertain
   }
 
   private async abortKnownChildren(state: EpicState): Promise<{ execution: boolean; review: boolean }> {
