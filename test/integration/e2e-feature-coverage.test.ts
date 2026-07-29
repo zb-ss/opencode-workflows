@@ -293,7 +293,7 @@ describe('E2E: all new features', { concurrency: false }, () => {
         expected_generation: store.load()!.ownership_generation,
       }, 'item-a')
       assert.deepEqual(cleaned.cleaned, ['item-a'])
-      coordinator.dispose()
+      await coordinator.dispose()
     })
   })
 

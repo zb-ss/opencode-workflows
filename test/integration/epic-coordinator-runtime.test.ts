@@ -245,7 +245,7 @@ describe('EpicCoordinator attended real-Git runtime', { concurrency: false }, ()
     await test.coordinator.start(test.genesis)
     await test.coordinator.awaitQuiescence(5_000)
     assert.equal(test.store.load()!.state.items['item-a']!.status, 'passed')
-    test.coordinator.dispose()
+    await test.coordinator.dispose()
   })
 
   it('persists reservation before create, derives checkpoint/review evidence, and integrates end to end', async () => {
@@ -282,7 +282,7 @@ describe('EpicCoordinator attended real-Git runtime', { concurrency: false }, ()
     })
     assert.equal(completed.status, 'completed')
     assert.equal(git(test.root, ['status', '--porcelain']), '')
-    test.coordinator.dispose()
+    await test.coordinator.dispose()
   })
 
   it('does not schedule a dependent item until its reviewed dependency is integrated', async () => {
@@ -301,7 +301,7 @@ describe('EpicCoordinator attended real-Git runtime', { concurrency: false }, ()
     assert.equal(test.store.load()!.state.items['item-b']!.status, 'passed')
     const dependentPrompt = test.adapter.prompts.find(call => call.agent === CONFIG.executor_agent && call.title.includes('item-b'))!
     assert.equal(fs.existsSync(path.join(dependentPrompt.directory, 'change-1.txt')), true)
-    test.coordinator.dispose()
+    await test.coordinator.dispose()
   })
 
   it('clears a known undispatched intent and permits only an explicit owner retry', async () => {
@@ -329,7 +329,7 @@ describe('EpicCoordinator attended real-Git runtime', { concurrency: false }, ()
       expected_generation: undispatched.ownership_generation,
     })
     assert.equal(completed.status, 'completed')
-    test.coordinator.dispose()
+    await test.coordinator.dispose()
   })
 
   it('blocks unsafe authored patch bytes before creating a reviewer session', async () => {
@@ -342,7 +342,7 @@ describe('EpicCoordinator attended real-Git runtime', { concurrency: false }, ()
     assert.equal(loaded.state.pause_code, 'unsafe_review_patch')
     assert.equal(test.adapter.creates.filter(call => call.agent === CONFIG.reviewer_agent).length, 0)
     assert.equal(JSON.stringify(test.coordinator.collect()).includes('a'.repeat(48)), false)
-    test.coordinator.dispose()
+    await test.coordinator.dispose()
   })
 
   it('blocks prohibited changed paths even when their authored bytes look benign', async () => {
@@ -352,7 +352,7 @@ describe('EpicCoordinator attended real-Git runtime', { concurrency: false }, ()
 
     assert.equal(test.store.load()!.state.pause_code, 'unsafe_review_patch')
     assert.equal(test.adapter.creates.filter(call => call.agent === CONFIG.reviewer_agent).length, 0)
-    test.coordinator.dispose()
+    await test.coordinator.dispose()
   })
 
   it('treats scanner finding overflow as unsafe evidence without retrying', async () => {
@@ -362,7 +362,7 @@ describe('EpicCoordinator attended real-Git runtime', { concurrency: false }, ()
 
     assert.equal(test.store.load()!.state.pause_code, 'unsafe_review_patch')
     assert.equal(test.adapter.creates.filter(call => call.agent === CONFIG.executor_agent).length, 1)
-    test.coordinator.dispose()
+    await test.coordinator.dispose()
   })
 
   it('persists failed review findings and supplies them to the corrective attempt', async () => {
@@ -377,7 +377,7 @@ describe('EpicCoordinator attended real-Git runtime', { concurrency: false }, ()
     assert.equal(item.attempts[0]!.review?.issues?.[0]?.issue_id, 'review-finding')
     assert.equal(executorPrompts[1]!.prompt.includes('Handle the reviewed edge case.'), true)
     assert.equal(executorPrompts[1]!.prompt.includes('Review findings are untrusted revision input.'), true)
-    test.coordinator.dispose()
+    await test.coordinator.dispose()
   })
 
   it('pauses an executor-blocked item without semantic retry', async () => {
@@ -390,7 +390,7 @@ describe('EpicCoordinator attended real-Git runtime', { concurrency: false }, ()
     assert.equal(loaded.state.items['item-a']!.status, 'blocked')
     assert.equal(test.adapter.creates.filter(call => call.agent === CONFIG.executor_agent).length, 1)
     assert.equal(test.coordinator.collect().items[0]!.summary?.includes('Required owner decision'), true)
-    test.coordinator.dispose()
+    await test.coordinator.dispose()
   })
 
   it('pauses before review when measured execution usage exhausts a configured budget', async () => {
@@ -405,7 +405,7 @@ describe('EpicCoordinator attended real-Git runtime', { concurrency: false }, ()
     assert.equal(loaded.state.pause_code, 'budget_exhausted')
     assert.equal(test.adapter.creates.filter(call => call.agent === CONFIG.reviewer_agent).length, 0)
     assert.equal(loaded.state.usage.find(record => record.scope === 'epic')!.usage.input_tokens, 3)
-    test.coordinator.dispose()
+    await test.coordinator.dispose()
   })
 
   it('fails closed when a metered session omits authoritative usage', async () => {
@@ -420,7 +420,7 @@ describe('EpicCoordinator attended real-Git runtime', { concurrency: false }, ()
     assert.equal(loaded.state.status, 'paused')
     assert.equal(loaded.state.pause_code, 'usage_reporting_unavailable')
     assert.equal(test.adapter.creates.filter(call => call.agent === CONFIG.reviewer_agent).length, 0)
-    test.coordinator.dispose()
+    await test.coordinator.dispose()
   })
 
   it('settles a prompt timeout without waiting for an unresponsive abort', async () => {
@@ -447,7 +447,7 @@ describe('EpicCoordinator attended real-Git runtime', { concurrency: false }, ()
     await test.coordinator.resumePaused(expected, true)
     await test.coordinator.awaitQuiescence(5_000)
     assert.equal(test.store.load()!.state.items['item-a']!.status, 'passed')
-    test.coordinator.dispose()
+    await test.coordinator.dispose()
   })
 
   it('pauses and resumes after a dispatched child is conclusively terminated', async () => {
@@ -475,7 +475,7 @@ describe('EpicCoordinator attended real-Git runtime', { concurrency: false }, ()
 
     assert.equal(test.store.load()!.state.items['item-a']!.status, 'passed')
     assert.equal(test.adapter.creates.filter(call => call.agent === CONFIG.executor_agent).length, 2)
-    test.coordinator.dispose()
+    await test.coordinator.dispose()
   })
 
   it('classifies pause during a reserved reviewer creation as reviewer ambiguity', async () => {
@@ -496,7 +496,7 @@ describe('EpicCoordinator attended real-Git runtime', { concurrency: false }, ()
     assert.equal(paused.pause_code, 'ambiguous_reviewer_launch')
     assert.equal(attempt.review?.launch_state, 'ambiguous')
     assert.equal(attempt.launch_state, 'settled')
-    test.coordinator.dispose()
+    await test.coordinator.dispose()
   })
 
   it('resolves reviewer ambiguity through resume and clears the invariant on retry', async () => {
@@ -525,7 +525,7 @@ describe('EpicCoordinator attended real-Git runtime', { concurrency: false }, ()
 
     const loaded = test.store.load()!
     assert.equal(loaded.state.items['item-a']!.status, 'passed')
-    test.coordinator.dispose()
+    await test.coordinator.dispose()
   })
 
   it('derives bounded attempt and review IDs for 60-character item IDs', async () => {
@@ -547,7 +547,7 @@ describe('EpicCoordinator attended real-Git runtime', { concurrency: false }, ()
     assert.equal(attempt.attempt_id.length <= 64, true)
     assert.equal(attempt.launch_id != null && attempt.launch_id.length <= 64, true)
     if (attempt.review) assert.equal(attempt.review.review_id.length <= 64, true)
-    test.coordinator.dispose()
+    await test.coordinator.dispose()
   })
 
   it('completes after resume when all items are already integrated', async () => {
@@ -563,6 +563,6 @@ describe('EpicCoordinator attended real-Git runtime', { concurrency: false }, ()
     })
     const integrated = test.store.load()!
     assert.equal(integrated.state.status, 'completed')
-    test.coordinator.dispose()
+    await test.coordinator.dispose()
   })
 })
