@@ -195,7 +195,7 @@ describe('FencingLeaseStore multiprocess', { concurrency: false }, () => {
     assert.equal(winners.length, 1, `exactly one winner, got ${winners.length}: ${JSON.stringify(parsed)}`)
     assert.equal(winners[0].generation, 1)
     assert.ok(losers.length >= 1, 'at least one loser')
-    assert.ok(losers.every(r => r.code === 'lease_held'), 'all losers got lease_held')
+    assert.ok(losers.every(r => r.code === 'lease_held'), `all losers got lease_held: ${JSON.stringify(parsed)}`)
   })
 
   it('a second process takes over after the first lease expires', () => {
@@ -455,6 +455,36 @@ describe('CrossProcessLock atomic protocol', { concurrency: false }, () => {
     })
     assert.equal(acquired, true)
     assert.equal(fs.existsSync(lockDir), false, 'stale lock must be removed after takeover')
+  })
+
+  it('retries when a holder releases between lock identity and token reads', () => {
+    const dir = tempDir('fencing-lock-release-race-')
+    const lockDir = path.join(dir, '.fencing-lock')
+    fs.mkdirSync(lockDir, { mode: 0o700 })
+    fs.writeFileSync(
+      path.join(lockDir, 'holder.token'),
+      JSON.stringify({ pid: process.pid, nonce: 'releasing-holder', start_time: null }),
+      { mode: 0o600 },
+    )
+
+    const originalReadFile = fs.readFileSync
+    let simulatedRelease = false
+    try {
+      fs.readFileSync = ((filePath: fs.PathOrFileDescriptor, options?: unknown) => {
+        if (!simulatedRelease && String(filePath) === path.join(lockDir, 'holder.token')) {
+          simulatedRelease = true
+          fs.rmSync(lockDir, { recursive: true })
+          throw Object.assign(new Error('lock released during token read'), { code: 'ENOENT' })
+        }
+        return originalReadFile(filePath, options as never)
+      }) as typeof fs.readFileSync
+
+      let acquired = false
+      assert.doesNotThrow(() => withLock(dir, () => { acquired = true }))
+      assert.equal(acquired, true)
+    } finally {
+      fs.readFileSync = originalReadFile
+    }
   })
 
   it('recovers when a stale-lock claimant dies after writing its takeover token', () => {
