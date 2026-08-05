@@ -5,7 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, it } from 'node:test'
 
-import { FencingLeaseStore, FencingLeaseError, assertFencingGeneration, withLock } from '../../lib/fencing-lease.ts'
+import { FencingLeaseStore, FencingLeaseError, assertFencingGeneration, withLock, withLockAsync } from '../../lib/fencing-lease.ts'
 
 const temporaryDirectories = new Set<string>()
 
@@ -260,6 +260,54 @@ describe('FencingLeaseStore multiprocess', { concurrency: false }, () => {
 })
 
 describe('CrossProcessLock atomic protocol', { concurrency: false }, () => {
+  it('serializes concurrent asynchronous users in the same process', async () => {
+    const dir = tempDir('cross-process-lock-async-')
+    const events: string[] = []
+    let releaseFirst!: () => void
+    const firstGate = new Promise<void>(resolve => { releaseFirst = resolve })
+    let firstEntered!: () => void
+    const entered = new Promise<void>(resolve => { firstEntered = resolve })
+
+    const first = withLockAsync(dir, async () => {
+      events.push('first-enter')
+      firstEntered()
+      await firstGate
+      events.push('first-exit')
+    })
+    await entered
+    const second = withLockAsync(dir, async () => {
+      events.push('second-enter')
+    })
+    await new Promise(resolve => setTimeout(resolve, 20))
+    assert.deepEqual(events, ['first-enter'])
+
+    releaseFirst()
+    await Promise.all([first, second])
+    assert.deepEqual(events, ['first-enter', 'first-exit', 'second-enter'])
+  })
+
+  it('permits owned re-entry but rejects unrelated synchronous contention on an async lock', async () => {
+    const dir = tempDir('cross-process-lock-mixed-')
+    let releaseFirst!: () => void
+    const gate = new Promise<void>(resolve => { releaseFirst = resolve })
+    let entered!: () => void
+    const firstEntered = new Promise<void>(resolve => { entered = resolve })
+    const first = withLockAsync(dir, async () => {
+      assert.equal(withLock(dir, () => 'nested'), 'nested')
+      entered()
+      await gate
+    })
+    await firstEntered
+
+    assert.throws(
+      () => withLock(dir, () => undefined),
+      (error: Error) => error instanceof FencingLeaseError && error.code === 'lock_contended_in_process',
+    )
+    releaseFirst()
+    await first
+    assert.doesNotThrow(() => withLock(dir, () => undefined))
+  })
+
   function lockRaceWorker(
     lockDir: string,
     barrier: string,
@@ -407,6 +455,66 @@ describe('CrossProcessLock atomic protocol', { concurrency: false }, () => {
     })
     assert.equal(acquired, true)
     assert.equal(fs.existsSync(lockDir), false, 'stale lock must be removed after takeover')
+  })
+
+  it('recovers when a stale-lock claimant dies after writing its takeover token', () => {
+    const dir = tempDir('fencing-lock-dead-takeover-')
+    const lockDir = path.join(dir, '.fencing-lock')
+    fs.mkdirSync(path.join(dir, '.fencing-staging'), { recursive: true, mode: 0o700 })
+    fs.mkdirSync(lockDir, { mode: 0o700 })
+    fs.writeFileSync(path.join(lockDir, 'holder.token'), JSON.stringify({ pid: 999998, nonce: 'dead-holder', start_time: null }), { mode: 0o600 })
+    fs.writeFileSync(path.join(lockDir, 'takeover.token'), JSON.stringify({ pid: 999999, nonce: 'dead-claimant', start_time: null }), { mode: 0o600 })
+
+    let acquired = false
+    withLock(dir, () => { acquired = true })
+
+    assert.equal(acquired, true)
+    assert.equal(fs.existsSync(lockDir), false)
+  })
+
+  it('releases an installed lock when either post-rename directory fsync fails', () => {
+    for (const failingCall of [4, 5]) {
+      const dir = tempDir(`fencing-lock-post-rename-fsync-${failingCall}-`)
+      const originalFsync = fs.fsyncSync
+      let calls = 0
+      try {
+        fs.fsyncSync = ((fd: number) => {
+          calls += 1
+          if (calls === failingCall) throw Object.assign(new Error('simulated directory fsync failure'), { code: 'EIO' })
+          return originalFsync(fd)
+        }) as typeof fs.fsyncSync
+        assert.throws(() => withLock(dir, () => {}), /simulated directory fsync failure/)
+      } finally {
+        fs.fsyncSync = originalFsync
+      }
+
+      assert.equal(fs.existsSync(path.join(dir, '.fencing-lock')), false, 'failed acquisition must not leak its canonical lock')
+      assert.doesNotThrow(() => withLock(dir, () => {}))
+    }
+  })
+
+  it('retries transient release failures and retains ownership for a later safe retry', () => {
+    const dir = tempDir('fencing-lock-release-retry-')
+    const originalRename = fs.renameSync
+    let releaseFailures = 0
+    try {
+      fs.renameSync = ((source: fs.PathLike, destination: fs.PathLike) => {
+        if (String(source).endsWith('.fencing-lock') && String(destination).includes('release-') && releaseFailures < 3) {
+          releaseFailures++
+          throw Object.assign(new Error('simulated busy release'), { code: 'EBUSY' })
+        }
+        return originalRename(source, destination)
+      }) as typeof fs.renameSync
+      assert.throws(
+        () => withLock(dir, () => {}),
+        (error: Error) => error instanceof FencingLeaseError && error.code === 'lock_release_failed',
+      )
+    } finally {
+      fs.renameSync = originalRename
+    }
+
+    assert.doesNotThrow(() => withLock(dir, () => {}))
+    assert.equal(fs.existsSync(path.join(dir, '.fencing-lock')), false)
   })
 
   it('malformed or unreadable ownership evidence fails closed', () => {

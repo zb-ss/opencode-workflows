@@ -15,6 +15,7 @@ import type { EpicCoordinatorRuntime, EpicSessionAdapter } from './epic-coordina
 import type { EpicLoadResult, EpicStoreHandle } from './epic-persistence.ts'
 import { transitionEpicItemToIntegrated } from './epic-transitions.ts'
 import { verifyRecoveredIntegrationObject, repairRecoveredEpicIntegration, verifyRecoveredEpicIntegration } from './epic-integration.ts'
+import { withRepositoryOperationLockAsync } from './repository-operation-lock.ts'
 
 export interface EpicRecoveryOptions {
   store: EpicStoreHandle
@@ -53,6 +54,7 @@ async function withDeadline<T>(operation: Promise<T>, timeoutMs: number): Promis
 
 /** Attended, single-process restart reconciliation. It never adopts children. */
 export async function recoverEpic(options: EpicRecoveryOptions): Promise<EpicRecoveryResult> {
+  return await withRepositoryOperationLockAsync(options.project_root, async () => {
   if (!options.former_runtime_terminated) throw new Error('attended recovery requires confirmation that the former runtime terminated')
   const current = options.store.load()
   if (!current || !current.recovery_required) throw new Error('epic does not require attended recovery')
@@ -61,12 +63,16 @@ export async function recoverEpic(options: EpicRecoveryOptions): Promise<EpicRec
     || current.ownership_generation !== options.expected_generation) throw new Error('epic recovery CAS evidence is stale')
 
   let next = structuredClone(current.state)
-  const at = timestamp(next, options.now())
   const reasons: string[] = []
   let ambiguous = false
   let hasAmbiguousReview = false
   let hasAmbiguousExecution = false
   let hasAmbiguousIntegration = false
+  let hasAmbiguousUsage = false
+  let recoveredIntegrationHead: string | null = null
+  const requiresMeteredUsage = (next.budgets ?? []).some(budget => (
+    budget.limit !== null && ['input_tokens', 'output_tokens', 'cost_usd'].includes(budget.dimension)
+  ))
 
   for (const item of Object.values(next.items)) {
     for (const attempt of item.attempts) {
@@ -100,6 +106,12 @@ export async function recoverEpic(options: EpicRecoveryOptions): Promise<EpicRec
             return options.session.inspect(child.id, worktreePath)
           })(), next.coordination_policy!.max_attempt_duration_ms)
           terminated = !['running', 'unknown'].includes(inspection.status)
+          if (terminated && requiresMeteredUsage) {
+            reasons.push(`usage_accounting:${item.item_id}`)
+            hasAmbiguousUsage = true
+            if (child.review) reviewAmbiguous = true
+            else attemptAmbiguous = true
+          }
         } catch { /* the launch remains ambiguous below */ }
         if (!terminated) {
           if (child.review) reviewAmbiguous = true
@@ -120,9 +132,10 @@ export async function recoverEpic(options: EpicRecoveryOptions): Promise<EpicRec
         if (attempt.review && attempt.review.launch_state !== 'ambiguous') attempt.review.launch_state = 'settled'
         item.status = 'cancelled'
       }
-      attempt.completed_at = at
+      const settledAt = timestamp(next, options.now())
+      attempt.completed_at = settledAt
       attempt.result_summary = 'Conservatively settled during attended restart recovery.'
-      item.completed_at = at
+      item.completed_at = settledAt
     }
   }
 
@@ -180,8 +193,9 @@ export async function recoverEpic(options: EpicRecoveryOptions): Promise<EpicRec
             previous_target_commit: intent.expected_target_commit,
             target_commit: head,
             review_evidence_digest: intent.review_evidence_digest,
-            recorded_at: at,
+            recorded_at: timestamp(next, options.now()),
           })
+          recoveredIntegrationHead = head
         } catch {
           ambiguous = true
           hasAmbiguousIntegration = true
@@ -199,10 +213,13 @@ export async function recoverEpic(options: EpicRecoveryOptions): Promise<EpicRec
     }
   }
 
+  const at = timestamp(next, options.now())
   next.state_revision = current.state.state_revision + 1
   next.updated_at = at
   next.status = 'paused'
-  next.pause_code = hasAmbiguousReview
+  next.pause_code = hasAmbiguousUsage
+    ? 'usage_accounting_ambiguous'
+    : hasAmbiguousReview
     ? 'ambiguous_reviewer_launch'
     : hasAmbiguousExecution ? 'ambiguous_execution_launch'
       : hasAmbiguousIntegration ? 'integration_ambiguous'
@@ -211,7 +228,12 @@ export async function recoverEpic(options: EpicRecoveryOptions): Promise<EpicRec
     ? 'Attended restart found ambiguous work that requires owner resolution.'
     : 'Attended restart reconciliation completed; explicit authorization is required to resume.'
   next.usage = closeEpicUsageIntervals(next.usage, at)
+  if (recoveredIntegrationHead !== null
+    && options.runtime.integrationHead(options.project_root, next.integration_branch) !== recoveredIntegrationHead) {
+    throw new Error('integration branch changed before recovered state could be persisted')
+  }
   const loaded = options.store.reconcile(next, current.revision, current.state_sha256, current.ownership_generation)
   if (!loaded) throw new Error('epic recovery did not persist')
   return { loaded, ambiguous, reasons }
+  })
 }

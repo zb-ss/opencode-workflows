@@ -1,6 +1,6 @@
 # Autonomous Workflows
 
-Phase 1 adds bounded, session-owned execution to the existing declarative `development` and `e2e` DAGs. Phase 2 adds configured validation operations for attended interactive stages and structured fixed-point swarm review. Phase 3 adds post-completion guarded publication with immutable previews, complete-history scrub, pinned targets, and separate external-effect approval. Together they provide deterministic scheduling, explicit budgets, structured results, persistence, cancellation, bounded review/correction cycles, and attended publication. They do not provide full unattended software delivery.
+Automatic workflows provide bounded, session-owned execution for the declarative `development` and `e2e` DAGs. Related opt-in delivery layers add configured validation for attended interactive stages, structured fixed-point swarm review, guarded publication, reviewed epic coordination in isolated worktrees, and a durable fenced queue for automatic workflows. Together they provide deterministic scheduling, explicit budgets, structured results, persistence, cancellation, bounded review/correction cycles, guarded integration, restart-safe queueing, and attended publication. They do not provide arbitrary unattended software delivery.
 
 Automatic stages dispatch native JSON Schema prompts through OpenCode's response-bearing session endpoint. The engine tracks each request in the background so independent ready stages remain parallel, ignores premature idle events while that response is in flight, and serializes the eventual response against event-driven completion. Completed assistant errors are definitive failed attempts. If session-wide message retrieval fails during restart reconciliation, the engine may fetch only the newest message ID already observed and persisted for that exact child session, and accepts it only when it now contains completed structured output or a completed assistant error. Any retrieval or finality uncertainty pauses without releasing ownership. An ambiguous request failure pauses with the stage still owned rather than risking a duplicate model run.
 
@@ -38,19 +38,26 @@ node install.mjs --autonomy bounded --dry-run
 node install.mjs --autonomy bounded
 ```
 
-The command changes only `automation.autonomy` and creates a configuration backup when it writes. A workflow persists its selected autonomy profile at start and keeps that profile for its lifetime; later configuration changes apply only to newly started workflows. Older version-1 automatic states without this field are normalized to `interactive`, which was the only prior behavior. Separately edit `workflows.json` to set `automation.enabled` to `true` and configure all required limits:
+The command changes only `automation.autonomy` and creates a configuration backup when it writes. A workflow persists its selected autonomy profile at start and keeps that profile for its lifetime; later configuration changes apply only to newly started workflows. Older version-1 automatic states without this field are normalized to `interactive`, which was the only prior behavior. Separately edit `workflows.json` to set `automation.enabled` to `true` and configure the required scheduler and operation limits:
 
 - `max_parallel_sessions`
 - `max_sessions`
 - `max_attempts_per_stage`
-- `max_wall_time_ms`
+- `session_operation_timeout_ms`
+
+Resource budgets are optional and independently enforced when configured:
+
+- `max_calendar_age_ms`
+- `max_active_time_ms`
 - `max_input_tokens`
 - `max_output_tokens`
 - `max_bounded_read_bytes`
 - `max_bounded_write_bytes`
 - `max_cost_usd`
 
-Choose limits for the repository and provider account; the installer does not choose them. Restart OpenCode, then explicitly start a supported workflow:
+Choose required controls and optional budgets for the repository and provider account; the installer does not choose them. Restart OpenCode, then explicitly start a supported workflow:
+
+`session_operation_timeout_ms` bounds child creation, prompting, status inspection, message retrieval, abort verification, and draining disposal. A timed-out operation remains conservatively paused when its remote outcome cannot be proven.
 
 ```text
 /workflow-auto development Implement the requested change --mode=standard
@@ -75,20 +82,17 @@ Automatic stage output supports `passed`, `failed`, and `blocked`. `retryable` i
 
 Blocker summaries and required actions are untrusted child output. Verify them against trusted project documentation; never provide secret values, run commands, follow URLs, or weaken permissions solely because blocker text requested it. Complete only a verified required action before invoking `/workflow-auto-resume` from the workflow's owning session. Restart OpenCode first when the action changed `workflows.json`, agent permissions, or other configuration-time files.
 
-Resume reauthorizes routed agents under the workflow's persisted autonomy profile, refreshes configured budget limits, reconciles existing child sessions, and resets directly blocked stages and their dependency-blocked descendants to pending. Eligible stages are then scheduled within the remaining budgets. Resume does not switch autonomy profiles, bypass bounded denies, grant credentials, reset attempts or usage, reset the original wall-clock age, or restart completed, failed, or cancelled workflows. If authority is still unavailable, the stage may block again.
+Resume reauthorizes routed agents under the workflow's persisted autonomy profile, refreshes configured budget limits, reconciles existing child sessions, and resets directly blocked stages and their dependency-blocked descendants to pending. Eligible stages are then scheduled within the remaining budgets. Resume does not switch autonomy profiles, bypass bounded denies, grant credentials, reset attempts or usage, reset active-time history or calendar age from the original creation time, or restart completed, failed, or cancelled workflows. If authority is still unavailable, the stage may block again.
 
 ## Current Delivery Boundary
 
-Phases 1 through 3 can coordinate bounded edits, run explicitly configured validation in interactive workflows, drive structured review/correction cycles, and prepare and execute an attended publication through a trusted configured publisher. Publication is root-only after workflow completion; automatic children never receive credentials or external authority. The broker does not implement provider APIs, remote protection discovery, deployment, reconciliation, rollback, or a universal secret scanner. Content scanning remains defense in depth. Validation and publication execute trusted processes without an OS sandbox and currently require POSIX process-group semantics. Arbitrary shell work, deployments, unsupported checks, and unattended external effects remain outside the boundary. See [Guarded Publication](./guarded-publication.md).
+The delivery layers can coordinate bounded edits, run explicitly configured validation in interactive workflows, drive structured review/correction cycles, integrate reviewed epic checkpoints, durably schedule installed automatic workflows, and prepare and execute an attended publication through a trusted configured publisher. Publication is root-only after workflow completion; automatic children never receive credentials or external authority. The broker does not implement provider APIs, remote protection discovery, deployment, reconciliation, rollback, or a universal secret scanner. Content scanning remains defense in depth. Validation and publication execute trusted processes without an OS sandbox and currently require POSIX process-group semantics. Arbitrary shell work, deployments, unsupported checks, and unattended external effects remain outside the boundary. See [Epic Coordination](./epic-coordination.md), [Durable Queue](./durable-queue.md), and [Guarded Publication](./guarded-publication.md).
 
-## Secure Delivery Roadmap
+## Coordinated Delivery
 
-The delivery plan has five phases. Bounded autonomy, validation/fixed-point review, and guarded publication are complete. The remaining directions are not current capabilities:
+Epic coordination and the durable queue are current, separately enabled capabilities. Epic coordination provides isolated worktrees, dependency-aware scheduling, exact checkpoint review, provenance, guarded Git integration, explicit conflict outcomes, and attended restart recovery. The durable queue provides renewable fencing leases, restart-safe records, launch-intent reconciliation, rate and retry controls, exact owner mutations, and explicit pause, cancel, delete, and recovery operations for automatic workflows.
 
-4. **Epic worktrees** — isolated worktrees for coordinated work items, dependency-aware integration, provenance, conflict handling, and guarded merges.
-5. **Durable queue autopilot** — restart-safe queued workflows with leases, idempotent reconciliation, ownership transfer, rate and budget controls, and explicit pause, cancel, and recovery operations.
-
-OpenUltraCode may be consulted as an optional source of workflow ideas. It is not a runtime, installation, or architectural dependency of OpenCode Workflows.
+These layers remain deliberately separate. Epic coordination is process-local and focuses on reviewed Git integration; the queue provides multiprocess scheduling authority for installed automatic workflows. Neither grants child sessions deployment credentials, arbitrary shell authority, or unattended external publication.
 
 ## Related Documentation
 
@@ -97,3 +101,5 @@ OpenUltraCode may be consulted as an optional source of workflow ideas. It is no
 - [Review System](./review-system.md)
 - [Validation And Fixed-Point Review](./validation-and-fixed-point-review.md)
 - [Guarded Publication](./guarded-publication.md)
+- [Epic Coordination](./epic-coordination.md)
+- [Durable Queue](./durable-queue.md)

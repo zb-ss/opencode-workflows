@@ -1,6 +1,6 @@
 # Guarded Publication
 
-Phase 3 adds an opt-in, post-completion publication broker for automatic workflows. It creates a local immutable preview, scans all Git history reachable from the publication head, pins the source, publisher, and destination, and requires a separate one-shot approval before invoking an operator-configured publisher. Publication is disabled by default.
+Guarded publication is an opt-in, post-completion broker for automatic workflows. It creates a local immutable preview, scans all Git history reachable from the publication head, pins the source, publisher, and destination, and requires a separate one-shot approval before invoking an operator-configured publisher. Publication is disabled by default.
 
 ## Flow
 

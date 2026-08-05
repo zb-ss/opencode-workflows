@@ -140,7 +140,7 @@ describe('E2E: all new features', { concurrency: false }, () => {
       const configDir = tempDir('e2e-budget-')
       process.env.OPENCODE_CONFIG_DIR = configDir
       fs.writeFileSync(path.join(configDir, 'workflows.json'), JSON.stringify({
-        automation: { enabled: true, autonomy: 'interactive', max_parallel_sessions: 2, max_sessions: 10, max_attempts_per_stage: 3 },
+        automation: { enabled: true, autonomy: 'interactive', max_parallel_sessions: 2, max_sessions: 10, max_attempts_per_stage: 3, session_operation_timeout_ms: 1_000 },
       }))
       const config = loadWorkflowConfig()
       assert.equal(config.automation.enabled, true)
@@ -156,7 +156,7 @@ describe('E2E: all new features', { concurrency: false }, () => {
       fs.writeFileSync(path.join(configDir, 'workflows.json'), JSON.stringify({
         automation: {
           enabled: true, autonomy: 'interactive',
-          max_parallel_sessions: 2, max_sessions: 10, max_attempts_per_stage: 3,
+          max_parallel_sessions: 2, max_sessions: 10, max_attempts_per_stage: 3, session_operation_timeout_ms: 1_000,
           max_input_tokens: 1000000,
           max_cost_usd: 50,
         },
@@ -223,7 +223,7 @@ describe('E2E: all new features', { concurrency: false }, () => {
     it('start → await → integrate → cleanup end-to-end', async () => {
       const root = setupGitRepo()
       const configDir = process.env.OPENCODE_CONFIG_DIR!
-      fs.mkdirSync(configDir, { recursive: true })
+      fs.mkdirSync(configDir, { recursive: true, mode: 0o700 })
       fs.writeFileSync(path.join(configDir, 'workflows.json'), JSON.stringify({
         model_tiers: { low: [], mid: [{ model: 'provider/example-model' }], high: [] },
         swarm_config: { default_concurrency: 2, provider_concurrency: { provider: 2 } },
@@ -273,27 +273,30 @@ describe('E2E: all new features', { concurrency: false }, () => {
         budget_updates: [],
       }
 
-      await coordinator.start(genesis)
-      const awaited = await coordinator.awaitQuiescence(10_000)
-      assert.equal(awaited.timed_out, false)
-      const passed = store.load()!
-      assert.equal(passed.state.items['item-a']!.status, 'passed')
+      try {
+        await coordinator.start(genesis)
+        const awaited = await coordinator.awaitQuiescence(10_000)
+        assert.equal(awaited.timed_out, false)
+        const passed = store.load()!
+        assert.equal(passed.state.items['item-a']!.status, 'passed')
 
-      const completed = await coordinator.integrateReady({
-        expected_revision: passed.revision,
-        expected_state_sha256: passed.state_sha256,
-        expected_generation: passed.ownership_generation,
-      })
-      assert.equal(completed.status, 'completed')
-      assert.equal(git(root, ['status', '--porcelain']), '')
+        const completed = await coordinator.integrateReady({
+          expected_revision: passed.revision,
+          expected_state_sha256: passed.state_sha256,
+          expected_generation: passed.ownership_generation,
+        })
+        assert.equal(completed.status, 'completed')
+        assert.equal(git(root, ['status', '--porcelain']), '')
 
-      const cleaned = coordinator.cleanup({
-        expected_revision: store.load()!.revision,
-        expected_state_sha256: store.load()!.state_sha256,
-        expected_generation: store.load()!.ownership_generation,
-      }, 'item-a')
-      assert.deepEqual(cleaned.cleaned, ['item-a'])
-      await coordinator.dispose()
+        const cleaned = coordinator.cleanup({
+          expected_revision: store.load()!.revision,
+          expected_state_sha256: store.load()!.state_sha256,
+          expected_generation: store.load()!.ownership_generation,
+        }, 'item-a')
+        assert.deepEqual(cleaned.cleaned, ['item-a'])
+      } finally {
+        await coordinator.dispose()
+      }
     })
   })
 
@@ -401,21 +404,21 @@ describe('E2E: all new features', { concurrency: false }, () => {
       const limiter1 = new QueueRateLimiter({
         rate_directory: dir, windows: [{ window_ms: 60_000, max_requests: 3 }], now: () => now.val,
       })
-      assert.equal(limiter1.tryAcquire(), true)
-      assert.equal(limiter1.tryAcquire(), true)
-      assert.equal(limiter1.tryAcquire(), true)
-      assert.equal(limiter1.tryAcquire(), false)
+      assert.equal(limiter1.tryAcquire('reservation-1'), true)
+      assert.equal(limiter1.tryAcquire('reservation-2'), true)
+      assert.equal(limiter1.tryAcquire('reservation-3'), true)
+      assert.equal(limiter1.tryAcquire('reservation-4'), false)
 
       const limiter2 = new QueueRateLimiter({
         rate_directory: dir, windows: [{ window_ms: 60_000, max_requests: 3 }], now: () => now.val,
       })
-      assert.equal(limiter2.tryAcquire(), false)
+      assert.equal(limiter2.tryAcquire('reservation-4'), false)
 
       now.val += 61_000
       const limiter3 = new QueueRateLimiter({
         rate_directory: dir, windows: [{ window_ms: 60_000, max_requests: 3 }], now: () => now.val,
       })
-      assert.equal(limiter3.tryAcquire(), true)
+      assert.equal(limiter3.tryAcquire('reservation-4'), true)
     })
   })
 })

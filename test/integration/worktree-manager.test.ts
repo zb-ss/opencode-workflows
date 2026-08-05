@@ -96,6 +96,27 @@ describe('worktree manager integration', { concurrency: false }, () => {
     assert.match(git(worktree.path, ['show', '--format=', '--name-only', 'HEAD']), /new file with spaces\.txt/)
   })
 
+  it('persists every generated object for a divergent nested-tree merge', () => {
+    const { root } = createRepository()
+    fs.mkdirSync(path.join(root, 'dir'))
+    fs.writeFileSync(path.join(root, 'dir', 'a.txt'), 'base-a\n')
+    fs.writeFileSync(path.join(root, 'dir', 'b.txt'), 'base-b\n')
+    git(root, ['add', 'dir'])
+    git(root, ['commit', '-m', 'nested base'])
+    const worktree = createWorktree(root, 'task-nested', 'main', 'workflow-nested')
+    assert.ok(worktree)
+    fs.writeFileSync(path.join(worktree.path, 'dir', 'b.txt'), 'source-b\n')
+    fs.writeFileSync(path.join(root, 'dir', 'a.txt'), 'target-a\n')
+    git(root, ['commit', '-am', 'target nested change'])
+
+    const result = mergeWorktree(root, worktree.path, 'main')
+
+    assert.equal(result.success, true)
+    assert.equal(fs.readFileSync(path.join(root, 'dir', 'a.txt'), 'utf8'), 'target-a\n')
+    assert.equal(fs.readFileSync(path.join(root, 'dir', 'b.txt'), 'utf8'), 'source-b\n')
+    assert.doesNotThrow(() => git(root, ['fsck', '--full', '--no-dangling']))
+  })
+
   it('rejects slug and ref injection strings without executing them', () => {
     const { parent, root } = createRepository()
     const marker = path.join(parent, 'injected')
@@ -113,6 +134,110 @@ describe('worktree manager integration', { concurrency: false }, () => {
     assert.equal(mergeWorktree(root, worktree.path, injection).success, false)
     assert.equal(fs.existsSync(marker), false)
     assert.equal(fs.readFileSync(path.join(worktree.path, 'source.txt'), 'utf8'), 'preserved\n')
+  })
+
+  it('rejects a symlinked runtime path before materializing a managed worktree', () => {
+    const { parent, root } = createRepository()
+    const external = path.join(parent, 'external-runtime')
+    const config = process.env.OPENCODE_CONFIG_DIR!
+    fs.mkdirSync(external)
+    fs.symlinkSync(external, config)
+
+    assert.equal(createWorktree(root, 'task-symlink', 'main', 'workflow-symlink'), null)
+    assert.equal(fs.existsSync(path.join(external, 'workflows')), false)
+    assert.equal(git(root, ['branch', '--list', 'delegate/workflow-symlink/task-symlink']), '')
+  })
+
+  it('rejects a pre-existing symlinked worktree root', () => {
+    const { parent, root } = createRepository()
+    const external = path.join(parent, 'external-worktrees')
+    const runtime = path.join(process.env.OPENCODE_CONFIG_DIR!, 'workflows', 'runtime')
+    fs.mkdirSync(external)
+    fs.mkdirSync(runtime, { recursive: true })
+    fs.symlinkSync(external, path.join(runtime, 'worktrees'))
+
+    assert.equal(createWorktree(root, 'task-root-link', 'main', 'workflow-root-link'), null)
+    assert.deepEqual(fs.readdirSync(external), [])
+  })
+
+  it('ignores repository-configured filters and merge drivers', () => {
+    const { parent, root } = createRepository()
+    const filterMarker = path.join(parent, 'filter-ran')
+    const mergeMarker = path.join(parent, 'merge-driver-ran')
+    const filterScript = path.join(parent, 'filter.cjs')
+    const mergeScript = path.join(parent, 'merge.cjs')
+    fs.writeFileSync(filterScript, `const fs=require('node:fs');fs.writeFileSync(${JSON.stringify(filterMarker)},'ran');process.stdin.pipe(process.stdout)\n`)
+    fs.writeFileSync(mergeScript, `const fs=require('node:fs');fs.writeFileSync(${JSON.stringify(mergeMarker)},'ran');fs.copyFileSync(process.argv[4],process.argv[3])\n`)
+    fs.writeFileSync(path.join(root, '.gitattributes'), '*.txt filter=evil merge=evil\n')
+    git(root, ['add', '.gitattributes'])
+    git(root, ['commit', '-m', 'add hostile attributes'])
+    git(root, ['config', 'filter.evil.clean', `node ${filterScript}`])
+    git(root, ['config', 'filter.evil.smudge', `node ${filterScript}`])
+    git(root, ['config', 'merge.evil.driver', `node ${mergeScript} %O %A %B`])
+
+    const worktree = createWorktree(root, 'task-drivers', 'main', 'workflow-drivers')
+    assert.ok(worktree)
+    fs.writeFileSync(path.join(worktree.path, 'tracked.txt'), 'source change\n')
+    fs.writeFileSync(path.join(root, 'tracked.txt'), 'target change\n')
+    git(root, ['add', 'tracked.txt'])
+    git(root, ['commit', '-m', 'target change'])
+    try { fs.unlinkSync(filterMarker) } catch {}
+
+    mergeWorktree(root, worktree.path, 'main')
+    assert.equal(fs.existsSync(filterMarker), false)
+    assert.equal(fs.existsSync(mergeMarker), false)
+  })
+
+  it('refuses a target index symlink without mutating the external index', () => {
+    const { parent, root } = createRepository()
+    const worktree = createWorktree(root, 'task-index-link', 'main', 'workflow-index-link')
+    assert.ok(worktree)
+    fs.writeFileSync(path.join(worktree.path, 'tracked.txt'), 'source change\n')
+    const targetHead = git(root, ['rev-parse', 'refs/heads/main'])
+    const indexPath = path.join(root, '.git', 'index')
+    const externalIndex = path.join(parent, 'external.index')
+    fs.copyFileSync(indexPath, externalIndex)
+    const expectedExternal = fs.readFileSync(externalIndex)
+    fs.unlinkSync(indexPath)
+    fs.symlinkSync(externalIndex, indexPath)
+
+    assert.equal(mergeWorktree(root, worktree.path, 'main').success, false)
+    assert.equal(git(root, ['rev-parse', 'refs/heads/main']), targetHead)
+    assert.deepEqual(fs.readFileSync(externalIndex), expectedExternal)
+    assert.equal(fs.lstatSync(indexPath).isSymbolicLink(), true)
+  })
+
+  it('refuses to checkpoint a tracked path rebound through an external symlink', () => {
+    const { parent, root } = createRepository()
+    fs.mkdirSync(path.join(root, 'nested'))
+    fs.writeFileSync(path.join(root, 'nested', 'value.txt'), 'inside\n')
+    git(root, ['add', 'nested/value.txt'])
+    git(root, ['commit', '-m', 'add nested file'])
+    const worktree = createWorktree(root, 'task-symlink', 'main', 'workflow-symlink')
+    assert.ok(worktree)
+
+    const external = path.join(parent, 'external')
+    fs.mkdirSync(external)
+    fs.writeFileSync(path.join(external, 'value.txt'), 'outside\n')
+    fs.rmSync(path.join(worktree.path, 'nested'), { recursive: true })
+    fs.symlinkSync(external, path.join(worktree.path, 'nested'))
+
+    assert.equal(mergeWorktree(root, worktree.path, 'main').success, false)
+    assert.equal(fs.readFileSync(path.join(root, 'nested', 'value.txt'), 'utf8'), 'inside\n')
+  })
+
+  it('refuses to checkpoint a tracked file hard-linked outside the managed worktree', () => {
+    const { parent, root } = createRepository()
+    const worktree = createWorktree(root, 'task-hardlink', 'main', 'workflow-hardlink')
+    assert.ok(worktree)
+    const external = path.join(parent, 'external.txt')
+    fs.writeFileSync(external, 'outside\n')
+    fs.rmSync(path.join(worktree.path, 'tracked.txt'))
+    fs.linkSync(external, path.join(worktree.path, 'tracked.txt'))
+
+    assert.equal(mergeWorktree(root, worktree.path, 'main').success, false)
+    assert.equal(fs.readFileSync(external, 'utf8'), 'outside\n')
+    assert.equal(fs.readFileSync(path.join(root, 'tracked.txt'), 'utf8'), 'base\n')
   })
 
   it('refuses an empty merge unless the caller explicitly accepts a no-op', () => {

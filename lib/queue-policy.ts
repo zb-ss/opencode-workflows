@@ -14,8 +14,29 @@ export const MAX_QUEUE_RATE_WINDOWS = 8
 export const MIN_QUEUE_LEASE_DURATION_MS = 5_000
 export const MAX_QUEUE_LEASE_DURATION_MS = 60 * 60 * 1000
 export const MAX_QUEUE_RENEWAL_INTERVAL_MS = 60 * 60 * 1000
+export const MAX_QUEUE_RETRY_ATTEMPTS = 32
+export const MAX_QUEUE_BACKOFF_DELAY_MS = 60 * 60 * 1000
 
 const QueueModelTierSchema = z.enum(['low', 'mid', 'high'])
+
+const QueueRetryPolicySchema = CheckedRetryPolicySchema.superRefine((policy, context) => {
+  for (const field of [
+    'max_semantic_attempts', 'max_contract_attempts', 'max_transport_attempts', 'max_no_progress_attempts',
+  ] as const) {
+    if (policy[field] > MAX_QUEUE_RETRY_ATTEMPTS) {
+      context.addIssue({ code: 'custom', path: [field], message: `${field} must not exceed ${MAX_QUEUE_RETRY_ATTEMPTS}` })
+    }
+  }
+  for (const field of ['initial_delay_ms', 'maximum_delay_ms'] as const) {
+    if (policy.transport_backoff[field] > MAX_QUEUE_BACKOFF_DELAY_MS) {
+      context.addIssue({
+        code: 'custom',
+        path: ['transport_backoff', field],
+        message: `${field} must not exceed ${MAX_QUEUE_BACKOFF_DELAY_MS}`,
+      })
+    }
+  }
+})
 
 export const QueueRateWindowSchema = z.object({
   window_ms: safePositiveInteger.max(60 * 60 * 1000),
@@ -32,29 +53,19 @@ const EnabledQueueConfigFields = {
   lease_duration_ms: safePositiveInteger.min(MIN_QUEUE_LEASE_DURATION_MS).max(MAX_QUEUE_LEASE_DURATION_MS),
   renewal_interval_ms: safePositiveInteger.max(MAX_QUEUE_RENEWAL_INTERVAL_MS),
   recovery_attempt_limit: safePositiveInteger.max(10),
-  retry_policy: CheckedRetryPolicySchema,
+  retry_policy: QueueRetryPolicySchema,
 }
-
-const REQUIRED_ENABLED_QUEUE_FIELDS = Object.keys(EnabledQueueConfigFields)
-  .filter(field => field !== 'enabled') as Array<Exclude<keyof typeof EnabledQueueConfigFields, 'enabled'>>
 
 const EnabledQueueConfigSchema = z.object({
   enabled: EnabledQueueConfigFields.enabled,
-  max_concurrent_workflows: EnabledQueueConfigFields.max_concurrent_workflows.optional(),
-  lease_duration_ms: EnabledQueueConfigFields.lease_duration_ms.optional(),
-  renewal_interval_ms: EnabledQueueConfigFields.renewal_interval_ms.optional(),
-  recovery_attempt_limit: EnabledQueueConfigFields.recovery_attempt_limit.optional(),
-  retry_policy: EnabledQueueConfigFields.retry_policy.optional(),
+  max_concurrent_workflows: EnabledQueueConfigFields.max_concurrent_workflows,
+  lease_duration_ms: EnabledQueueConfigFields.lease_duration_ms,
+  renewal_interval_ms: EnabledQueueConfigFields.renewal_interval_ms,
+  recovery_attempt_limit: EnabledQueueConfigFields.recovery_attempt_limit,
+  retry_policy: EnabledQueueConfigFields.retry_policy,
   rate_windows: z.array(QueueRateWindowSchema).max(MAX_QUEUE_RATE_WINDOWS).optional(),
 }).strict().superRefine((config, context) => {
-  for (const field of REQUIRED_ENABLED_QUEUE_FIELDS) {
-    if (config[field] === undefined) {
-      context.addIssue({ code: 'custom', path: [field], message: `${field} is required when queue is enabled` })
-    }
-  }
-  if (config.renewal_interval_ms !== undefined
-    && config.lease_duration_ms !== undefined
-    && config.renewal_interval_ms >= config.lease_duration_ms) {
+  if (config.renewal_interval_ms >= config.lease_duration_ms) {
     context.addIssue({
       code: 'custom',
       path: ['renewal_interval_ms'],
@@ -72,5 +83,5 @@ export type QueueRateWindow = z.infer<typeof QueueRateWindowSchema>
 
 export function enabledQueue(config: QueueConfig): EnabledQueueConfig {
   if (!config.enabled) throw new Error('queue is not enabled')
-  return config
+  return EnabledQueueConfigSchema.parse(config)
 }

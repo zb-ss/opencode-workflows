@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process'
 
-import { sandboxedGitArgs, sandboxedGitEnv } from './git-sandbox.ts'
+import { sandboxedGitArgs, sandboxedGitEnv, trustedGitExecutable } from './git-sandbox.ts'
 import { applyEpicUsageDelta, closeEpicUsageIntervals, reserveEpicAttempt, reserveEpicReviewSession } from './epic-accounting.ts'
 import { parseEpicExecutorResult, parseEpicReviewerResult, type EpicExecutorResult, type EpicReviewerResult } from './epic-attempt-result.ts'
 import { projectEpicBudgetStatus } from './epic-budget-usage.ts'
@@ -151,6 +151,23 @@ export interface EpicExpectedState {
 export class EpicDefinitiveSessionError extends Error {}
 export class EpicSessionTimeoutError extends Error {}
 
+interface AbortUncertainty {
+  execution: boolean
+  review: boolean
+  by_attempt: Record<string, { execution: boolean; review: boolean }>
+}
+
+interface TrackedCreation {
+  operation: Promise<{ id: string }>
+  settled: Promise<void>
+  accept(): void
+  abandon(): void
+}
+
+function emptyAbortUncertainty(): AbortUncertainty {
+  return { execution: false, review: false, by_attempt: {} }
+}
+
 function defaultClock(): EpicCoordinatorClock {
   return {
     now: Date.now,
@@ -162,7 +179,7 @@ function defaultClock(): EpicCoordinatorClock {
 }
 
 function git(project_root: string, args: string[]): string {
-  return execFileSync('git', sandboxedGitArgs(args), { cwd: project_root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: sandboxedGitEnv(process.env) }).trim()
+  return execFileSync(trustedGitExecutable(), sandboxedGitArgs(args, project_root), { cwd: project_root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: sandboxedGitEnv() }).trim()
 }
 
 function defaultRuntime(): EpicCoordinatorRuntime {
@@ -264,6 +281,11 @@ export class EpicCoordinator {
   private readonly scheduled = new Set<string>()
   private readonly waiters = new Set<() => void>()
   private readonly retryTimers = new Set<unknown>()
+  private readonly disposalErrors: unknown[] = []
+  private readonly disposalCancellation = new Error('epic coordinator disposed before queued work started')
+  private readonly pendingCreations = new Set<Promise<void>>()
+  private disposalPromise: Promise<void> | null = null
+  private disposalComplete = false
   private checkpointTimer: unknown | null = null
   private disposed = false
   private scheduling = false
@@ -450,14 +472,13 @@ export class EpicCoordinator {
     try {
       const uncertain = await this.abortKnownChildren(loaded.state)
       const current = this.requireLoaded()
-      if (isTerminal(current.state.status) || current.state.status === 'paused') return projectEpicStatus(current.state, current)
+      this.assertSameLoadEvidence(loaded, current)
       const hasUncertainty = uncertain.execution || uncertain.review
-      const written = this.appendFrom(current, state => this.pauseState(
+      const written = this.appendFrom(loaded, state => this.pauseState(
         state,
         uncertain.review ? 'ambiguous_reviewer_launch' : uncertain.execution ? 'ambiguous_execution_launch' : 'operator_paused',
         hasUncertainty ? 'Pause could not prove that every dispatched child had terminated.' : reason,
-        hasUncertainty,
-        !hasUncertainty,
+        uncertain,
       ))
       return projectEpicStatus(written.state, written)
     } finally { this.endLifecycleMutation() }
@@ -470,18 +491,18 @@ export class EpicCoordinator {
     try {
       const uncertain = await this.abortKnownChildren(loaded.state)
       const current = this.requireLoaded()
-      if (isTerminal(current.state.status)) return projectEpicStatus(current.state, current)
+      this.assertSameLoadEvidence(loaded, current)
       if (uncertain.review || uncertain.execution) {
-        const paused = this.appendFrom(current, state => this.pauseState(
+        const paused = this.appendFrom(loaded, state => this.pauseState(
           state,
           uncertain.review ? 'ambiguous_reviewer_launch' : 'ambiguous_execution_launch',
           'Cancellation could not prove that every dispatched child had terminated.',
-          true,
+          uncertain,
         ))
         return projectEpicStatus(paused.state, paused)
       }
-      const at = this.timestamp(current.state)
-      const next = cloneState(current.state)
+      const at = this.timestamp(loaded.state)
+      const next = cloneState(loaded.state)
       next.state_revision++
       next.updated_at = at
       next.status = 'cancelled'
@@ -498,7 +519,7 @@ export class EpicCoordinator {
         item.status = 'cancelled'; item.completed_at = at
       }
       this.closeIntervals(next, at)
-      const written = this.options.store.append(validateEpicTransition(current.state, next), current.revision, current.state_sha256, current.ownership_generation)!
+      const written = this.options.store.append(validateEpicTransition(loaded.state, next), loaded.revision, loaded.state_sha256, loaded.ownership_generation)!
       return projectEpicStatus(written.state, written)
     } finally { this.endLifecycleMutation() }
   }
@@ -521,6 +542,8 @@ export class EpicCoordinator {
 
   async integrateReady(expected: EpicExpectedState, item_id?: string): Promise<EpicStatusOnly> {
     this.assertActive()
+    this.beginLifecycleMutation()
+    try {
     const loaded = this.loadExpected(expected)
     const retriesUndispatched = loaded.state.status === 'paused' && loaded.state.pause_code === 'integration_undispatched'
     if (loaded.state.status !== 'running' && !retriesUndispatched) {
@@ -597,6 +620,9 @@ export class EpicCoordinator {
     this.schedule()
     const final = this.requireLoaded()
     return projectEpicStatus(final.state, final)
+    } finally {
+      this.endLifecycleMutation()
+    }
   }
 
   cleanup(expected: EpicExpectedState, item_id?: string): { cleaned: string[]; retained: string[] } {
@@ -611,23 +637,59 @@ export class EpicCoordinator {
     return { cleaned, retained }
   }
 
-  async dispose(): Promise<void> {
-    if (this.disposed) return
+  dispose(): Promise<void> {
+    if (this.disposalComplete) return Promise.resolve()
+    if (this.disposalPromise) return this.disposalPromise
+    const disposal = this.disposeOnce()
+      .then(() => { this.disposalComplete = true })
+      .finally(() => { this.disposalPromise = null })
+    this.disposalPromise = disposal
+    return disposal
+  }
+
+  private async disposeOnce(): Promise<void> {
+    this.disposalErrors.length = 0
     this.disposed = true
     if (this.checkpointTimer !== null) this.clock.clearInterval(this.checkpointTimer)
     for (const handle of this.retryTimers) this.clock.clearTimeout(handle)
     this.retryTimers.clear()
     this.checkpointTimer = null
-    this.scheduled.clear()
+    this.queue?.cancelPending(this.disposalCancellation)
     try {
       const loaded = this.options.store.load()
       if (loaded?.state.coordination_policy) {
-        await this.abortKnownChildren(loaded.state)
+        await this.abortKnownChildren(loaded.state, false, true)
       }
     } catch {
       // Best-effort child quiescence during disposal.
     }
+    await this.queue?.whenIdle()
+    const pending = Promise.allSettled([...this.pendingCreations])
+    const policy = this.options.store.load()?.state.coordination_policy
+    if (policy) {
+      try {
+        await this.withDeadline(pending, policy.max_attempt_duration_ms)
+      } catch {
+        this.disposalErrors.push(new Error('epic disposal timed out while supervising unresolved child creation'))
+      }
+    } else {
+      await pending
+    }
+    await Promise.resolve()
+    try {
+      const loaded = this.options.store.load()
+      if (loaded?.state.coordination_policy) {
+        const uncertain = await this.abortKnownChildren(loaded.state, this.pendingCreations.size === 0, true)
+        if (uncertain.execution || uncertain.review) {
+          this.disposalErrors.push(new Error('epic disposal could not prove that every child terminated'))
+        }
+      }
+    } catch (error) {
+      this.disposalErrors.push(error)
+    }
+    this.scheduled.clear()
     this.notify()
+    if (this.disposalErrors.length > 0) throw this.disposalErrors[0]
   }
 
   private installQueue(policy: EpicCoordinationPolicy): void {
@@ -661,7 +723,13 @@ export class EpicCoordinator {
         if (this.scheduled.has(key)) continue
         this.scheduled.add(key)
         void this.queue.enqueue({ key }, provider(candidate), async () => this.runExecution(item_id, candidate))
-          .catch(error => this.pauseForInternalError(error)).finally(() => { this.scheduled.delete(key); this.schedule(); this.notify() })
+          .catch(error => {
+            if (this.disposed) {
+              if (error !== this.disposalCancellation) this.disposalErrors.push(error)
+              return
+            }
+            return this.pauseForInternalError(error)
+          }).finally(() => { this.scheduled.delete(key); this.schedule(); this.notify() })
       }
     } finally { this.scheduling = false }
   }
@@ -673,7 +741,13 @@ export class EpicCoordinator {
     if (this.scheduled.has(key)) return
     this.scheduled.add(key)
     void this.queue!.enqueue({ key }, provider(candidate), async () => this.runReview(item_id, attempt.attempt_id, candidate))
-      .catch(error => this.pauseForInternalError(error)).finally(() => { this.scheduled.delete(key); this.schedule(); this.notify() })
+      .catch(error => {
+        if (this.disposed) {
+          if (error !== this.disposalCancellation) this.disposalErrors.push(error)
+          return
+        }
+        return this.pauseForInternalError(error)
+      }).finally(() => { this.scheduled.delete(key); this.schedule(); this.notify() })
   }
 
   private readyForExecution(state: EpicState, item: EpicItem): boolean {
@@ -708,22 +782,42 @@ export class EpicCoordinator {
     if (this.disposed || this.lifecycleMutation) return
     const policy = reserved.state.coordination_policy!
     let child: { id: string }
+    const tracked = this.trackCreation(
+      item_id,
+      attempt_id,
+      false,
+      Promise.resolve().then(() => this.options.session.create({ title: `Epic ${reserved.state.epic_id}: ${item_id}`, parent_id: this.options.root_session_id, directory: worktree.path, agent: policy.executor_agent, model: candidate })),
+      worktree.path,
+      policy.max_attempt_duration_ms,
+    )
     try {
       child = await this.withDeadline(
-        this.options.session.create({ title: `Epic ${reserved.state.epic_id}: ${item_id}`, parent_id: this.options.root_session_id, directory: worktree.path, agent: policy.executor_agent, model: candidate }),
+        tracked.operation,
         policy.max_attempt_duration_ms,
       )
     } catch (error) {
+      tracked.abandon()
       if (!this.currentAttemptHasStatus(item_id, attempt_id, 'running')) return
-      if (error instanceof EpicDefinitiveSessionError) { await this.failAttempt(item_id, attempt_id, 'transport', cap(error.message) ?? 'Child creation was definitively rejected.'); return }
+      if (error instanceof EpicDefinitiveSessionError) {
+        await this.failAttempt(item_id, attempt_id, 'transport', cap(error.message) ?? 'Child creation was definitively rejected.', null, null, true)
+        return
+      }
       await this.markAmbiguous(item_id, attempt_id, false); return
     }
-    if (this.disposed) return
     if (!this.currentAttemptHasStatus(item_id, attempt_id, 'running')) {
-      void this.options.session.abort(child.id, worktree.path).catch(() => {})
+      tracked.abandon()
+      await tracked.settled
       return
     }
-    const created = this.updateAttempt(item_id, attempt_id, attempt => ({ ...attempt, child_session_id: child.id, launch_state: 'created' }))
+    let created: EpicLoadResult
+    try {
+      created = this.updateAttempt(item_id, attempt_id, attempt => ({ ...attempt, child_session_id: child.id, launch_state: 'created' }))
+    } catch (error) {
+      tracked.abandon()
+      await tracked.settled
+      throw error
+    }
+    tracked.accept()
     const prompted = this.updateAttempt(item_id, attempt_id, attempt => ({ ...attempt, launch_state: 'prompted' }), created)
     let response: EpicSessionResponse
     try {
@@ -746,17 +840,17 @@ export class EpicCoordinator {
     try { result = parseEpicExecutorResult(response.result, policy.max_result_bytes) }
     catch {
       await this.failAttempt(item_id, attempt_id, 'contract', 'Executor returned an invalid bounded result.')
-      this.applyUsage(item_id, child.id, response)
+      await this.applyUsage(item_id, child.id, response)
       return
     }
     if (result.status === 'blocked') {
       await this.blockAttempt(item_id, attempt_id, result.summary, result.reason)
-      this.applyUsage(item_id, child.id, response)
+      await this.applyUsage(item_id, child.id, response)
       return
     }
     if (result.status === 'failed') {
       await this.failAttempt(item_id, attempt_id, result.failure_classification, result.summary)
-      this.applyUsage(item_id, child.id, response)
+      await this.applyUsage(item_id, child.id, response)
       return
     }
     try {
@@ -769,7 +863,7 @@ export class EpicCoordinator {
       )
       if (this.reviewPatchIsUnsafe(item_id, attempt_id, patch.patch_content, patch.changed_files)) {
         await this.blockUnsafeReview(item_id, attempt_id)
-        this.applyUsage(item_id, child.id, response)
+        await this.applyUsage(item_id, child.id, response)
         return
       }
       const progressed = this.updateAttempt(item_id, attempt_id, attempt => ({
@@ -783,10 +877,10 @@ export class EpicCoordinator {
         checkpoint_commit: checkpoint.checkpoint_commit,
         checkpoint_tree_sha256: checkpoint.checkpoint_tree_sha256,
       }), progressed)
-      this.applyUsage(item_id, child.id, response)
+      await this.applyUsage(item_id, child.id, response)
     } catch (error) {
       await this.failAttempt(item_id, attempt_id, 'semantic', cap(error instanceof Error ? error.message : String(error)) ?? 'Checkpoint validation failed.')
-      this.applyUsage(item_id, child.id, response)
+      await this.applyUsage(item_id, child.id, response)
     }
   }
 
@@ -806,23 +900,42 @@ export class EpicCoordinator {
     const reservation = reserveEpicReviewSession(before.state, { item_id, attempt_id, review_id, agent: before.state.coordination_policy!.reviewer_agent, model: candidate.model, reserved_at: this.timestamp(before.state) })
     const reserved = this.options.store.append(reservation.state, before.revision, before.state_sha256, before.ownership_generation)!
     let child: { id: string }
+    const tracked = this.trackCreation(
+      item_id,
+      attempt_id,
+      true,
+      Promise.resolve().then(() => this.options.session.create({ title: `Review ${reserved.state.epic_id}: ${item_id}`, parent_id: this.options.root_session_id, directory: worktreePath, agent: policy.reviewer_agent, model: candidate })),
+      worktreePath,
+      policy.max_attempt_duration_ms,
+    )
     try {
       child = await this.withDeadline(
-        this.options.session.create({ title: `Review ${reserved.state.epic_id}: ${item_id}`, parent_id: this.options.root_session_id, directory: worktreePath, agent: policy.reviewer_agent, model: candidate }),
+        tracked.operation,
         policy.max_attempt_duration_ms,
       )
     } catch (error) {
+      tracked.abandon()
       if (!this.currentAttemptHasStatus(item_id, attempt_id, 'reviewing')) return
       if (error instanceof EpicDefinitiveSessionError) this.failReservedReviewTransport(item_id, attempt_id, error.message)
-      else await this.markAmbiguous(item_id, attempt_id, true)
+      else {
+        await this.markAmbiguous(item_id, attempt_id, true)
+      }
       return
     }
-    if (this.disposed) return
     if (!this.currentAttemptHasStatus(item_id, attempt_id, 'reviewing')) {
-      void this.options.session.abort(child.id, worktreePath).catch(() => {})
+      tracked.abandon()
+      await tracked.settled
       return
     }
-    const created = this.updateReview(item_id, attempt_id, review => ({ ...review, child_session_id: child.id, launch_state: 'created' }))
+    let created: EpicLoadResult
+    try {
+      created = this.updateReview(item_id, attempt_id, review => ({ ...review, child_session_id: child.id, launch_state: 'created' }))
+    } catch (error) {
+      tracked.abandon()
+      await tracked.settled
+      throw error
+    }
+    tracked.accept()
     const prompted = this.updateReview(item_id, attempt_id, review => ({ ...review, launch_state: 'prompted' }), created)
     let response: EpicSessionResponse
     try {
@@ -846,7 +959,7 @@ export class EpicCoordinator {
     catch {
       result = { verdict: 'fail', summary: 'Reviewer returned an invalid bounded result.', issues: [{ issue_id: 'review-contract', severity: 'high', message: 'Reviewer result did not match the strict contract.', path: null, line: null, recommendation: null }] }
       this.settleReview(item_id, attempt_id, result, patch.patch_sha256, child.id, 'contract')
-      this.applyUsage(item_id, child.id, response)
+      await this.applyUsage(item_id, child.id, response)
       return
     }
     const exact = this.requireLoaded().state.items[item_id]!.attempts.find(value => value.attempt_id === attempt_id)!
@@ -857,7 +970,7 @@ export class EpicCoordinator {
       result = { verdict: 'fail', summary: 'Reviewed checkpoint changed during review.', issues: [{ issue_id: 'checkpoint-mutated', severity: 'critical', message: 'The exact reviewed checkpoint is no longer clean and unchanged.', path: null, line: null, recommendation: null }] }
     }
     this.settleReview(item_id, attempt_id, result, patch.patch_sha256, child.id)
-    this.applyUsage(item_id, child.id, response)
+    await this.applyUsage(item_id, child.id, response)
   }
 
   private settleReview(item_id: string, attempt_id: string, result: EpicReviewerResult, patch_sha256: string, child_id: string, failure_classification: 'semantic' | 'contract' | 'transport' = 'semantic'): void {
@@ -884,9 +997,9 @@ export class EpicCoordinator {
     this.settleReview(item_id, attempt_id, result, '0'.repeat(64), attempt.review!.child_session_id!, classification)
   }
 
-  private async failAttempt(item_id: string, attempt_id: string, classification: 'transport' | 'contract' | 'semantic', summary: string, progress_commit: string | null = null, progress_tree_sha256: string | null = null): Promise<void> {
+  private async failAttempt(item_id: string, attempt_id: string, classification: 'transport' | 'contract' | 'semantic', summary: string, progress_commit: string | null = null, progress_tree_sha256: string | null = null, allowReservedWithoutSession = false): Promise<void> {
     const loaded = this.requireLoaded()
-    const uncertain = await this.abortAttemptChildren(loaded.state, item_id, attempt_id)
+    const uncertain = await this.abortAttemptChildren(loaded.state, item_id, attempt_id, allowReservedWithoutSession)
     // Reload after await to avoid stale CAS: another item may have completed
     // during the abort, changing the state revision.
     const current = this.requireLoaded()
@@ -906,22 +1019,35 @@ export class EpicCoordinator {
       const uncertain = await this.abortKnownChildren(loaded.state)
       const current = this.requireLoaded()
       if (isTerminal(current.state.status) || current.state.status === 'paused') return
-      const at = this.timestamp(current.state); const next = cloneState(current.state)
-      const item = next.items[item_id]!; const attempt = item.attempts.find(value => value.attempt_id === attempt_id)!
-      attempt.status = 'failed'; attempt.completed_at = at; attempt.launch_state = 'settled'; attempt.failure_classification = 'semantic'; attempt.result_summary = cap(`${summary} ${reason}`)
-      item.status = 'blocked'; item.completed_at = at; item.retry_not_before = null
-      next.state_revision++; next.updated_at = at; next.status = 'paused'
-      next.pause_code = uncertain.review ? 'ambiguous_reviewer_launch' : uncertain.execution ? 'ambiguous_execution_launch' : 'item_blocked'
-      next.pause_reason = uncertain.execution || uncertain.review ? 'Pause could not prove that every dispatched child had terminated.' : cap(reason)
-      this.closeIntervals(next, at)
+      const next = this.pauseState(
+        current.state,
+        'item_blocked',
+        uncertain.execution || uncertain.review ? 'Pause could not prove that every dispatched child had terminated.' : reason,
+        uncertain,
+      )
+      const item = next.items[item_id]!
+      const attempt = item.attempts.find(value => value.attempt_id === attempt_id)!
+      const ownUncertainty = uncertain.by_attempt[attempt_id]
+      if (!ownUncertainty?.execution && !ownUncertainty?.review) {
+        attempt.status = 'failed'; attempt.launch_state = 'settled'; attempt.failure_classification = 'semantic'; attempt.result_summary = cap(`${summary} ${reason}`)
+        item.status = 'blocked'; item.retry_not_before = null
+      }
       this.options.store.append(validateEpicTransition(current.state, next), current.revision, current.state_sha256, current.ownership_generation)
     } finally { this.endLifecycleMutation() }
   }
 
-  private persistFailureDecision(loaded: EpicLoadResult, candidate: EpicState, item_id: string, uncertain: { execution: boolean; review: boolean } = { execution: false, review: false }): void {
+  private persistFailureDecision(loaded: EpicLoadResult, candidate: EpicState, item_id: string, uncertain: AbortUncertainty = emptyAbortUncertainty()): void {
     const initiallyValid = validateEpicTransition(loaded.state, candidate)
-    const decision = assessEpicRetry(initiallyValid, item_id)
     const next = cloneState(candidate)
+    if (uncertain.execution || uncertain.review) {
+      next.status = 'paused'
+      next.pause_code = uncertain.review ? 'ambiguous_reviewer_launch' : 'ambiguous_execution_launch'
+      next.pause_reason = 'Pause could not prove that every dispatched child had terminated.'
+      this.closeIntervals(next, next.updated_at)
+      this.options.store.append(validateEpicTransition(loaded.state, next), loaded.revision, loaded.state_sha256, loaded.ownership_generation)
+      return
+    }
+    const decision = assessEpicRetry(initiallyValid, item_id)
     if (decision.retry) {
       next.items[item_id]!.retry_not_before = decision.retry_not_before
     } else {
@@ -959,7 +1085,7 @@ export class EpicCoordinator {
     attempt.review = { ...attempt.review!, launch_state: 'settled' }
     item.status = 'failed'; item.completed_at = at; item.retry_not_before = null
     next.state_revision++; next.updated_at = at; this.closeItemIntervals(next, item_id, at)
-    this.persistFailureDecision(loaded, next, item_id, { execution: false, review: false })
+    this.persistFailureDecision(loaded, next, item_id)
   }
 
   private async blockUnsafeReview(item_id: string, attempt_id: string): Promise<void> {
@@ -986,7 +1112,7 @@ export class EpicCoordinator {
     attempt.status = 'failed'; attempt.completed_at = at; attempt.failure_classification = 'ambiguous_launch'; attempt.result_summary = 'Session launch or execution outcome is ambiguous.'; attempt.launch_state = reviewer ? 'settled' : 'ambiguous'
     if (reviewer && attempt.review) attempt.review.launch_state = 'ambiguous'
     item.status = 'failed'; item.completed_at = at
-    next.state_revision++; next.updated_at = at; next.status = 'paused'; next.pause_code = uncertain.review ? 'ambiguous_reviewer_launch' : 'ambiguous_execution_launch'; next.pause_reason = 'Attended reconciliation is required before more work can be scheduled.'
+    next.state_revision++; next.updated_at = at; next.status = 'paused'; next.pause_code = reviewer || uncertain.review ? 'ambiguous_reviewer_launch' : 'ambiguous_execution_launch'; next.pause_reason = 'Attended reconciliation is required before more work can be scheduled.'
     this.closeIntervals(next, at)
     this.options.store.append(validateEpicTransition(current.state, next), current.revision, current.state_sha256, current.ownership_generation)
   }
@@ -1031,12 +1157,12 @@ export class EpicCoordinator {
     return written
   }
 
-  private applyUsage(item_id: string, session_id: string, response: EpicSessionResponse): boolean {
+  private async applyUsage(item_id: string, session_id: string, response: EpicSessionResponse): Promise<boolean> {
     if (!response.usage) {
       const requiresMeasuredUsage = (this.requireLoaded().state.budgets ?? []).some(budget => budget.limit !== null
         && ['input_tokens', 'output_tokens', 'cost_usd'].includes(budget.dimension))
       if (requiresMeasuredUsage) {
-        this.pauseForMissingUsage('usage_reporting_unavailable', 'Authoritative token or cost reporting was unavailable for a metered epic session.')
+        await this.pauseForMissingUsage('usage_reporting_unavailable', 'Authoritative token or cost reporting was unavailable for a metered epic session.')
         return false
       }
       return true
@@ -1045,32 +1171,65 @@ export class EpicCoordinator {
       const state = this.requireLoaded().state
       const costIsRequired = (state.budgets ?? []).some(budget => budget.dimension === 'cost_usd' && budget.limit !== null)
       if (costIsRequired) {
-        this.pauseForMissingUsage('cost_reporting_unavailable', 'Authoritative cost reporting was unavailable for a cost-budgeted session.')
+        await this.pauseForMissingUsage('cost_reporting_unavailable', 'Authoritative cost reporting was unavailable for a cost-budgeted session.')
         return false
       }
     }
-    const delta = this.ledger.delta(session_id, {
+    const pendingUsage = this.ledger.prepare(session_id, {
       response_id: response.response_id,
       input_tokens: response.usage.input_tokens,
       output_tokens: response.usage.output_tokens,
       cost_usd: response.usage.cost_usd ?? 0,
     })
-    if (!delta) return this.requireLoaded().state.status === 'running'
+    if (!pendingUsage) return this.requireLoaded().state.status === 'running'
     const loaded = this.requireLoaded()
-    const next = applyEpicUsageDelta(loaded.state, { item_id, observed_at: this.timestamp(loaded.state), ...delta })
-    const written = this.options.store.append(next, loaded.revision, loaded.state_sha256, loaded.ownership_generation)
-    return written?.state.status === 'running'
+    const next = applyEpicUsageDelta(loaded.state, { item_id, observed_at: this.timestamp(loaded.state), ...pendingUsage.delta })
+    if (next.status !== 'paused') {
+      const written = this.options.store.append(next, loaded.revision, loaded.state_sha256, loaded.ownership_generation)
+      if (!written) throw new EpicValidationError('epic usage did not persist')
+      pendingUsage.commit()
+      return written.state.status === 'running'
+    }
+    await this.persistUsagePause(loaded, next, pendingUsage.commit)
+    return false
   }
 
-  private pauseForMissingUsage(code: string, reason: string): void {
+  private async pauseForMissingUsage(code: string, reason: string): Promise<void> {
     const loaded = this.requireLoaded()
     if (loaded.state.status !== 'running') return
-    this.appendFrom(loaded, state => this.pauseState(
-      state,
-      code,
-      reason,
-      false,
-    ))
+    const next = cloneState(loaded.state)
+    next.state_revision++
+    next.updated_at = this.timestamp(loaded.state)
+    next.status = 'paused'
+    next.pause_code = code
+    next.pause_reason = cap(reason)
+    await this.persistUsagePause(loaded, next)
+  }
+
+  private async persistUsagePause(loaded: EpicLoadResult, pausedState: EpicState, onUsagePersisted?: () => void): Promise<void> {
+    if (this.disposed || this.lifecycleMutation) return
+    this.beginLifecycleMutation()
+    try {
+      const paused = this.options.store.append(
+        validateEpicTransition(loaded.state, pausedState),
+        loaded.revision,
+        loaded.state_sha256,
+        loaded.ownership_generation,
+      )
+      if (!paused) throw new EpicValidationError('usage pause did not persist')
+      onUsagePersisted?.()
+      const uncertain = await this.abortKnownChildren(paused.state)
+      const current = this.requireLoaded()
+      this.assertSameLoadEvidence(paused, current)
+      this.appendFrom(current, state => this.pauseState(
+        state,
+        state.pause_code ?? 'budget_exhausted',
+        state.pause_reason ?? 'Epic usage policy paused execution.',
+        uncertain,
+      ))
+    } finally {
+      this.endLifecycleMutation()
+    }
   }
 
   private async checkpointUsage(): Promise<void> {
@@ -1081,23 +1240,27 @@ export class EpicCoordinator {
       if (loaded.state.status !== 'running') return
       if (loaded.state.items[item_id]?.status !== 'running') continue
       const next = applyEpicUsageDelta(loaded.state, { item_id, observed_at: this.timestampAtLeast(loaded.state, observedAt), input_tokens: 0, output_tokens: 0, cost_usd: 0 })
+      if (next.status === 'paused') {
+        await this.persistUsagePause(loaded, next)
+        return
+      }
       this.options.store.append(next, loaded.revision, loaded.state_sha256, loaded.ownership_generation)
     }
   }
 
-  private pauseState(state: EpicState, code: string, reason: string, ambiguous: boolean, childrenTerminated = false): EpicState {
-    const at = this.timestamp(state); const next = cloneState(state); next.state_revision++; next.updated_at = at; next.status = 'paused'; next.pause_code = code; next.pause_reason = cap(reason)
+  private pauseState(state: EpicState, code: string, reason: string, uncertain: AbortUncertainty): EpicState {
+    const at = this.timestamp(state); const next = cloneState(state); next.state_revision++; next.updated_at = at; next.status = 'paused'; next.pause_code = uncertain.review ? 'ambiguous_reviewer_launch' : uncertain.execution ? 'ambiguous_execution_launch' : code; next.pause_reason = cap(reason)
     for (const item of Object.values(next.items)) {
       const attempt = activeAttempt(item); if (!attempt) continue
+      const attemptUncertainty = uncertain.by_attempt[attempt.attempt_id] ?? { execution: false, review: false }
       attempt.completed_at = at; attempt.result_summary = cap(reason); item.completed_at = at
-      const uncertainReview = !childrenTerminated && attempt.review && ['reserved', 'created', 'prompted'].includes(attempt.review.launch_state)
-      const uncertainExecution = !childrenTerminated && attempt.status === 'running' && ['created', 'prompted'].includes(attempt.launch_state ?? '')
+      const uncertainReview = attemptUncertainty.review && attempt.review && ['reserved', 'created', 'prompted'].includes(attempt.review.launch_state)
+      const uncertainExecution = attemptUncertainty.execution && attempt.status === 'running' && ['reserved', 'created', 'prompted'].includes(attempt.launch_state ?? '')
       if (uncertainReview) {
         attempt.status = 'cancelled'; attempt.failure_classification = 'cancelled'; attempt.launch_state = 'settled'
-        attempt.review!.launch_state = 'ambiguous'; item.status = 'cancelled'; next.pause_code = 'ambiguous_reviewer_launch'
-      } else if (ambiguous || uncertainExecution) {
+        attempt.review!.launch_state = 'ambiguous'; item.status = 'cancelled'
+      } else if (uncertainExecution) {
         attempt.status = 'failed'; attempt.failure_classification = 'ambiguous_launch'; attempt.launch_state = 'ambiguous'; item.status = 'failed'
-        next.pause_code = 'ambiguous_execution_launch'
       } else {
         attempt.status = 'cancelled'; attempt.failure_classification = 'cancelled'; attempt.launch_state = 'settled'; item.status = 'cancelled'
         if (attempt.review && attempt.review.launch_state !== 'ambiguous') attempt.review.launch_state = 'settled'
@@ -1224,6 +1387,14 @@ export class EpicCoordinator {
     return loaded
   }
 
+  private assertSameLoadEvidence(expected: EpicLoadResult, current: EpicLoadResult): void {
+    if (current.revision !== expected.revision
+      || current.state_sha256 !== expected.state_sha256
+      || current.ownership_generation !== expected.ownership_generation) {
+      throw new EpicValidationError('epic state changed while an asynchronous lifecycle operation was in progress')
+    }
+  }
+
   private assertActive(): void { if (this.disposed) throw new EpicValidationError('epic coordinator is disposed') }
 
   private beginLifecycleMutation(): void {
@@ -1238,16 +1409,21 @@ export class EpicCoordinator {
   }
 
   private isQuiescent(): boolean {
-    const loaded = this.requireLoaded()
-    return isTerminal(loaded.state.status) || loaded.state.status === 'paused' || ((this.queue?.snapshot().pending ?? 0) === 0 && (this.queue?.snapshot().running ?? 0) === 0 && this.scheduled.size === 0 && this.retryTimers.size === 0)
+    const queue = this.queue?.snapshot() ?? { pending: 0, running: 0 }
+    return !this.lifecycleMutation
+      && queue.pending === 0
+      && queue.running === 0
+      && this.scheduled.size === 0
+      && this.retryTimers.size === 0
+      && this.pendingCreations.size === 0
   }
 
   private notify(): void {
-    if (this.disposed || this.isQuiescent()) for (const waiter of [...this.waiters]) waiter()
+    if (this.isQuiescent()) for (const waiter of [...this.waiters]) waiter()
   }
 
-  private async abortAttemptChildren(state: EpicState, itemId: string, attemptId: string): Promise<{ execution: boolean; review: boolean }> {
-    const uncertain = { execution: false, review: false }
+  private async abortAttemptChildren(state: EpicState, itemId: string, attemptId: string, allowReservedWithoutSession = false): Promise<AbortUncertainty> {
+    const uncertain = emptyAbortUncertainty()
     const item = state.items[itemId]
     if (!item) return uncertain
     const attempt = item.attempts.find(a => a.attempt_id === attemptId)
@@ -1255,9 +1431,11 @@ export class EpicCoordinator {
     const worktreePath = this.runtime.worktreePath(this.options.project_root, attempt)
     const checks: Promise<void>[] = []
     const queueCheck = (session_id: string | null, reviewer: boolean) => {
+      const attemptUncertainty = uncertain.by_attempt[attemptId] ??= { execution: false, review: false }
       if (!session_id) {
-        if (reviewer) uncertain.review = true
-        else uncertain.execution = true
+        if (!reviewer && allowReservedWithoutSession && attempt.launch_state === 'reserved') return
+        if (reviewer) uncertain.review = attemptUncertainty.review = true
+        else uncertain.execution = attemptUncertainty.execution = true
         return
       }
       checks.push(this.withDeadline((async () => {
@@ -1265,8 +1443,8 @@ export class EpicCoordinator {
         const inspection = await this.options.session.inspect(session_id, worktreePath)
         if (inspection.status === 'running' || inspection.status === 'unknown') throw new Error('child termination remains uncertain')
       })(), state.coordination_policy!.max_attempt_duration_ms).catch(() => {
-        if (reviewer) uncertain.review = true
-        else uncertain.execution = true
+        if (reviewer) uncertain.review = attemptUncertainty.review = true
+        else uncertain.execution = attemptUncertainty.execution = true
       }))
     }
     if (attempt.status === 'running' && ['reserved', 'created', 'prompted'].includes(attempt.launch_state ?? '')) {
@@ -1279,17 +1457,130 @@ export class EpicCoordinator {
     return uncertain
   }
 
-  private async abortKnownChildren(state: EpicState): Promise<{ execution: boolean; review: boolean }> {
-    const uncertain = { execution: false, review: false }
+  private async abortLateChild(sessionId: string, worktreePath: string, timeoutMs: number): Promise<void> {
+    await this.withDeadline((async () => {
+      await this.options.session.abort(sessionId, worktreePath)
+      const inspection = await this.options.session.inspect(sessionId, worktreePath)
+      if (inspection.status === 'running' || inspection.status === 'unknown') {
+        throw new Error('late-created child termination remains uncertain')
+      }
+    })(), timeoutMs)
+  }
+
+  private trackCreation(
+    itemId: string,
+    attemptId: string,
+    reviewer: boolean,
+    creation: Promise<{ id: string }>,
+    worktreePath: string,
+    timeoutMs: number,
+  ): TrackedCreation {
+    let disposition: 'pending' | 'accepted' | 'abandoned' = 'pending'
+    let decide!: (value: 'accepted' | 'abandoned') => void
+    const decision = new Promise<'accepted' | 'abandoned'>(resolve => { decide = resolve })
+    const settle = (value: 'accepted' | 'abandoned'): void => {
+      if (disposition !== 'pending') return
+      disposition = value
+      decide(value)
+    }
+    const supervision = creation.then(async child => {
+      if (await decision === 'accepted') return
+      let persistenceError: unknown = null
+      try {
+        this.recordLateCreatedChild(itemId, attemptId, reviewer, child.id)
+      } catch (error) {
+        persistenceError = error
+      }
+      try {
+        await this.abortLateChild(child.id, worktreePath, timeoutMs)
+      } catch (error) {
+        throw persistenceError ?? error
+      }
+      if (persistenceError !== null) throw persistenceError
+    }, () => undefined)
+    this.pendingCreations.add(supervision)
+    void supervision.catch(error => {
+      if (this.disposed) this.disposalErrors.push(error)
+    }).finally(() => {
+      this.pendingCreations.delete(supervision)
+      this.notify()
+    })
+    return {
+      operation: creation,
+      settled: supervision,
+      accept: () => settle('accepted'),
+      abandon: () => settle('abandoned'),
+    }
+  }
+
+  private recordLateCreatedChild(itemId: string, attemptId: string, reviewer: boolean, childId: string): void {
+    for (let attemptNumber = 0; attemptNumber < 3; attemptNumber++) {
+      const loaded = this.requireLoaded()
+      const currentAttempt = loaded.state.items[itemId]?.attempts.find(attempt => attempt.attempt_id === attemptId)
+      const existing = reviewer ? currentAttempt?.review?.child_session_id : currentAttempt?.child_session_id
+      if (!currentAttempt || (reviewer && !currentAttempt.review)) throw new EpicValidationError('late-created child no longer has matching durable reservation evidence')
+      if (existing === childId) return
+      if (existing !== null) throw new EpicValidationError('late-created child conflicts with existing session identity')
+      if (isTerminal(loaded.state.status)) return
+
+      const at = this.timestamp(loaded.state)
+      const next = cloneState(loaded.state)
+      const item = next.items[itemId]!
+      const target = item.attempts.find(attempt => attempt.attempt_id === attemptId)!
+      const alreadyAmbiguous = reviewer
+        ? target.review?.launch_state === 'ambiguous'
+        : target.launch_state === 'ambiguous'
+      if (reviewer) {
+        target.review = { ...target.review!, child_session_id: childId, launch_state: 'ambiguous' }
+      } else {
+        target.child_session_id = childId
+        target.launch_state = 'ambiguous'
+      }
+      if (!alreadyAmbiguous) {
+        target.status = 'failed'
+        target.completed_at = at
+        target.failure_classification = 'ambiguous_launch'
+        target.result_summary = 'A child was created after its launch outcome became ambiguous.'
+        if (reviewer) target.launch_state = 'settled'
+        item.status = 'failed'
+        item.completed_at = at
+      }
+      next.state_revision++
+      next.updated_at = at
+      if (!alreadyAmbiguous || next.status !== 'paused') {
+        next.status = 'paused'
+        next.pause_code = reviewer ? 'ambiguous_reviewer_launch' : 'ambiguous_execution_launch'
+        next.pause_reason = 'Attended reconciliation is required for a child created after launch supervision timed out.'
+        if (!alreadyAmbiguous) this.closeIntervals(next, at)
+      }
+      try {
+        this.options.store.append(validateEpicTransition(loaded.state, next), loaded.revision, loaded.state_sha256, loaded.ownership_generation)
+        return
+      } catch (error) {
+        if (attemptNumber === 2) throw error
+      }
+    }
+  }
+
+  private async abortKnownChildren(
+    state: EpicState,
+    allowReservedWithoutSession = false,
+    includeAmbiguous = false,
+  ): Promise<AbortUncertainty> {
+    const uncertain = emptyAbortUncertainty()
     const checks: Promise<void>[] = []
     for (const item of Object.values(state.items)) {
-      const attempt = activeAttempt(item)
+      const attempt = activeAttempt(item) ?? (includeAmbiguous
+        ? item.attempts.slice().reverse().find(candidate => candidate.launch_state === 'ambiguous' || candidate.review?.launch_state === 'ambiguous') ?? null
+        : null)
       if (!attempt) continue
       const worktreePath = this.runtime.worktreePath(this.options.project_root, attempt)
-      const queueCheck = (session_id: string | null, reviewer: boolean) => {
+      const queueCheck = (session_id: string | null, reviewer: boolean, isReserved: boolean) => {
+        const attemptUncertainty = uncertain.by_attempt[attempt.attempt_id] ??= { execution: false, review: false }
         if (!session_id) {
-          if (reviewer) uncertain.review = true
-          else uncertain.execution = true
+          if (allowReservedWithoutSession && isReserved) return
+          if (reviewer) uncertain.review = attemptUncertainty.review = true
+          else uncertain.execution = attemptUncertainty.execution = true
           return
         }
         checks.push(this.withDeadline((async () => {
@@ -1297,15 +1588,21 @@ export class EpicCoordinator {
           const inspection = await this.options.session.inspect(session_id, worktreePath)
           if (inspection.status === 'running' || inspection.status === 'unknown') throw new Error('child termination remains uncertain')
         })(), state.coordination_policy!.max_attempt_duration_ms).catch(() => {
-          if (reviewer) uncertain.review = true
-          else uncertain.execution = true
+          if (reviewer) uncertain.review = attemptUncertainty.review = true
+          else uncertain.execution = attemptUncertainty.execution = true
         }))
       }
       if (attempt.status === 'running' && ['reserved', 'created', 'prompted'].includes(attempt.launch_state ?? '')) {
-        queueCheck(attempt.child_session_id, false)
+        queueCheck(attempt.child_session_id, false, attempt.launch_state === 'reserved')
+      }
+      if (includeAmbiguous && attempt.launch_state === 'ambiguous' && attempt.child_session_id) {
+        queueCheck(attempt.child_session_id, false, false)
       }
       if (attempt.status === 'reviewing' && attempt.review && ['reserved', 'created', 'prompted'].includes(attempt.review.launch_state)) {
-        queueCheck(attempt.review.child_session_id, true)
+        queueCheck(attempt.review.child_session_id, true, attempt.review.launch_state === 'reserved')
+      }
+      if (includeAmbiguous && attempt.review?.launch_state === 'ambiguous' && attempt.review.child_session_id) {
+        queueCheck(attempt.review.child_session_id, true, false)
       }
     }
     await Promise.all(checks)
@@ -1324,8 +1621,7 @@ export class EpicCoordinator {
         state,
         uncertain.review ? 'ambiguous_reviewer_launch' : uncertain.execution ? 'ambiguous_execution_launch' : 'coordinator_error',
         error instanceof Error && error.message ? error.message : 'Coordinator operation failed.',
-        hasUncertainty,
-        !hasUncertainty,
+        uncertain,
       ))
     } catch { /* persistence remains authoritative; caller sees status on next tool call */ }
     finally { this.endLifecycleMutation() }

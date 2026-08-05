@@ -9,6 +9,7 @@ import {
 } from './model-registry.ts'
 import { EpicConfigSchema } from './epic-policy.ts'
 import { QueueConfigSchema } from './queue-policy.ts'
+import { MAX_QUEUE_CHILD_SESSION_IDS } from './queue-contracts.ts'
 import { getConfigDir } from './paths.ts'
 import {
   MAX_BOUNDED_IO_BYTES,
@@ -44,6 +45,7 @@ const MODEL_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*\/\S+$/
 const VARIANT_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
 export { MAX_SAFE_IDENTIFIER_LENGTH, SAFE_IDENTIFIER_PATTERN, SAFE_IDENTIFIER_SOURCE }
 export const MAX_VALIDATION_TIMEOUT_MS = 60 * 60 * 1000
+export const MAX_AUTOMATION_SESSION_OPERATION_TIMEOUT_MS = 60 * 60 * 1000
 export const MAX_VALIDATION_OUTPUT_BYTES = 16 * 1024 * 1024
 export { MAX_BOUNDED_IO_BYTES, MAX_VALIDATION_RUNS_PER_WORKFLOW }
 export const MAX_VALIDATION_STRING_LENGTH = 1024
@@ -428,6 +430,7 @@ export const WorkflowConfigSchema = z.object({
     max_parallel_sessions: z.number().int().positive().optional(),
     max_sessions: z.number().int().positive().optional(),
     max_attempts_per_stage: z.number().int().positive().optional(),
+    session_operation_timeout_ms: z.number().int().positive().max(MAX_AUTOMATION_SESSION_OPERATION_TIMEOUT_MS).optional(),
     max_active_time_ms: z.number().int().positive().optional(),
     max_calendar_age_ms: z.number().int().positive().optional(),
     max_input_tokens: z.number().int().nonnegative().optional(),
@@ -445,6 +448,9 @@ export const WorkflowConfigSchema = z.object({
     }
     if (automation.max_sessions === undefined) {
       context.addIssue({ code: 'custom', path: ['max_sessions'], message: 'max_sessions is required when automation is enabled' })
+    }
+    if (automation.session_operation_timeout_ms === undefined) {
+      context.addIssue({ code: 'custom', path: ['session_operation_timeout_ms'], message: 'session_operation_timeout_ms is required when automation is enabled' })
     }
   }).default({ enabled: false, autonomy: 'interactive' }),
   experimental_capabilities: z.object({
@@ -476,6 +482,12 @@ export const WorkflowConfigSchema = z.object({
     }
     if (config.automation.max_sessions === undefined) {
       context.addIssue({ code: 'custom', path: ['automation', 'max_sessions'], message: 'automation.max_sessions is required when queue is enabled' })
+    }
+    if (config.automation.session_operation_timeout_ms === undefined) {
+      context.addIssue({ code: 'custom', path: ['automation', 'session_operation_timeout_ms'], message: 'automation.session_operation_timeout_ms is required when queue is enabled' })
+    }
+    if (config.automation.max_sessions !== undefined && config.automation.max_sessions > MAX_QUEUE_CHILD_SESSION_IDS) {
+      context.addIssue({ code: 'custom', path: ['automation', 'max_sessions'], message: `automation.max_sessions cannot exceed ${MAX_QUEUE_CHILD_SESSION_IDS} when queue is enabled` })
     }
   }
 })

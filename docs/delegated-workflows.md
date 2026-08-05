@@ -92,6 +92,8 @@ The merge uses `--no-ff`. On conflict, the manager reports unmerged paths and at
 
 Checkpoint commits use a local synthetic identity, disable signing, and skip hooks inside the isolated task worktree. This ensures the merge operates on a complete snapshot; it is not a substitute for review or target-branch checks.
 
+Privileged Git operations pin a root-owned executable whose full parent path is not group/world-writable and reject executables inside the startup worktree. When the startup `PATH` cannot provide that boundary, set `OPENCODE_WORKFLOWS_GIT_EXECUTABLE` to an operator-selected absolute system Git path before starting OpenCode.
+
 ### Cleanup
 
 Normal cleanup is a one-shot operation scoped to one exact session-owned batch. It removes a worktree only when it is clean and its exact delegation branch tip appears in a merge commit on the current target history. It retains dirty, unmerged, mismatched, or unverified worktrees for manual recovery, then releases the in-memory batch so stale paths cannot claim later worktrees. Cleanup also refuses to run while that batch still has queued or running tasks, or when the current session no longer owns the batch after restart.

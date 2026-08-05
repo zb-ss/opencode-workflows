@@ -57,12 +57,16 @@ function installCleanupBranchRace(
   fs.writeFileSync(shimPath, `#!/usr/bin/env node
 const { spawnSync } = require('node:child_process')
 const args = process.argv.slice(2)
-const result = spawnSync(process.env.REAL_GIT, args, { cwd: process.cwd(), env: process.env, stdio: 'inherit' })
+const realGit = ${JSON.stringify(realGit)}
+const branch = ${JSON.stringify(`refs/heads/${branch}`)}
+const competingCommit = ${JSON.stringify(competingCommit)}
+const expectedHead = ${JSON.stringify(expectedHead)}
+const result = spawnSync(realGit, args, { cwd: process.cwd(), env: process.env, stdio: 'inherit' })
 if (result.status !== 0) process.exit(result.status || 1)
 // Privileged Git calls now prepend sandboxed -c options, so match by subcommand.
 const worktreeIndex = args.indexOf('worktree')
 if (worktreeIndex >= 0 && args[worktreeIndex + 1] === 'remove') {
-  const advanced = spawnSync(process.env.REAL_GIT, ['update-ref', process.env.RACE_BRANCH, process.env.RACE_COMMIT, process.env.RACE_EXPECTED], { cwd: process.cwd(), stdio: 'inherit' })
+  const advanced = spawnSync(realGit, ['update-ref', branch, competingCommit, expectedHead], { cwd: process.cwd(), stdio: 'inherit' })
   if (advanced.status !== 0) process.exit(advanced.status || 1)
 }
 process.exit(0)
@@ -70,16 +74,11 @@ process.exit(0)
   fs.chmodSync(shimPath, 0o700)
   const previousPath = process.env.PATH
   process.env.PATH = `${shimDirectory}${path.delimiter}${previousPath ?? ''}`
-  process.env.REAL_GIT = realGit
-  process.env.RACE_BRANCH = `refs/heads/${branch}`
-  process.env.RACE_COMMIT = competingCommit
-  process.env.RACE_EXPECTED = expectedHead
   return {
     competingCommit,
     restore: () => {
       if (previousPath === undefined) delete process.env.PATH
       else process.env.PATH = previousPath
-      for (const name of ['REAL_GIT', 'RACE_BRANCH', 'RACE_COMMIT', 'RACE_EXPECTED']) delete process.env[name]
     },
   }
 }
@@ -202,7 +201,7 @@ describe('epic worktree isolation and provenance', { concurrency: false }, () =>
     assert.throws(() => git(root, ['show-ref', '--verify', `refs/heads/${created.evidence.branch_name}`]))
   })
 
-  it('retains a concurrently advanced attempt branch during cleanup', () => {
+  it('does not execute a PATH-substituted Git binary during cleanup', () => {
     const { parent, root } = repository()
     const created = createEpicAttemptWorktree(root, 'refs/heads/main', 'epic-1', 'item-1', 'attempt-1')
     fs.writeFileSync(path.join(created.path, 'tracked.txt'), 'reviewed change\n')
@@ -222,12 +221,12 @@ describe('epic worktree isolation and provenance', { concurrency: false }, () =>
         created.evidence,
         checkpoint.checkpoint_commit,
         integrationCommit,
-      ), false)
+      ), true)
     } finally {
       race.restore()
     }
     assert.equal(fs.existsSync(created.path), false)
-    assert.equal(git(root, ['rev-parse', `refs/heads/${created.evidence.branch_name}`]), race.competingCommit)
+    assert.throws(() => git(root, ['rev-parse', `refs/heads/${created.evidence.branch_name}`]))
   })
 
   it('rejects identifier injection before creating work and preserves existing files', () => {

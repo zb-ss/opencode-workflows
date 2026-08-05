@@ -218,6 +218,7 @@ describe('installer subprocess', () => {
       max_parallel_sessions: 1,
       max_sessions: 2,
       max_attempts_per_stage: 2,
+      session_operation_timeout_ms: 1000,
       max_wall_time_ms: 1000,
       max_input_tokens: 500,
       max_output_tokens: 250,

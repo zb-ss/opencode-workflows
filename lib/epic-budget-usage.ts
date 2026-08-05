@@ -44,7 +44,8 @@ export function validateBudgetsAndUsage(state: EpicState, issue: EpicIssueReport
     if ((started === null) !== (checkpoint === null)) issue(['usage', index], 'active interval start and checkpoint must both be set or both be null')
     if (started !== null && checkpoint !== null && Date.parse(checkpoint) < Date.parse(started)) issue(['usage', index, 'last_active_checkpoint_at'], 'active checkpoint must not precede interval start')
     if (checkpoint !== null && Date.parse(checkpoint) > Date.parse(state.updated_at)) issue(['usage', index, 'last_active_checkpoint_at'], 'active checkpoint must not exceed state updated_at')
-    const is_running = state.status === 'running' && (usage.scope === 'epic' || state.items[usage.item_id!]?.status === 'running')
+    const is_running = (state.status === 'running' || state.status === 'paused')
+      && (usage.scope === 'epic' || state.items[usage.item_id!]?.status === 'running')
     if (started !== null && !is_running) issue(['usage', index], 'active interval requires its epic or item to be running')
   }
   if (epic_usage_count !== 1) issue(['usage'], 'usage must contain exactly one epic usage record')
@@ -126,9 +127,8 @@ function validateRunningBudgetScopes(state: EpicState, issue: EpicIssueReporter)
       issue(['budgets', budgetIndex], 'configured budget requires matching scoped usage telemetry')
       continue
     }
-    const scopeRunning = budget.scope === 'epic'
-      ? state.status === 'running'
-      : state.items[budget.item_id!]?.status === 'running'
+    const scopeRunning = state.status === 'running'
+      && (budget.scope === 'epic' || state.items[budget.item_id!]?.status === 'running')
     if (scopeRunning && isBudgetExhausted(state, budget, state.usage[usageIndex]!.usage)) {
       issue(['budgets', budgetIndex, 'limit'], 'exhausted or unmeasurable budget scope must not remain running')
     }
@@ -253,7 +253,8 @@ export function validateUsageTransition(previous: EpicState, next: EpicState): v
     const newStart = following.usage.active_interval_started_at
     const oldCheckpoint = record.usage.last_active_checkpoint_at
     const newCheckpoint = following.usage.last_active_checkpoint_at
-    const targetRunning = next.status === 'running' && (record.scope === 'epic' || next.items[record.item_id!]?.status === 'running')
+    const targetRunning = (next.status === 'running' || next.status === 'paused')
+      && (record.scope === 'epic' || next.items[record.item_id!]?.status === 'running')
     if (newStart !== null && !targetRunning) throw new EpicValidationError('active usage intervals are allowed only while their epic or item is running')
     if ((newStart === null) !== (newCheckpoint === null)) throw new EpicValidationError('active interval start and checkpoint must both be set or both be null')
     if (newStart !== null && Date.parse(newCheckpoint!) < Date.parse(newStart)) throw new EpicValidationError('active usage checkpoint cannot precede interval start')

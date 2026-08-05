@@ -15,6 +15,7 @@ import {
   isWorktreeCleanAfterCommit,
   managedCommitIsAncestor,
   managedCommitIsRetainedByAnotherBranch,
+  retainManagedCommit,
   removeManagedWorktree,
   type ManagedReviewPatch,
   type ManagedReviewPatchOptions,
@@ -22,6 +23,7 @@ import {
   type ManagedWorktreeSnapshot,
   getWorktreeDir,
 } from './worktree-manager.ts'
+import { withRepositoryOperationLock } from './repository-operation-lock.ts'
 
 const FULL_BRANCH_PREFIX = 'refs/heads/'
 export {
@@ -212,7 +214,8 @@ export function cleanupIntegratedEpicAttemptWorktree(
   reviewedCheckpointCommit: string | null,
   integrationCommit: string | null,
 ): boolean {
-  try {
+  return withRepositoryOperationLock(projectRoot, () => {
+    try {
     const inspected = inspectEpicAttemptWorktree(projectRoot, worktreePath, evidence)
     if (inspected.has_conflicts
       || reviewedCheckpointCommit === null
@@ -223,10 +226,12 @@ export function cleanupIntegratedEpicAttemptWorktree(
     // which may report false positives due to stale stat info.
     if (!isWorktreeCleanAfterCommit(inspected.path, reviewedCheckpointCommit)) return false
     if (!managedCommitIsRetainedByAnotherBranch(projectRoot, integrationCommit, evidence.branch_name)) return false
+    retainManagedCommit(projectRoot, integrationCommit, `${evidence.epic_id}\0${evidence.item_id}\0${evidence.attempt_id}`)
     removeManagedWorktree(projectRoot, worktreePath, evidence.worktree_name, evidence.branch_name)
     return true
-  } catch (error) {
-    console.error(`[epic-worktree-manager] refused cleanup: ${error}`)
-    return false
-  }
+    } catch (error) {
+      console.error(`[epic-worktree-manager] refused cleanup: ${error}`)
+      return false
+    }
+  })
 }

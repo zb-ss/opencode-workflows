@@ -8,6 +8,7 @@ import { QueueScheduler, QueueSchedulerError } from '../../lib/queue-scheduler.t
 import type { EnabledQueueConfig } from '../../lib/queue-policy.ts'
 import { QueueStore } from '../../lib/queue-store.ts'
 import type { QueueWorkflowRecord } from '../../lib/queue-contracts.ts'
+import { QueueRateLimiter } from '../../lib/queue-rate-limiter.ts'
 
 const temporaryDirectories = new Set<string>()
 const FIXED_NOW = Date.parse('2026-07-24T12:00:00.000Z')
@@ -66,7 +67,7 @@ function enqueueWith(store: QueueStore, handle: import('../../lib/fencing-lease.
   return store.enqueue(workflowInput(id), handle)
 }
 
-function seedLeasedWorkflow(store: QueueStore, handle: import('../../lib/fencing-lease.ts').FencingLeaseHandle, id: string, launchState: 'reserved' | 'settled'): QueueWorkflowRecord {
+function seedLeasedWorkflow(store: QueueStore, handle: import('../../lib/fencing-lease.ts').FencingLeaseHandle, id: string, launchState: 'reserved' | 'created' | 'prompted' | 'settled' | 'ambiguous'): QueueWorkflowRecord {
   const generation = handle.lease.fencing_generation
   const initial = store.enqueue(workflowInput(id), handle)
   return store.update(id, initial.state_revision, handle, (record) => {
@@ -77,13 +78,13 @@ function seedLeasedWorkflow(store: QueueStore, handle: import('../../lib/fencing
       fencing_generation: generation,
       session_id: null,
       child_session_ids: [],
-      engine_instance_id: null,
+      engine_instance_id: ['created', 'prompted', 'settled'].includes(launchState) ? `engine-${id}` : null,
       agent: 'standard',
       model: 'development',
       launch_state: launchState,
       reserved_at: new Date(clock).toISOString(),
-      created_at: launchState === 'settled' ? new Date(clock).toISOString() : null,
-      prompted_at: launchState === 'settled' ? new Date(clock).toISOString() : null,
+      created_at: ['created', 'prompted', 'settled'].includes(launchState) ? new Date(clock).toISOString() : null,
+      prompted_at: ['prompted', 'settled'].includes(launchState) ? new Date(clock).toISOString() : null,
       settled_at: launchState === 'settled' ? new Date(clock).toISOString() : null,
     }
     return record
@@ -97,6 +98,31 @@ function loadStatus(store: QueueStore, workflowId: string): string {
 }
 
 describe('QueueScheduler', () => {
+  it('contains admission failures raised from the renewal timer and stops scheduling', () => {
+    const test = fixture()
+    let tick: (() => void) | null = null
+    const scheduler = new QueueScheduler({
+      store: test.store,
+      config: test.config,
+      now: clockNow,
+      interval: callback => {
+        tick = callback
+        return Symbol('timer')
+      },
+      clearInterval: () => {},
+    })
+    const handle = scheduler.start({ schedule: false })
+    enqueueWith(test.store, handle.lease, 'wf-timer')
+    ;(scheduler as unknown as { rateLimiter: { tryAcquire(): boolean } }).rateLimiter = {
+      tryAcquire() { throw new Error('corrupt rate state') },
+    }
+
+    assert.ok(tick)
+    assert.doesNotThrow(() => tick!())
+    assert.equal(scheduler.hasLease, false)
+    assert.equal(loadStatus(test.store, 'wf-timer'), 'queued')
+  })
+
   it('acquires a lease, enqueues a workflow, and transitions it to leased', () => {
     const test = fixture()
     const scheduler = new QueueScheduler({ store: test.store, config: test.config, now: clockNow })
@@ -133,6 +159,43 @@ describe('QueueScheduler', () => {
 
     assert.deepEqual(ready.sort(), ['wf-a', 'wf-b'])
     handle.dispose()
+  })
+
+  it('reuses the durable rate reservation after CAS failure and attended recovery', async () => {
+    const test = fixture(1)
+    test.config.rate_windows = [{ window_ms: 60_000, max_requests: 1 }]
+    const scheduler = new QueueScheduler({ store: test.store, config: test.config, now: clockNow })
+    const handle = scheduler.start()
+    enqueueWith(test.store, handle.lease, 'wf-1')
+
+    const originalUpdate = test.store.update.bind(test.store)
+    let failUpdate = true
+    test.store.update = ((...args: Parameters<QueueStore['update']>) => {
+      if (failUpdate) {
+        failUpdate = false
+        throw new Error('simulated queue CAS failure')
+      }
+      return originalUpdate(...args)
+    }) as QueueStore['update']
+
+    scheduler.schedule()
+    assert.equal(loadStatus(test.store, 'wf-1'), 'queued')
+    handle.dispose()
+
+    const restartedStore = new QueueStore({ config_directory: test.dir, owner: 'restarted-scheduler', now: clockNow })
+    const restartedScheduler = new QueueScheduler({ store: restartedStore, config: test.config, now: clockNow })
+    const restartedHandle = restartedScheduler.start({ schedule: false })
+    await restartedScheduler.recover()
+    restartedScheduler.schedule()
+    assert.equal(loadStatus(restartedStore, 'wf-1'), 'leased')
+
+    const limiter = new QueueRateLimiter({
+      rate_directory: path.join(test.dir, 'rate'),
+      windows: test.config.rate_windows,
+      now: clockNow,
+    })
+    assert.equal(limiter.snapshot()[0]!.requests, 1)
+    restartedHandle.dispose()
   })
 
   it('does not exceed max_concurrent_workflows', () => {
@@ -182,7 +245,7 @@ describe('QueueScheduler', () => {
     handle.dispose()
   })
 
-  it('preserves leased workflows as paused when the lease expires and a new scheduler takes over', () => {
+  it('preserves leased workflows as paused during authoritative scheduler disposal', () => {
     const dir = tempDir('queue-scheduler-takeover-')
     const store = new QueueStore({ config_directory: dir, owner: 'test-scheduler', now: clockNow })
 
@@ -221,6 +284,35 @@ describe('QueueScheduler', () => {
     handleB.dispose()
   })
 
+  it('never dispatches a takeover generation before attended recovery', async () => {
+    const dir = tempDir('queue-scheduler-recovery-gate-')
+    const store = new QueueStore({ config_directory: dir, owner: 'proc-a', now: clockNow })
+    const firstLease = store.getLeaseStore().acquire()
+    store.enqueue(workflowInput('wf-queued'), firstLease)
+    firstLease.release()
+    let dispatchCount = 0
+
+    const scheduler = new QueueScheduler({
+      store,
+      config: queueConfig(1),
+      now: clockNow,
+      onWorkflowReady: () => { dispatchCount++ },
+    })
+    const handle = scheduler.start()
+    scheduler.schedule()
+
+    assert.equal(handle.generation > 1, true)
+    assert.equal(scheduler.recoveryRequired, true)
+    assert.equal(dispatchCount, 0)
+    assert.equal(loadStatus(store, 'wf-queued'), 'queued')
+
+    const recovered = await scheduler.recover()
+    assert.equal(recovered.recovered, true)
+    scheduler.schedule()
+    assert.equal(dispatchCount, 1)
+    handle.dispose()
+  })
+
   it('skips workflows with settled launch intents during recovery', async () => {
     const dir = tempDir('queue-scheduler-settled-')
     const store = new QueueStore({ config_directory: dir, owner: 'proc-a', now: clockNow })
@@ -234,9 +326,31 @@ describe('QueueScheduler', () => {
     await handleB.recover()
 
     const record = store.load('wf-1')!
-    assert.equal(record.status, 'leased')
+    assert.equal(record.status, 'paused')
     assert.equal(record.launch_intent!.launch_state, 'settled')
 
+    handleB.dispose()
+  })
+
+  it('pauses capacity-consuming records that have no durable launch evidence', async () => {
+    const dir = tempDir('queue-scheduler-missing-intent-')
+    const store = new QueueStore({ config_directory: dir, owner: 'proc-a', now: clockNow })
+    const handleA = store.getLeaseStore().acquire()
+    const queued = store.enqueue(workflowInput('wf-missing-intent'), handleA)
+    store.update(queued.workflow_id, queued.state_revision, handleA, record => {
+      record.status = 'leased'
+      return record
+    })
+    advance(61_000)
+
+    const schedulerB = new QueueScheduler({ store, config: queueConfig(2), now: clockNow })
+    const handleB = schedulerB.start({ schedule: false })
+    await schedulerB.recover()
+
+    const recovered = store.load(queued.workflow_id)!
+    assert.equal(recovered.status, 'paused')
+    assert.match(recovered.pause_reason!, /lacks durable launch evidence/)
+    assert.equal(recovered.fencing_generation, handleB.generation)
     handleB.dispose()
   })
 
@@ -295,6 +409,7 @@ describe('QueueScheduler', () => {
     const handleA = store.getLeaseStore().acquire()
     seedLeasedWorkflow(store, handleA, 'wf-reserved', 'reserved')
     seedLeasedWorkflow(store, handleA, 'wf-settled', 'settled')
+    seedLeasedWorkflow(store, handleA, 'wf-ambiguous', 'ambiguous')
 
     advance(61_000)
 
@@ -307,8 +422,12 @@ describe('QueueScheduler', () => {
     assert.equal(reservedRecord.launch_intent!.launch_state, 'ambiguous')
 
     const settledRecord = store.load('wf-settled')!
-    assert.equal(settledRecord.status, 'leased')
+    assert.equal(settledRecord.status, 'paused')
     assert.equal(settledRecord.launch_intent!.launch_state, 'settled')
+
+    const ambiguousRecord = store.load('wf-ambiguous')!
+    assert.equal(ambiguousRecord.status, 'paused')
+    assert.equal(ambiguousRecord.launch_intent!.launch_state, 'ambiguous')
 
     handleB.dispose()
   })
@@ -341,7 +460,7 @@ describe('QueueScheduler', () => {
   })
 
   it('one reconciliation failure prevents scheduling activation', async () => {
-    const { dir, store, config } = fixture(2)
+    const { store, config } = fixture(2)
     let dispatchCount = 0
     const scheduler = new QueueScheduler({
       store,
@@ -350,55 +469,118 @@ describe('QueueScheduler', () => {
       onWorkflowReady: () => { dispatchCount++ },
     })
 
-    // Enqueue a normal workflow.
     const leaseStore = store.getLeaseStore()
     const handle = leaseStore.acquire()
     store.enqueue(workflowInput('wf-normal'), handle)
-
-    // Create a second workflow with a launch intent in an ambiguous state
-    // that cannot be reconciled (wrong expected revision).
-    const normalRecord = store.load('wf-normal')!
-    const intentRecord = store.update('wf-normal', normalRecord.state_revision, handle, (r) => {
-      r.status = 'leased'
-      r.launch_intent = {
-        intent_id: 'intent-stuck',
-        workflow_id: 'wf-normal',
-        fencing_generation: handle.lease.fencing_generation,
-        session_id: null,
-        child_session_ids: [],
-        engine_instance_id: null,
-        agent: 'standard',
-        model: 'development',
-        launch_state: 'reserved',
-        reserved_at: new Date(clock).toISOString(),
-        created_at: null,
-        prompted_at: null,
-        settled_at: null,
-      }
-      return r
-    })
-
-    // Enqueue a second workflow that should remain queued.
     store.enqueue(workflowInput('wf-other'), handle)
     handle.release()
+
+    const reconcile = store.reconcile.bind(store)
+    store.reconcile = ((workflowId, ...args) => {
+      if (workflowId === 'wf-normal') throw new Error('simulated reconciliation failure')
+      return reconcile(workflowId, ...args)
+    }) as typeof store.reconcile
 
     const recoverHandle = scheduler.start({ schedule: false })
     const result = await scheduler.recover()
 
-    // Recovery should succeed (both records reconcile).
-    assert.equal(result.recovered, true)
-
-    // But the reserved workflow is paused as ambiguous, not dispatched.
-    const stuck = store.load('wf-normal')
-    assert.equal(stuck!.status, 'paused')
-
-    // The other workflow must still be queued (not dispatched).
-    const other = store.load('wf-other')
-    assert.equal(other!.status, 'queued')
-
-    // No dispatch should have occurred during recovery.
+    assert.equal(result.recovered, false)
+    assert.equal(result.failed, 1)
+    assert.equal(scheduler.recoveryRequired, true)
+    scheduler.schedule()
     assert.equal(dispatchCount, 0)
+    assert.equal(store.load('wf-normal')!.status, 'queued')
+    assert.equal(store.load('wf-other')!.status, 'queued')
 
     recoverHandle.dispose()
+  })
+
+  it('reconciles persisted engine outcomes instead of stranding terminal workflows as paused', async () => {
+    const dir = tempDir('queue-scheduler-terminal-recovery-')
+    const store = new QueueStore({ config_directory: dir, owner: 'proc-a', now: clockNow })
+    const handleA = store.getLeaseStore().acquire()
+    for (const id of ['wf-paused', 'wf-completed', 'wf-failed', 'wf-cancelled']) {
+      seedLeasedWorkflow(store, handleA, id, 'created')
+    }
+    advance(61_000)
+    const outcomes = {
+      'wf-paused': 'paused',
+      'wf-completed': 'completed',
+      'wf-failed': 'failed',
+      'wf-cancelled': 'cancelled',
+    } as const
+    const scheduler = new QueueScheduler({
+      store,
+      config: queueConfig(4),
+      now: clockNow,
+      onRecoverLaunch: async record => ({
+        status: outcomes[record.workflow_id as keyof typeof outcomes],
+        pause_reason: record.workflow_id === 'wf-paused' ? 'Resume explicitly.' : null,
+        child_session_ids: [`child-${record.workflow_id}`],
+      }),
+    })
+    const handleB = scheduler.start({ schedule: false })
+
+    assert.equal((await scheduler.recover()).recovered, true)
+    for (const [id, status] of Object.entries(outcomes)) {
+      const record = store.load(id)!
+      assert.equal(record.status, status)
+      assert.equal(record.launch_intent!.launch_state, 'settled')
+      assert.deepEqual(record.launch_intent!.child_session_ids, [`child-${id}`])
+    }
+    handleB.dispose()
+  })
+
+  it('coalesces concurrent recovery calls into one reconciliation pass', async () => {
+    const dir = tempDir('queue-scheduler-concurrent-recovery-')
+    const store = new QueueStore({ config_directory: dir, owner: 'proc-a', now: clockNow })
+    const handleA = store.getLeaseStore().acquire()
+    seedLeasedWorkflow(store, handleA, 'wf-created', 'created')
+    advance(61_000)
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    let callbacks = 0
+    const scheduler = new QueueScheduler({
+      store,
+      config: queueConfig(1),
+      now: clockNow,
+      onRecoverLaunch: async () => {
+        callbacks++
+        await gate
+        return { status: 'paused', pause_reason: 'Recovered.', child_session_ids: ['child-1'] }
+      },
+    })
+    const handleB = scheduler.start({ schedule: false })
+
+    const first = scheduler.recover()
+    const second = scheduler.recover()
+    release()
+    const [firstResult, secondResult] = await Promise.all([first, second])
+
+    assert.deepEqual(firstResult, secondResult)
+    assert.equal(callbacks, 1)
+    assert.equal(scheduler.recoveryRequired, false)
+    handleB.dispose()
+  })
+
+  it('consumes capacity when a synchronous dispatch callback fails after durable admission', () => {
+    const { store, config } = fixture(1)
+    const scheduler = new QueueScheduler({
+      store,
+      config,
+      now: clockNow,
+      onWorkflowReady: () => { throw new Error('simulated callback failure') },
+    })
+    const handle = scheduler.start({ schedule: false })
+    store.enqueue(workflowInput('wf-first'), handle.lease)
+    store.enqueue(workflowInput('wf-second'), handle.lease)
+
+    scheduler.schedule()
+
+    assert.equal(store.load('wf-first')!.status, 'paused')
+    assert.equal(store.load('wf-first')!.failure_classification, 'transport')
+    assert.equal(store.load('wf-first')!.launch_intent!.launch_state, 'settled')
+    assert.equal(store.load('wf-second')!.status, 'queued')
+    handle.dispose()
   })
 })

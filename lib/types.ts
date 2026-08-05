@@ -62,10 +62,11 @@ export interface WorkflowState {
 }
 
 export interface WorkflowStageState {
-  status: 'pending' | 'queued' | 'running' | 'passed' | 'failed' | 'blocked' | 'skipped';
+  status: 'pending' | 'running' | 'passed' | 'failed' | 'blocked';
   attempt: number;
-  task_id: string | null;
   session_id: string | null;
+  agent: string;
+  model: string | null;
   started_at: string | null;
   completed_at: string | null;
   result: unknown | null;
@@ -77,17 +78,32 @@ export interface WorkflowBudgetState {
     max_sessions: number;
     max_parallel_sessions: number;
     max_attempts_per_stage: number;
-    max_wall_time_ms: number;
-    max_input_tokens: number;
-    max_output_tokens: number;
+    max_active_time_ms: number | null;
+    max_calendar_age_ms: number | null;
+    max_input_tokens: number | null;
+    max_output_tokens: number | null;
+    max_bounded_read_bytes: number | null;
+    max_bounded_write_bytes: number | null;
+    max_validation_runs: number | null;
     max_cost_usd: number | null;
   };
   usage: {
     sessions: number;
+    attempts: number;
     input_tokens: number;
     output_tokens: number;
     cost_usd: number;
-    started_at: string;
+    bounded_read_bytes: number;
+    bounded_write_bytes: number;
+    validation_runs: number;
+    active_time_ms: number;
+    active_interval_started_at: string | null;
+    last_active_checkpoint_at: string | null;
+    messages: Record<string, {
+      input_tokens: number;
+      output_tokens: number;
+      cost_usd: number;
+    }>;
   };
 }
 

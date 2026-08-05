@@ -61,8 +61,6 @@ function fsyncDirectory(directory: string): void {
   try {
     fd = fs.openSync(directory, fs.constants.O_RDONLY | O_NOFOLLOW)
     fs.fsyncSync(fd)
-  } catch {
-    // Best-effort directory fsync.
   } finally {
     if (fd !== null) { try { fs.closeSync(fd) } catch {} }
   }
@@ -96,10 +94,14 @@ function assertAuthority(leaseStore: FencingLeaseStore, handle: FencingLeaseHand
 }
 
 function incrementRetryCounters(counters: RetryAttemptCounters, failure: FailureClass): RetryAttemptCounters {
-  if (failure === 'semantic') return { ...counters, semantic_attempts: counters.semantic_attempts + 1 }
-  if (failure === 'contract') return { ...counters, contract_attempts: counters.contract_attempts + 1 }
-  if (failure === 'transport') return { ...counters, transport_attempts: counters.transport_attempts + 1 }
-  return counters
+  const updated = {
+    ...counters,
+    consecutive_no_progress_attempts: counters.consecutive_no_progress_attempts + 1,
+  }
+  if (failure === 'semantic') return { ...updated, semantic_attempts: counters.semantic_attempts + 1 }
+  if (failure === 'contract') return { ...updated, contract_attempts: counters.contract_attempts + 1 }
+  if (failure === 'transport') return { ...updated, transport_attempts: counters.transport_attempts + 1 }
+  return updated
 }
 
 function transportRetryNotBefore(policy: NonNullable<QueueStoreOptions['retry_policy']>, now: number, retryIndex: number): string {
@@ -127,14 +129,15 @@ function evaluateRetryDecision(
     return { requeue: true, reason: null, updatedCounters: baseCounters, retryNotBefore: null }
   }
 
-  // Recovery attempt ceiling.
-  if ((record.recovery_attempt_count ?? 0) >= (config.recovery_attempt_limit ?? Number.MAX_SAFE_INTEGER)) {
-    return { requeue: false, reason: 'recovery attempt limit exceeded', updatedCounters: baseCounters, retryNotBefore: null }
-  }
-
   // No failure classification (e.g. owner-initiated resume from pause).
   if (record.failure_classification === null) {
     return { requeue: true, reason: null, updatedCounters: baseCounters, retryNotBefore: null }
+  }
+
+  // Recovery attempt ceiling applies only to classified retries, not normal
+  // owner pause/resume cycles.
+  if ((record.recovery_attempt_count ?? 0) >= (config.recovery_attempt_limit ?? Number.MAX_SAFE_INTEGER)) {
+    return { requeue: false, reason: 'recovery attempt limit exceeded', updatedCounters: baseCounters, retryNotBefore: null }
   }
 
   // Ambiguous and cancelled failures are never retried.
@@ -182,6 +185,8 @@ export class QueueStore {
     validateDirectory(this.directory)
     fs.mkdirSync(this.workflowsDir, { recursive: true, mode: DIR_MODE })
     validateDirectory(this.workflowsDir)
+    fsyncDirectory(path.dirname(this.directory))
+    fsyncDirectory(this.directory)
     this.leaseStore = new FencingLeaseStore({
       lease_directory: path.join(this.directory, 'lease'),
       lock_directory: this.directory,
@@ -245,6 +250,7 @@ export class QueueStore {
     expectedRevision: number,
     leaseHandle: FencingLeaseHandle,
     mutate: (record: QueueWorkflowRecord) => QueueWorkflowRecord,
+    expectedGeneration?: number,
   ): QueueWorkflowRecord {
     return withLock(this.directory, () => {
       assertAuthority(this.leaseStore, leaseHandle)
@@ -252,6 +258,9 @@ export class QueueStore {
       if (!current) throw new QueueStoreError('missing', `workflow ${workflowId} not found`)
       if (current.state_revision !== expectedRevision) {
         throw new QueueStoreError('stale_revision', `expected revision ${expectedRevision}, found ${current.state_revision}`)
+      }
+      if (expectedGeneration !== undefined && current.fencing_generation !== expectedGeneration) {
+        throw new QueueStoreError('stale_generation', `expected generation ${expectedGeneration}, found ${current.fencing_generation}`)
       }
       const next = mutate(structuredClone(current))
       if (!isValidTransition(current.status, next.status)) {
@@ -308,14 +317,16 @@ export class QueueStore {
     workflowId: string,
     expectedRevision: number,
     leaseHandle: FencingLeaseHandle,
+    expectedGeneration?: number,
   ): QueueWorkflowRecord {
     return this.update(workflowId, expectedRevision, leaseHandle, (record) => {
+      const isClassifiedRetry = record.failure_classification !== null
       const decision = evaluateRetryDecision(record, { retry_policy: this.retryPolicy, recovery_attempt_limit: this.recoveryAttemptLimit }, this.now())
       // Always persist the updated counters, even when retry is blocked.
       // This ensures the ceiling is recorded durably.
       record.retry_counters = decision.updatedCounters
       if (!decision.requeue) {
-        record.status = 'failed'
+        record.status = record.status === 'paused' ? 'paused' : 'failed'
         record.pause_reason = decision.reason
         record.retry_not_before = null
         return record
@@ -323,11 +334,39 @@ export class QueueStore {
       record.status = 'queued'
       record.pause_reason = null
       record.retry_not_before = decision.retryNotBefore
+      record.launch_intent = null
       // Clear the failure classification only after all retry evidence
       // (counters, backoff) has been derived from it.
       record.failure_classification = null
-      record.recovery_attempt_count = (record.recovery_attempt_count ?? 0) + 1
+      if (isClassifiedRetry) record.recovery_attempt_count = (record.recovery_attempt_count ?? 0) + 1
       return record
+    }, expectedGeneration)
+  }
+
+  removeTerminal(
+    workflowId: string,
+    expectedRevision: number,
+    leaseHandle: FencingLeaseHandle,
+    expectedGeneration?: number,
+    beforeRemove?: () => string[],
+  ): QueueWorkflowRecord {
+    return withLock(this.directory, () => {
+      assertAuthority(this.leaseStore, leaseHandle)
+      const current = this.loadLocked(workflowId)
+      if (!current) throw new QueueStoreError('missing', `workflow ${workflowId} not found`)
+      if (current.state_revision !== expectedRevision) {
+        throw new QueueStoreError('stale_revision', `expected revision ${expectedRevision}, found ${current.state_revision}`)
+      }
+      if (expectedGeneration !== undefined && current.fencing_generation !== expectedGeneration) {
+        throw new QueueStoreError('stale_generation', `expected generation ${expectedGeneration}, found ${current.fencing_generation}`)
+      }
+      if (!['completed', 'failed', 'cancelled'].includes(current.status)) {
+        throw new QueueStoreError('not_terminal', 'only a terminal queue workflow can be removed')
+      }
+      for (const directory of beforeRemove?.() ?? []) fsyncDirectory(directory)
+      fs.unlinkSync(this.workflowPath(workflowId))
+      fsyncDirectory(this.workflowsDir)
+      return current
     })
   }
 
@@ -370,7 +409,10 @@ export class QueueStore {
   private rebuildIndexLocked(): QueueIndexEntry[] {
     const entries: QueueIndexEntry[] = []
     let files: string[]
-    try { files = fs.readdirSync(this.workflowsDir) } catch { return [] }
+    try { files = fs.readdirSync(this.workflowsDir) }
+    catch (error) {
+      throw new QueueStoreError('store_unreadable', `queue workflow directory is unreadable: ${(error as Error).message}`)
+    }
     for (const file of files) {
       if (!file.endsWith('.json')) continue
       const workflowId = file.slice(0, -5)
@@ -419,7 +461,6 @@ export class QueueStore {
       fd = null
       fs.renameSync(temp, filePath)
       fsyncDirectory(this.workflowsDir)
-      try { fs.chmodSync(filePath, FILE_MODE) } catch {}
     } catch (error) {
       if (fd !== null) { try { fs.closeSync(fd) } catch {} }
       try { fs.unlinkSync(temp) } catch {}

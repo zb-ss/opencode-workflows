@@ -7,7 +7,6 @@ import { afterEach, describe, it } from 'node:test'
 
 import { sha256Hex } from '../../lib/canonical-json.ts'
 import {
-  EpicIntegrationAmbiguousError,
   integrateEpicCheckpoint,
   repairRecoveredEpicIntegration,
   verifyRecoveredEpicIntegration,
@@ -92,30 +91,29 @@ function installUpdateRefRace(root: string, parent: string, expectedTarget: stri
 const { spawnSync } = require('node:child_process')
 const fs = require('node:fs')
 const args = process.argv.slice(2)
+const realGit = ${JSON.stringify(realGit)}
+const branch = 'refs/heads/main'
+const marker = ${JSON.stringify(marker)}
+const competingCommit = ${JSON.stringify(competingCommit)}
+const expectedTarget = ${JSON.stringify(expectedTarget)}
 // Privileged Git calls now prepend sandboxed -c options, so match by subcommand.
 const updateRefIndex = args.indexOf('update-ref')
-if (updateRefIndex >= 0 && args[updateRefIndex + 1] === process.env.CAS_BRANCH && !fs.existsSync(process.env.CAS_MARKER)) {
-  fs.writeFileSync(process.env.CAS_MARKER, 'injected')
-  const raced = spawnSync(process.env.REAL_GIT, ['update-ref', process.env.CAS_BRANCH, process.env.CAS_COMMIT, process.env.CAS_EXPECTED], { cwd: process.cwd(), stdio: 'inherit' })
+if (updateRefIndex >= 0 && args[updateRefIndex + 1] === branch && !fs.existsSync(marker)) {
+  fs.writeFileSync(marker, 'injected')
+  const raced = spawnSync(realGit, ['update-ref', branch, competingCommit, expectedTarget], { cwd: process.cwd(), stdio: 'inherit' })
   if (raced.status !== 0) process.exit(raced.status || 1)
 }
-const result = spawnSync(process.env.REAL_GIT, args, { cwd: process.cwd(), env: process.env, stdio: 'inherit' })
+const result = spawnSync(realGit, args, { cwd: process.cwd(), env: process.env, stdio: 'inherit' })
 process.exit(result.status === null ? 1 : result.status)
 `)
   fs.chmodSync(shimPath, 0o700)
   const previousPath = process.env.PATH
   process.env.PATH = `${shimDirectory}${path.delimiter}${previousPath ?? ''}`
-  process.env.REAL_GIT = realGit
-  process.env.CAS_BRANCH = 'refs/heads/main'
-  process.env.CAS_MARKER = marker
-  process.env.CAS_COMMIT = competingCommit
-  process.env.CAS_EXPECTED = expectedTarget
   return {
     competingCommit,
     restore: () => {
       if (previousPath === undefined) delete process.env.PATH
       else process.env.PATH = previousPath
-      for (const name of ['REAL_GIT', 'CAS_BRANCH', 'CAS_MARKER', 'CAS_COMMIT', 'CAS_EXPECTED']) delete process.env[name]
     },
   }
 }
@@ -129,26 +127,25 @@ function installPostCasEdit(parent: string, editedFile: string): { restore: () =
 const { spawnSync } = require('node:child_process')
 const fs = require('node:fs')
 const args = process.argv.slice(2)
-const result = spawnSync(process.env.REAL_GIT, args, { cwd: process.cwd(), env: process.env, stdio: 'inherit' })
+const realGit = ${JSON.stringify(realGit)}
+const branch = 'refs/heads/main'
+const editedFile = ${JSON.stringify(editedFile)}
+const result = spawnSync(realGit, args, { cwd: process.cwd(), env: process.env, stdio: 'inherit' })
 if (result.status !== 0) process.exit(result.status || 1)
 // Privileged Git calls now prepend sandboxed -c options, so match by subcommand.
 const updateRefIndex = args.indexOf('update-ref')
-if (updateRefIndex >= 0 && args[updateRefIndex + 1] === process.env.CAS_BRANCH) {
-  fs.writeFileSync(process.env.POST_CAS_EDIT, 'retained post-CAS edit\\n')
+if (updateRefIndex >= 0 && args[updateRefIndex + 1] === branch) {
+  fs.writeFileSync(editedFile, 'retained post-CAS edit\\n')
 }
 process.exit(0)
 `)
   fs.chmodSync(shimPath, 0o700)
   const previousPath = process.env.PATH
   process.env.PATH = `${shimDirectory}${path.delimiter}${previousPath ?? ''}`
-  process.env.REAL_GIT = realGit
-  process.env.CAS_BRANCH = 'refs/heads/main'
-  process.env.POST_CAS_EDIT = editedFile
   return {
     restore: () => {
       if (previousPath === undefined) delete process.env.PATH
       else process.env.PATH = previousPath
-      for (const name of ['REAL_GIT', 'CAS_BRANCH', 'POST_CAS_EDIT']) delete process.env[name]
     },
   }
 }
@@ -275,28 +272,62 @@ describe('guarded epic integration', { concurrency: false }, () => {
     assert.equal(fs.existsSync(marker), false)
   })
 
-  it('loses an atomic ref CAS without publishing the computed merge', () => {
+  it('does not execute repository-configured filters or merge drivers', () => {
+    const { parent, root } = repository()
+    const filterMarker = path.join(parent, 'filter-ran')
+    const mergeMarker = path.join(parent, 'merge-driver-ran')
+    const filterScript = path.join(parent, 'filter.cjs')
+    const mergeScript = path.join(parent, 'merge.cjs')
+    fs.writeFileSync(filterScript, `const fs=require('node:fs');fs.writeFileSync(${JSON.stringify(filterMarker)},'ran');process.stdin.pipe(process.stdout)\n`)
+    fs.writeFileSync(mergeScript, `const fs=require('node:fs');fs.writeFileSync(${JSON.stringify(mergeMarker)},'ran');fs.copyFileSync(process.argv[4],process.argv[3])\n`)
+    fs.writeFileSync(path.join(root, '.gitattributes'), '*.txt filter=evil merge=evil\n')
+    git(root, ['add', '.gitattributes'])
+    git(root, ['commit', '-m', 'add hostile attributes'])
+    git(root, ['config', 'filter.evil.clean', `node ${filterScript}`])
+    git(root, ['config', 'filter.evil.smudge', `node ${filterScript}`])
+    git(root, ['config', 'merge.evil.driver', `node ${mergeScript} %O %A %B`])
+    try { fs.unlinkSync(filterMarker) } catch {}
+
+    const created = createEpicAttemptWorktree(root, 'refs/heads/main', 'epic-1', 'item-1', 'attempt-1')
+    assert.equal(fs.existsSync(filterMarker), false)
+    fs.writeFileSync(path.join(created.path, 'tracked.txt'), 'source\n')
+    const checkpoint = checkpointEpicAttemptWorktree(root, created.path, created.evidence)
+    fs.writeFileSync(path.join(root, 'tracked.txt'), 'target\n')
+    git(root, ['add', 'tracked.txt'])
+    git(root, ['commit', '-m', 'target change'])
+    try { fs.unlinkSync(filterMarker) } catch {}
+
+    const result = integrateEpicCheckpoint(input(root, created, checkpoint.checkpoint_commit))
+    assert.equal(result.success, false)
+    assert.deepEqual(result.conflict_paths, ['tracked.txt'])
+    assert.equal(fs.existsSync(filterMarker), false)
+    assert.equal(fs.existsSync(mergeMarker), false)
+  })
+
+  it('does not execute a PATH-substituted Git binary during publication', () => {
     const { parent, root } = repository()
     const created = createEpicAttemptWorktree(root, 'refs/heads/main', 'epic-1', 'item-1', 'attempt-1')
     fs.writeFileSync(path.join(created.path, 'source.txt'), 'source\n')
     const checkpoint = checkpointEpicAttemptWorktree(root, created.path, created.evidence)
     const request = input(root, created, checkpoint.checkpoint_commit)
     const race = installUpdateRefRace(root, parent, request.expected_target_commit)
+    let result: ReturnType<typeof integrateEpicCheckpoint>
     try {
-      assert.throws(() => integrateEpicCheckpoint(request), /compare-and-swap failed/)
+      result = integrateEpicCheckpoint(request)
     } finally {
       race.restore()
     }
-    assert.equal(git(root, ['rev-parse', 'refs/heads/main']), race.competingCommit)
+    assert.equal(result.success, true)
+    assert.notEqual(git(root, ['rev-parse', 'refs/heads/main']), race.competingCommit)
     assert.deepEqual(
-      git(root, ['rev-list', '--parents', '-n', '1', race.competingCommit]).split(/\s+/).slice(1),
-      [request.expected_target_commit],
+      git(root, ['rev-list', '--parents', '-n', '1', result.result_commit!]).split(/\s+/).slice(1),
+      [request.expected_target_commit, request.source_checkpoint_commit],
     )
     assert.equal(git(created.path, ['rev-parse', 'HEAD']), checkpoint.checkpoint_commit)
     assert.equal(fs.existsSync(created.path), true)
   })
 
-  it('retains a local edit introduced after CAS and refuses destructive synchronization', () => {
+  it('does not execute a PATH-substituted Git binary after publication', () => {
     const { parent, root } = repository()
     const created = createEpicAttemptWorktree(root, 'refs/heads/main', 'epic-1', 'item-1', 'attempt-1')
     fs.writeFileSync(path.join(created.path, 'source.txt'), 'source\n')
@@ -304,17 +335,16 @@ describe('guarded epic integration', { concurrency: false }, () => {
     const request = input(root, created, checkpoint.checkpoint_commit)
     const editedFile = path.join(root, 'tracked.txt')
     const injection = installPostCasEdit(parent, editedFile)
+    let result: ReturnType<typeof integrateEpicCheckpoint>
     try {
-      assert.throws(
-        () => integrateEpicCheckpoint(request),
-        error => error instanceof EpicIntegrationAmbiguousError && /synchronization is uncertain/.test(error.message),
-      )
+      result = integrateEpicCheckpoint(request)
     } finally {
       injection.restore()
     }
 
-    assert.equal(fs.readFileSync(editedFile, 'utf8'), 'retained post-CAS edit\n')
-    assert.equal(fs.existsSync(path.join(root, 'source.txt')), false)
+    assert.equal(result.success, true)
+    assert.equal(fs.readFileSync(editedFile, 'utf8'), 'base\n')
+    assert.equal(fs.readFileSync(path.join(root, 'source.txt'), 'utf8'), 'source\n')
     const publishedMerge = git(root, ['rev-parse', 'refs/heads/main'])
     assert.deepEqual(
       git(root, ['rev-list', '--parents', '-n', '1', publishedMerge]).split(/\s+/).slice(1),

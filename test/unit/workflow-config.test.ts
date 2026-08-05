@@ -28,6 +28,7 @@ import {
   MAX_ITEM_DEPENDENCIES,
   MIN_EPIC_RESULT_BYTES,
 } from '../../lib/epic-policy.ts'
+import { SafeIdentifierSchema } from '../../lib/safe-identifier.ts'
 
 function publicationTarget() {
   return {
@@ -293,7 +294,7 @@ describe('workflow config', () => {
     assert.equal(
       WorkflowConfigSchema.safeParse({
         queue: queueConfig,
-        automation: { enabled: true, max_parallel_sessions: 2, max_attempts_per_stage: 3 },
+        automation: { enabled: true, max_parallel_sessions: 2, max_attempts_per_stage: 3, session_operation_timeout_ms: 1_000 },
       }).success,
       false,
       'queue enabled without all mandatory automation limits must be rejected',
@@ -320,10 +321,101 @@ describe('workflow config', () => {
         max_parallel_sessions: 2,
         max_sessions: 10,
         max_attempts_per_stage: 3,
+        session_operation_timeout_ms: 1_000,
       },
     })
     assert.equal(parsed.queue.enabled, true)
     assert.equal(parsed.automation.enabled, true)
+    assert.equal(WorkflowConfigSchema.safeParse({
+      queue: queueConfig,
+      automation: { ...parsed.automation, max_sessions: 256 },
+    }).success, true)
+    assert.equal(WorkflowConfigSchema.safeParse({
+      queue: queueConfig,
+      automation: { ...parsed.automation, max_sessions: 257 },
+    }).success, false)
+  })
+
+  it('keeps queue JSON Schema aligned with strict runtime enablement', () => {
+    const publicSchema = JSON.parse(fs.readFileSync(path.join(process.cwd(), 'schema', 'workflows.schema.json'), 'utf8')) as object
+    const AjvConstructor = Ajv2020 as unknown as new (options: object) => { compile(schema: object): (input: unknown) => boolean }
+    const validate = new AjvConstructor({ strict: true, strictRequired: false, strictTuples: false }).compile(publicSchema)
+    const queue = {
+      enabled: true,
+      max_concurrent_workflows: 2,
+      lease_duration_ms: 60_000,
+      renewal_interval_ms: 20_000,
+      recovery_attempt_limit: 3,
+      retry_policy: {
+        max_semantic_attempts: 3, max_contract_attempts: 3, max_transport_attempts: 3,
+        max_no_progress_attempts: 2,
+        transport_backoff: { strategy: 'exponential', initial_delay_ms: 100, maximum_delay_ms: 1000, multiplier: 2 },
+      },
+    }
+    const base = workflowSchemaInput({ enabled: false, internal_markers: [], targets: {} })
+
+    assert.equal(validate({ ...base, queue }), false)
+    assert.equal(validate({
+      ...base,
+      queue,
+      automation: { enabled: true, max_parallel_sessions: 2, max_sessions: 10, max_attempts_per_stage: 3, session_operation_timeout_ms: 1_000 },
+    }), true)
+    assert.equal(validate({
+      ...base,
+      queue,
+      automation: { enabled: true, max_parallel_sessions: 2, max_sessions: 256, max_attempts_per_stage: 3, session_operation_timeout_ms: 1_000 },
+    }), true)
+    assert.equal(validate({
+      ...base,
+      queue,
+      automation: { enabled: true, max_parallel_sessions: 2, max_sessions: 257, max_attempts_per_stage: 3, session_operation_timeout_ms: 1_000 },
+    }), false)
+    assert.equal(validate({ ...base, queue: { enabled: false, rate_windows: [] } }), false)
+    assert.equal(validate({
+      ...base,
+      queue: { ...queue, budgets: [] },
+      automation: { enabled: true, max_parallel_sessions: 2, max_sessions: 10, max_attempts_per_stage: 3, session_operation_timeout_ms: 1_000 },
+    }), false)
+    for (const invalidQueue of [
+      { ...queue, retry_policy: { ...queue.retry_policy, max_semantic_attempts: 33 } },
+      {
+        ...queue,
+        retry_policy: {
+          ...queue.retry_policy,
+          transport_backoff: { ...queue.retry_policy.transport_backoff, maximum_delay_ms: 3_600_001 },
+        },
+      },
+    ]) {
+      const candidate = {
+        ...base,
+        queue: invalidQueue,
+        automation: { enabled: true, max_parallel_sessions: 2, max_sessions: 10, max_attempts_per_stage: 3, session_operation_timeout_ms: 1_000 },
+      }
+      assert.equal(validate(candidate), WorkflowConfigSchema.safeParse(candidate).success)
+      assert.equal(validate(candidate), false)
+    }
+  })
+
+  it('documents the portable queue schema limit while runtime compares lease intervals', () => {
+    const publicSchema = JSON.parse(fs.readFileSync(path.join(process.cwd(), 'schema', 'workflows.schema.json'), 'utf8'))
+    const AjvConstructor = Ajv2020 as unknown as new (options: object) => { compile(schema: object): (input: unknown) => boolean }
+    const validate = new AjvConstructor({ strict: true, strictRequired: false, strictTuples: false }).compile(publicSchema)
+    const input = {
+      ...workflowSchemaInput({ enabled: false, internal_markers: [], targets: {} }),
+      automation: { enabled: true, max_parallel_sessions: 1, max_sessions: 2, max_attempts_per_stage: 1, session_operation_timeout_ms: 1_000 },
+      queue: {
+        enabled: true,
+        max_concurrent_workflows: 1,
+        lease_duration_ms: 5_000,
+        renewal_interval_ms: 5_000,
+        recovery_attempt_limit: 1,
+        retry_policy: enabledEpicInput().retry_policy,
+      },
+    }
+
+    assert.equal(validate(input), true)
+    assert.equal(WorkflowConfigSchema.safeParse(input).success, false)
+    assert.match(publicSchema.properties.queue.allOf[0].then.$comment, /Runtime validation.*sibling numeric values/)
   })
 
   it('defaults guarded publication to a disabled empty policy', () => {
@@ -846,6 +938,17 @@ describe('workflow config', () => {
     ]) {
       const candidate = { ...base, ...policy }
       assert.equal(validateWorkflow(candidate), WorkflowConfigSchema.safeParse(candidate).success)
+    }
+  })
+
+  it('keeps public safe-identifier validation aligned with reserved runtime names', () => {
+    const publicSchema = JSON.parse(fs.readFileSync(path.resolve('schema/workflows.schema.json'), 'utf8'))
+    const AjvConstructor = Ajv2020 as unknown as new (options: object) => {
+      compile(schema: object): (input: unknown) => boolean
+    }
+    const validate = new AjvConstructor({ strict: true }).compile(publicSchema.$defs.safeIdentifier)
+    for (const candidate of ['valid-id', '__proto__', 'prototype', 'constructor', 'not valid']) {
+      assert.equal(validate(candidate), SafeIdentifierSchema.safeParse(candidate).success)
     }
   })
 

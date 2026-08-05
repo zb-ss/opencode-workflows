@@ -16,6 +16,7 @@ import { SafeIdentifierSchema } from './safe-identifier.ts'
 const DateTimeSchema = z.string().min(1).max(64).check(z.iso.datetime({ offset: true }))
 
 export const QUEUE_SCHEMA_VERSION = 2
+export const MAX_QUEUE_CHILD_SESSION_IDS = 256
 
 export type QueueWorkflowStatus =
   | 'queued'
@@ -58,7 +59,7 @@ export const QueueLaunchIntentSchema = z.object({
   workflow_id: SafeIdentifierSchema,
   fencing_generation: safePositiveInteger,
   session_id: SafeIdentifierSchema.nullable(),
-  child_session_ids: z.array(SafeIdentifierSchema).max(256),
+  child_session_ids: z.array(SafeIdentifierSchema).max(MAX_QUEUE_CHILD_SESSION_IDS),
   engine_instance_id: SafeIdentifierSchema.nullable(),
   agent: SafeIdentifierSchema,
   model: z.string().min(1).max(256),
@@ -113,7 +114,31 @@ export const QueueWorkflowRecordSchema = z.object({
   created_at: DateTimeSchema,
   updated_at: DateTimeSchema,
   usage: AutomationUsageTelemetrySchema,
-}).strict()
+}).strict().superRefine((record, context) => {
+  const intent = record.launch_intent
+  if (intent === null) return
+  if (intent.workflow_id !== record.workflow_id) {
+    context.addIssue({ code: 'custom', path: ['launch_intent', 'workflow_id'], message: 'launch intent workflow_id must match its queue record' })
+  }
+  if (intent.fencing_generation > record.fencing_generation) {
+    context.addIssue({ code: 'custom', path: ['launch_intent', 'fencing_generation'], message: 'launch intent cannot carry a future fencing generation' })
+  }
+  if (intent.launch_state === 'reserved'
+    && (intent.created_at !== null || intent.prompted_at !== null || intent.settled_at !== null || intent.engine_instance_id !== null)) {
+    context.addIssue({ code: 'custom', path: ['launch_intent'], message: 'reserved launch intent contains later lifecycle evidence' })
+  }
+  if (intent.launch_state === 'created'
+    && (intent.created_at === null || intent.prompted_at !== null || intent.settled_at !== null || intent.engine_instance_id === null)) {
+    context.addIssue({ code: 'custom', path: ['launch_intent'], message: 'created launch intent has inconsistent lifecycle evidence' })
+  }
+  if (intent.launch_state === 'prompted'
+    && (intent.created_at === null || intent.prompted_at === null || intent.settled_at !== null || intent.engine_instance_id === null)) {
+    context.addIssue({ code: 'custom', path: ['launch_intent'], message: 'prompted launch intent has inconsistent lifecycle evidence' })
+  }
+  if (intent.launch_state === 'settled' && intent.settled_at === null) {
+    context.addIssue({ code: 'custom', path: ['launch_intent', 'settled_at'], message: 'settled launch intent requires settled_at evidence' })
+  }
+})
 
 /**
  * Legacy v1 record schema (before recovery_attempt_count, child_session_ids,
@@ -181,7 +206,13 @@ export function parseQueueWorkflowRecord(raw: unknown): QueueWorkflowRecord {
     schema_version: QUEUE_SCHEMA_VERSION,
     recovery_attempt_count: 0,
     launch_intent: v1.launch_intent
-      ? { ...v1.launch_intent, child_session_ids: [], engine_instance_id: null }
+      ? {
+          ...v1.launch_intent,
+          child_session_ids: [],
+          engine_instance_id: ['created', 'prompted'].includes(v1.launch_intent.launch_state)
+            ? v1.launch_intent.intent_id
+            : null,
+        }
       : null,
   }
   // Validate the migrated record against the v2 schema.
@@ -201,8 +232,8 @@ export type QueueIndexEntry = z.infer<typeof QueueIndexEntrySchema>
 const VALID_TRANSITIONS: Record<QueueWorkflowStatus, ReadonlySet<QueueWorkflowStatus>> = {
   queued: new Set(['queued', 'leased', 'paused', 'cancelled', 'failed']),
   leased: new Set(['leased', 'running', 'recovering', 'paused', 'cancelled', 'failed', 'queued', 'completed']),
-  recovering: new Set(['recovering', 'running', 'paused', 'cancelled', 'failed', 'queued']),
-  running: new Set(['running', 'paused', 'completed', 'failed', 'cancelled']),
+  recovering: new Set(['recovering', 'running', 'paused', 'completed', 'cancelled', 'failed', 'queued']),
+  running: new Set(['running', 'recovering', 'paused', 'completed', 'failed', 'cancelled']),
   paused: new Set(['paused', 'queued', 'cancelled', 'failed']),
   completed: new Set(['completed']),
   failed: new Set(['failed', 'queued']),

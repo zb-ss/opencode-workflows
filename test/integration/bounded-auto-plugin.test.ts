@@ -80,6 +80,7 @@ describe('bounded automatic workflow plugin', () => {
         max_parallel_sessions: 1,
         max_sessions: 3,
         max_attempts_per_stage: 2,
+        session_operation_timeout_ms: 1_000,
         max_calendar_age_ms: 60_000,
         max_input_tokens: 1_000,
         max_output_tokens: 1_000,
@@ -223,7 +224,7 @@ describe('bounded automatic workflow plugin', () => {
     )
     for (const toolName of [
       'epic_start', 'epic_pause', 'epic_cancel', 'epic_resume', 'epic_redelegate', 'epic_integrate', 'epic_cleanup',
-      'queue_enqueue', 'queue_pause', 'queue_resume', 'queue_cancel', 'queue_recover',
+      'queue_enqueue', 'queue_pause', 'queue_resume', 'queue_cancel', 'queue_delete', 'queue_recover',
       'epic_budget_update', 'epic_budget_extend',
     ]) {
       await assert.rejects(

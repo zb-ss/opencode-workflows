@@ -223,6 +223,7 @@ export const AutoWorkflow: Plugin = async ({ client, directory, serverUrl }) => 
       validationOperations: validationOperationNames(validationBrokerConfig),
       autonomy: state.autonomy,
       schedulingEnabled,
+      sessionOperationTimeoutMs: config.automation.session_operation_timeout_ms!,
     })
   }
 
@@ -278,7 +279,9 @@ export const AutoWorkflow: Plugin = async ({ client, directory, serverUrl }) => 
     },
 
     dispose: async () => {
-      for (const engine of engines.values()) engine.dispose()
+      const results = await Promise.allSettled([...engines.values()].map(engine => engine.disposeAsync()))
+      const failure = results.find(result => result.status === 'rejected')
+      if (failure?.status === 'rejected') throw failure.reason
       engines.clear()
     },
 
@@ -382,6 +385,7 @@ export const AutoWorkflow: Plugin = async ({ client, directory, serverUrl }) => 
             limits: limits(config, validationBrokerConfig),
             validationOperations: validationOperationNames(validationBrokerConfig),
             autonomy: config.automation.autonomy,
+            sessionOperationTimeoutMs: config.automation.session_operation_timeout_ms!,
           })
           engines.set(context.sessionID, engine)
           try {
@@ -395,7 +399,7 @@ export const AutoWorkflow: Plugin = async ({ client, directory, serverUrl }) => 
             return JSON.stringify({ started: true, workflow: stateSummary(state) })
           } catch (error) {
             engines.delete(context.sessionID)
-            engine.dispose()
+            await engine.disposeAsync()
             throw error
           }
         },

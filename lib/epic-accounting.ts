@@ -197,17 +197,14 @@ function assertReservationBudgetsUnified(state: EpicState, itemId: string, usage
   }
 }
 
-/**
- * Find budgets that are exhausted after applying a usage delta. This uses
- * >= limit for ALL dimensions including sessions, because post-usage
- * exhaustion means no further work can be admitted.
- */
+/** Find budgets that are exhausted after applying a usage delta. */
 function postUsageExhaustedBudgets(state: EpicState, itemId: string, usage: EpicScopedUsage[], at: string): EpicBudgetRecord[] {
   return applicableBudgets(state, itemId).filter((budget) => {
     const index = usageIndex(usage, budget.scope as 'epic' | 'item', budget.item_id)
     if (index < 0) throw new EpicValidationError(`configured ${budgetLabel(budget)} budget lacks usage telemetry`)
     const consumed = dimensionUsage(state, usage[index]!.usage, budget.dimension, at)
-    return consumed === 'unknown' || consumed >= budget.limit!
+    if (consumed === 'unknown') return true
+    return budget.dimension === 'sessions' ? consumed > budget.limit! : consumed >= budget.limit!
   }).sort((left, right) => budgetLabel(left).localeCompare(budgetLabel(right), 'en'))
 }
 
@@ -411,56 +408,6 @@ function applyDelta(telemetry: AutomationUsageTelemetry, delta: EpicUsageDelta, 
   }
 }
 
-function settleActiveItemsForPause(
-  state: EpicState,
-  observedAt: string,
-  reason: string,
-): { items: EpicState['items']; hasAmbiguousReview: boolean; hasAmbiguousExecution: boolean } {
-  const items = { ...state.items }
-  let hasAmbiguousReview = false
-  let hasAmbiguousExecution = false
-  for (const item of Object.values(state.items)) {
-    if (item.status !== 'running') continue
-    const activeIndex = item.attempts.findIndex(attempt => ACTIVE_ATTEMPT_STATUSES.has(attempt.status))
-    const active = activeIndex < 0 ? undefined : item.attempts[activeIndex]
-    if (!active) throw new EpicValidationError(`running item ${item.item_id} lacks an active attempt`)
-
-    let settled = { ...active }
-    if (active.status === 'running' && active.launch_state !== undefined) {
-      if (active.launch_state === 'reserved') {
-        settled = { ...settled, status: 'cancelled', launch_state: 'settled', failure_classification: 'cancelled' }
-      } else if (active.launch_state === 'created' || active.launch_state === 'prompted') {
-        settled = { ...settled, status: 'failed', launch_state: 'ambiguous', failure_classification: 'ambiguous_launch' }
-        hasAmbiguousExecution = true
-      }
-    } else {
-      settled = { ...settled, status: 'cancelled', failure_classification: 'cancelled' }
-      if (settled.launch_state !== undefined) settled.launch_state = 'settled'
-    }
-
-    if (active.review) {
-      if (active.review.launch_state === 'reserved') {
-        settled.review = { ...active.review, launch_state: 'settled' }
-      } else if (active.review.launch_state === 'created' || active.review.launch_state === 'prompted') {
-        settled.review = { ...active.review, launch_state: 'ambiguous' }
-        hasAmbiguousReview = true
-      } else if (active.review.launch_state === 'ambiguous') hasAmbiguousReview = true
-    }
-    settled.completed_at = observedAt
-    settled.result_summary = reason
-    const attempts = [...item.attempts]
-    attempts[activeIndex] = settled
-    items[item.item_id] = {
-      ...item,
-      status: settled.status === 'failed' ? 'failed' : 'cancelled',
-      attempts,
-      completed_at: observedAt,
-      retry_not_before: null,
-    }
-  }
-  return { items, hasAmbiguousReview, hasAmbiguousExecution }
-}
-
 function closeAllActiveIntervals(usage: EpicScopedUsage[], observedAt: string): EpicScopedUsage[] {
   return usage.map((record) => {
     if (record.usage.last_active_checkpoint_at === null) return record
@@ -510,19 +457,13 @@ export function applyEpicUsageDelta(stateInput: unknown, input: EpicUsageDeltaIn
   let status = state.status
   let pause_reason = state.pause_reason
   let pause_code = state.pause_code ?? null
-  let items = state.items
   if (exhausted.length > 0) {
     if (state.status !== 'running' && state.status !== 'paused' && state.status !== 'pending') {
       throw new EpicValidationError('terminal epic cannot be paused for newly exhausted usage')
     }
     status = 'paused'
     pause_reason = `Budget exhausted or unmeasurable: ${budgetLabel(exhausted[0]!)}`
-    const settlement = settleActiveItemsForPause(state, observation.observed_at, pause_reason)
-    items = settlement.items
-    pause_code = settlement.hasAmbiguousReview
-      ? 'ambiguous_reviewer_launch'
-      : settlement.hasAmbiguousExecution ? 'ambiguous_execution_launch' : 'budget_exhausted'
-    usage = closeAllActiveIntervals(usage, observation.observed_at)
+    pause_code = 'budget_exhausted'
   }
 
   return validateEpicTransition(state, {
@@ -532,7 +473,7 @@ export function applyEpicUsageDelta(stateInput: unknown, input: EpicUsageDeltaIn
     status,
     pause_reason,
     pause_code,
-    items,
+    items: state.items,
     usage,
   })
 }

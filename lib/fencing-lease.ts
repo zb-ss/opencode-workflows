@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import fs from 'node:fs'
 import path from 'node:path'
 
@@ -10,6 +11,7 @@ const DIR_MODE = 0o700
 const LOCK_STALE_MS = 10_000
 const LOCK_RETRY_MS = 5
 const LOCK_RETRY_LIMIT = 2000
+const LOCK_RELEASE_RETRY_LIMIT = 3
 
 export interface FencingLeaseRecord {
   lease_id: string
@@ -71,8 +73,25 @@ function stagingDirectoryPath(directory: string): string {
   return path.join(directory, '.fencing-staging')
 }
 
+function ensureStagingDirectory(directory: string): void {
+  try {
+    fs.mkdirSync(directory, { mode: DIR_MODE })
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+  }
+  const identity = fs.lstatSync(directory)
+  if (identity.isSymbolicLink() || !identity.isDirectory()) {
+    throw new FencingLeaseError('lock_corrupt', 'lock staging path is not a trusted directory')
+  }
+  fs.chmodSync(directory, DIR_MODE)
+}
+
 function lockTokenPath(lockDirectory: string): string {
   return path.join(lockDirectory, 'holder.token')
+}
+
+function takeoverTokenPath(lockDirectory: string): string {
+  return path.join(lockDirectory, 'takeover.token')
 }
 
 interface LockToken {
@@ -153,7 +172,6 @@ function replaceLeaseFile(directory: string, record: FencingLeaseRecord): void {
     fd = null
     fs.renameSync(temp, leaseFile)
     fsyncDirectory(directory)
-    try { fs.chmodSync(leaseFile, FILE_MODE) } catch {}
   } catch (error) {
     if (fd !== null) { try { fs.closeSync(fd) } catch {} }
     try { fs.unlinkSync(temp) } catch {}
@@ -166,8 +184,6 @@ function fsyncDirectory(directory: string): void {
   try {
     fd = fs.openSync(directory, fs.constants.O_RDONLY | O_NOFOLLOW)
     fs.fsyncSync(fd)
-  } catch {
-    // Best-effort directory fsync; some platforms don't support it.
   } finally {
     if (fd !== null) { try { fs.closeSync(fd) } catch {} }
   }
@@ -221,8 +237,7 @@ function isProcessAlive(pid: number, startTime: number | null): boolean {
   }
 }
 
-function readLockToken(lockDirectory: string): LockToken | null {
-  const tokenFile = lockTokenPath(lockDirectory)
+function readTokenFile(tokenFile: string): LockToken | null {
   let content: string
   try {
     content = fs.readFileSync(tokenFile, 'utf8')
@@ -241,6 +256,10 @@ function readLockToken(lockDirectory: string): LockToken | null {
   } catch {
     return null
   }
+}
+
+function readLockToken(lockDirectory: string): LockToken | null {
+  return readTokenFile(lockTokenPath(lockDirectory))
 }
 
 /**
@@ -276,6 +295,13 @@ function evaluateLockState(lockDirectory: string): 'stale' | 'contended' | 'corr
 
   if (isProcessAlive(token.pid, token.start_time)) {
     return 'contended'
+  }
+
+  const takeoverFile = takeoverTokenPath(lockDirectory)
+  if (fs.existsSync(takeoverFile)) {
+    const takeover = readTokenFile(takeoverFile)
+    if (takeover === null) return 'corrupt'
+    return isProcessAlive(takeover.pid, takeover.start_time) ? 'contended' : 'stale'
   }
 
   return 'stale'
@@ -319,9 +345,14 @@ class CrossProcessLock {
     this.stagingDirectory = stagingDirectoryPath(directory)
   }
 
+  get key(): string {
+    return this.lockDirectory
+  }
+
   acquire(): void {
     if (this.nonce !== null) return
-    fs.mkdirSync(this.stagingDirectory, { recursive: true, mode: DIR_MODE })
+    ensureStagingDirectory(this.stagingDirectory)
+    fsyncDirectory(path.dirname(this.stagingDirectory))
     const deadline = Date.now() + LOCK_STALE_MS
     let attempts = 0
     while (attempts < LOCK_RETRY_LIMIT) {
@@ -373,6 +404,7 @@ class CrossProcessLock {
     const token: LockToken = { pid: process.pid, nonce: this.nonce, start_time: processStartTime() }
     const tokenFile = lockTokenPath(candidate)
     let fd: number | null = null
+    let candidateStat: fs.BigIntStats
     try {
       fd = fs.openSync(tokenFile, fs.constants.O_WRONLY | fs.constants.O_CREAT | O_EXCL | O_NOFOLLOW, FILE_MODE)
       fs.writeFileSync(fd, JSON.stringify(token), { encoding: 'utf8' })
@@ -380,6 +412,7 @@ class CrossProcessLock {
       fs.closeSync(fd)
       fd = null
       fsyncDirectory(candidate)
+      candidateStat = fs.lstatSync(candidate, { bigint: true })
     } catch (error) {
       if (fd !== null) { try { fs.closeSync(fd) } catch {} }
       this.nonce = null
@@ -388,12 +421,22 @@ class CrossProcessLock {
     }
 
     // 2. Attempt atomic rename onto the canonical lock path.
+    let installed = false
     try {
       fs.renameSync(candidate, this.lockDirectory)
+      installed = true
+      this.heldInode = { dev: Number(candidateStat.dev), ino: Number(candidateStat.ino) }
       fsyncDirectory(this.stagingDirectory)
+      fsyncDirectory(path.dirname(this.lockDirectory))
     } catch (error) {
-      // Candidate cleanup is safe: we own the uniquely named candidate.
+      if (installed) {
+        // Keep ownership evidence intact. withLock() will release the exact
+        // installed directory even though acquisition must fail closed.
+        throw error
+      }
+      // Candidate cleanup is safe before rename: we own its unique path.
       this.nonce = null
+      this.heldInode = null
       try { fs.rmSync(candidate, { recursive: true, force: true }) } catch {}
       const code = (error as NodeJS.ErrnoException).code
       if (code === 'ENOTEMPTY' || code === 'EEXIST') {
@@ -421,14 +464,51 @@ class CrossProcessLock {
     // owner's lock that reused the canonical path after we lost authority.
     try {
       const stat = fs.statSync(this.lockDirectory, { bigint: true })
-      this.heldInode = { dev: Number(stat.dev), ino: Number(stat.ino) }
+      if (stat.dev !== candidateStat.dev || stat.ino !== candidateStat.ino) {
+        throw new FencingLeaseError('lock_corrupt', 'acquired lock identity changed after installation')
+      }
     } catch {
-      // If we cannot stat our own lock, fail closed: we hold authority but
-      // cannot prove identity for safe release. Treat as acquisition failure.
-      this.nonce = null
-      try { fs.rmSync(this.lockDirectory, { recursive: true, force: true }) } catch {}
+      // Ownership evidence remains intact so withLock() can release this exact
+      // directory without ever recursively deleting the canonical path.
       throw new FencingLeaseError('lock_corrupt', 'could not stat the acquired lock')
     }
+  }
+
+  private abandonDeadTakeoverClaim(expectedStat: fs.BigIntStats, expectedToken: LockToken): void {
+    const claimFile = takeoverTokenPath(this.lockDirectory)
+    let claimStat: fs.BigIntStats
+    let claimToken: LockToken
+    try {
+      claimStat = fs.lstatSync(claimFile, { bigint: true })
+      const parsed = readTokenFile(claimFile)
+      if (!claimStat.isFile() || parsed === null || isProcessAlive(parsed.pid, parsed.start_time)) return
+      claimToken = parsed
+
+      const currentStat = fs.lstatSync(this.lockDirectory, { bigint: true })
+      const currentToken = readLockToken(this.lockDirectory)
+      if (currentStat.dev !== expectedStat.dev || currentStat.ino !== expectedStat.ino
+        || currentToken?.nonce !== expectedToken.nonce
+        || isProcessAlive(currentToken.pid, currentToken.start_time)) return
+    } catch {
+      return
+    }
+
+    const abandoned = path.join(this.stagingDirectory, `abandoned-takeover-${process.pid}-${randomUUID()}`)
+    try {
+      fs.renameSync(claimFile, abandoned)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+      throw error
+    }
+
+    const movedStat = fs.lstatSync(abandoned, { bigint: true })
+    const movedToken = readTokenFile(abandoned)
+    if (movedStat.dev !== claimStat.dev || movedStat.ino !== claimStat.ino || movedToken?.nonce !== claimToken.nonce) {
+      throw new FencingLeaseError('lock_corrupt', 'takeover claim identity changed during recovery')
+    }
+    fsyncDirectory(this.lockDirectory)
+    fsyncDirectory(this.stagingDirectory)
+    try { fs.unlinkSync(abandoned) } catch {}
   }
 
   /**
@@ -438,10 +518,69 @@ class CrossProcessLock {
    * directly, so a concurrent winner's lock cannot be destroyed by mistake.
    */
   private quarantineStaleLock(): void {
+    let expectedStat: fs.BigIntStats
+    let expectedToken: LockToken
+    try {
+      expectedStat = fs.lstatSync(this.lockDirectory, { bigint: true })
+      const token = readLockToken(this.lockDirectory)
+      if (!expectedStat.isDirectory() || token === null || isProcessAlive(token.pid, token.start_time)) return
+      expectedToken = token
+    } catch {
+      return
+    }
+
+    const existingClaim = readTokenFile(takeoverTokenPath(this.lockDirectory))
+    if (existingClaim !== null) {
+      if (isProcessAlive(existingClaim.pid, existingClaim.start_time)) return
+      this.abandonDeadTakeoverClaim(expectedStat, expectedToken)
+    }
+
+    const claimFile = takeoverTokenPath(this.lockDirectory)
+    const claim: LockToken = { pid: process.pid, nonce: randomUUID(), start_time: processStartTime() }
+    let claimFd: number | null = null
+    try {
+      claimFd = fs.openSync(claimFile, fs.constants.O_WRONLY | fs.constants.O_CREAT | O_EXCL | O_NOFOLLOW, FILE_MODE)
+      fs.writeFileSync(claimFd, JSON.stringify(claim), { encoding: 'utf8' })
+      fs.fsyncSync(claimFd)
+      fs.closeSync(claimFd)
+      claimFd = null
+      fsyncDirectory(this.lockDirectory)
+    } catch (error) {
+      if (claimFd !== null) { try { fs.closeSync(claimFd) } catch {} }
+      const code = (error as NodeJS.ErrnoException).code
+      if (code === 'EEXIST' || code === 'ENOENT') return
+      throw error
+    }
+
+    const removeOwnClaim = (): void => {
+      try {
+        const current = fs.lstatSync(this.lockDirectory, { bigint: true })
+        if (current.dev !== expectedStat.dev || current.ino !== expectedStat.ino) return
+        if (readTokenFile(claimFile)?.nonce === claim.nonce) fs.unlinkSync(claimFile)
+      } catch { /* uncertain claims remain fail-closed */ }
+    }
+
+    try {
+      const currentStat = fs.lstatSync(this.lockDirectory, { bigint: true })
+      const currentToken = readLockToken(this.lockDirectory)
+      const currentClaim = readTokenFile(claimFile)
+      if (currentStat.dev !== expectedStat.dev || currentStat.ino !== expectedStat.ino
+        || currentToken?.nonce !== expectedToken.nonce
+        || isProcessAlive(currentToken.pid, currentToken.start_time)
+        || currentClaim?.nonce !== claim.nonce) {
+        removeOwnClaim()
+        return
+      }
+    } catch {
+      removeOwnClaim()
+      return
+    }
+
     const quarantine = path.join(this.stagingDirectory, `quarantine-${process.pid}-${randomUUID()}`)
     try {
       fs.renameSync(this.lockDirectory, quarantine)
       fsyncDirectory(this.stagingDirectory)
+      fsyncDirectory(path.dirname(this.lockDirectory))
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code
       if (code === 'ENOENT') {
@@ -456,16 +595,22 @@ class CrossProcessLock {
       }
       throw error
     }
+    const quarantinedStat = fs.lstatSync(quarantine, { bigint: true })
+    if (quarantinedStat.dev !== expectedStat.dev || quarantinedStat.ino !== expectedStat.ino) {
+      throw new FencingLeaseError('lock_corrupt', 'quarantined lock identity changed during stale takeover')
+    }
     // Delete only the uniquely named quarantine directory we own.
     try { fs.rmSync(quarantine, { recursive: true, force: true }) } catch {}
   }
 
-  release(): void {
-    if (this.nonce === null || this.heldInode === null) return
+  release(): boolean {
+    if (this.nonce === null || this.heldInode === null) return true
     const expectedNonce = this.nonce
     const expectedInode = this.heldInode
-    this.nonce = null
-    this.heldInode = null
+    const clearOwnership = (): void => {
+      this.nonce = null
+      this.heldInode = null
+    }
 
     // Verify we still own the exact lock by nonce AND inode identity. If a
     // later owner took over (we timed out, crashed, or lost authority), the
@@ -475,39 +620,124 @@ class CrossProcessLock {
       currentStat = fs.statSync(this.lockDirectory, { bigint: true })
     } catch {
       // Already gone — nothing to release.
-      return
+      clearOwnership()
+      return true
     }
     if (Number((currentStat as fs.BigIntStats).dev) !== expectedInode.dev || Number((currentStat as fs.BigIntStats).ino) !== expectedInode.ino) {
-      return
+      clearOwnership()
+      return true
     }
     const token = readLockToken(this.lockDirectory)
     if (token === null || token.nonce !== expectedNonce) {
-      return
+      clearOwnership()
+      return true
     }
 
     // Atomically rename our lock to a uniquely named release path, then
     // delete only that path. The canonical path is never recursively
     // rmSync'd directly.
-    const releaseDir = path.join(this.stagingDirectory, `release-${process.pid}-${randomUUID()}`)
-    try {
-      fs.renameSync(this.lockDirectory, releaseDir)
-      fsyncDirectory(this.stagingDirectory)
-    } catch {
-      // If rename fails, leave the lock to expire naturally; do not risk
-      // removing someone else's directory.
-      return
+    for (let attempt = 0; attempt < LOCK_RELEASE_RETRY_LIMIT; attempt++) {
+      const releaseDir = path.join(this.stagingDirectory, `release-${process.pid}-${randomUUID()}`)
+      let renamed = false
+      try {
+        fs.renameSync(this.lockDirectory, releaseDir)
+        renamed = true
+        fsyncDirectory(this.stagingDirectory)
+        fsyncDirectory(path.dirname(this.lockDirectory))
+      } catch {
+        // A post-rename fsync failure still removed the canonical lock. A
+        // pre-rename failure retains ownership and is retried below.
+        if (!renamed) continue
+      }
+      clearOwnership()
+      try { fs.rmSync(releaseDir, { recursive: true, force: true }) } catch {}
+      return true
     }
-    try { fs.rmSync(releaseDir, { recursive: true, force: true }) } catch {}
+    return false
   }
 }
 
+const retainedCrossProcessLocks = new Map<string, CrossProcessLock>()
+const asynchronousLockTails = new Map<string, Promise<void>>()
+interface AsyncLockOwnership { active: boolean }
+const asynchronousLockContext = new AsyncLocalStorage<ReadonlyMap<string, AsyncLockOwnership>>()
+const synchronousLockKeys = new Set<string>()
+
+function lockFor(directory: string): CrossProcessLock {
+  const candidate = new CrossProcessLock(directory)
+  const retained = retainedCrossProcessLocks.get(candidate.key)
+  if (retained) {
+    if (!retained.release()) {
+      throw new FencingLeaseError('lock_release_failed', 'a prior cross-process lock release remains uncertain')
+    }
+    retainedCrossProcessLocks.delete(candidate.key)
+  }
+  return candidate
+}
+
+function releaseAfterOperation(lock: CrossProcessLock, operationError: unknown): void {
+  if (lock.release()) {
+    retainedCrossProcessLocks.delete(lock.key)
+    if (operationError !== null) throw operationError
+    return
+  }
+  retainedCrossProcessLocks.set(lock.key, lock)
+  const releaseError = new FencingLeaseError('lock_release_failed', 'cross-process lock release remains uncertain')
+  if (operationError !== null) throw new AggregateError([operationError, releaseError], 'operation failed and its cross-process lock could not be released')
+  throw releaseError
+}
+
 export function withLock<T>(directory: string, fn: () => T): T {
-  const lock = new CrossProcessLock(directory)
-  lock.acquire()
+  const key = new CrossProcessLock(directory).key
+  if (asynchronousLockContext.getStore()?.get(key)?.active || synchronousLockKeys.has(key)) return fn()
+  if (asynchronousLockTails.has(key)) {
+    throw new FencingLeaseError('lock_contended_in_process', 'a synchronous operation cannot wait on an asynchronous lock held by this process')
+  }
+  const lock = lockFor(directory)
+  let result: T | undefined
+  let operationError: unknown = null
   try {
-    return fn()
+    lock.acquire()
+    synchronousLockKeys.add(key)
+    result = fn()
+  } catch (error) {
+    operationError = error
   } finally {
-    lock.release()
+    synchronousLockKeys.delete(key)
+  }
+  releaseAfterOperation(lock, operationError)
+  return result as T
+}
+
+export async function withLockAsync<T>(directory: string, fn: () => Promise<T>): Promise<T> {
+  const key = new CrossProcessLock(directory).key
+  if (asynchronousLockContext.getStore()?.get(key)?.active) return await fn()
+  const predecessor = asynchronousLockTails.get(key) ?? Promise.resolve()
+  let releaseTurn!: () => void
+  const turn = new Promise<void>(resolve => { releaseTurn = resolve })
+  const tail = predecessor.then(() => turn)
+  asynchronousLockTails.set(key, tail)
+  await predecessor
+  try {
+    const lock = lockFor(directory)
+    let result: T | undefined
+    let operationError: unknown = null
+    const ownership: AsyncLockOwnership = { active: true }
+    const context = new Map(asynchronousLockContext.getStore() ?? [])
+    context.set(key, ownership)
+    try {
+      lock.acquire()
+      result = await asynchronousLockContext.run(context, fn)
+    } catch (error) {
+      operationError = error
+    } finally {
+      ownership.active = false
+    }
+    releaseAfterOperation(lock, operationError)
+    return result as T
+  } finally {
+    releaseTurn()
+    if (asynchronousLockTails.get(key) === tail) asynchronousLockTails.delete(key)
   }
 }
 
@@ -550,6 +780,7 @@ export class FencingLeaseStore {
     this.duration_ms = options.lease_duration_ms
     this.now = options.now
     fs.mkdirSync(this.directory, { recursive: true, mode: DIR_MODE })
+    fsyncDirectory(path.dirname(this.directory))
   }
 
   /**
