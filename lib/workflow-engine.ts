@@ -1233,7 +1233,6 @@ export class WorkflowEngine {
     let timer: ReturnType<typeof setTimeout> | null = null
     const timeout = new Promise<never>((_, reject) => {
       timer = setTimeout(() => reject(new Error(message)), this.sessionOperationTimeoutMs)
-      timer.unref?.()
     })
     try {
       return await Promise.race([operation, timeout])
