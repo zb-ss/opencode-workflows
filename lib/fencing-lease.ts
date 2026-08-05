@@ -276,19 +276,32 @@ function readLockToken(lockDirectory: string): LockToken | null {
  *   fix corruption.
  */
 function evaluateLockState(lockDirectory: string): 'stale' | 'contended' | 'corrupt' {
-  let stat: fs.Stats
+  let initialStat: fs.BigIntStats
   try {
-    stat = fs.lstatSync(lockDirectory)
-  } catch {
+    initialStat = fs.lstatSync(lockDirectory, { bigint: true })
+  } catch (error) {
     // No lock present. The caller's rename will win or lose atomically;
     // treat as contended so the caller retries its own rename.
-    return 'contended'
+    return (error as NodeJS.ErrnoException).code === 'ENOENT' ? 'contended' : 'corrupt'
   }
-  if (!stat.isDirectory()) {
+  if (!initialStat.isDirectory()) {
     return 'corrupt'
   }
 
   const token = readLockToken(lockDirectory)
+  let currentStat: fs.BigIntStats
+  try {
+    currentStat = fs.lstatSync(lockDirectory, { bigint: true })
+  } catch (error) {
+    // A holder may have released the canonical lock between our first stat
+    // and token read. That is ordinary contention, not persistent corruption.
+    return (error as NodeJS.ErrnoException).code === 'ENOENT' ? 'contended' : 'corrupt'
+  }
+  if (currentStat.dev !== initialStat.dev || currentStat.ino !== initialStat.ino) {
+    // The canonical path was rebound while it was being inspected. Retry
+    // against the replacement rather than evaluating stale ownership evidence.
+    return 'contended'
+  }
   if (token === null) {
     return 'corrupt'
   }
