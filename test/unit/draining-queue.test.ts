@@ -26,4 +26,13 @@ describe('DrainingQueue', () => {
     releases[2]()
     assert.deepEqual(await Promise.all([first, second, third]), [1, 2, 3])
   })
+
+  it('returns to idle when a callback throws synchronously', async () => {
+    const queue = new DrainingQueue<number, number>(1)
+    const result = queue.enqueue(1, 'provider', () => { throw new Error('synchronous failure') })
+
+    await assert.rejects(result, /synchronous failure/)
+    await queue.whenIdle()
+    assert.deepEqual(queue.snapshot(), { pending: 0, running: 0 })
+  })
 })

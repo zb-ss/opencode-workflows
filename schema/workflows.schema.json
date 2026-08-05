@@ -43,6 +43,7 @@
         "max_parallel_sessions": { "type": "integer", "minimum": 1 },
         "max_sessions": { "type": "integer", "minimum": 1 },
         "max_attempts_per_stage": { "type": "integer", "minimum": 1 },
+        "session_operation_timeout_ms": { "type": "integer", "minimum": 1, "maximum": 3600000 },
         "max_active_time_ms": { "type": "integer", "minimum": 1 },
         "max_calendar_age_ms": { "type": "integer", "minimum": 1 },
         "max_input_tokens": { "type": "integer", "minimum": 0 },
@@ -64,11 +65,7 @@
               "max_parallel_sessions",
               "max_sessions",
               "max_attempts_per_stage",
-              "max_input_tokens",
-              "max_output_tokens",
-              "max_bounded_read_bytes",
-              "max_bounded_write_bytes",
-              "max_cost_usd"
+              "session_operation_timeout_ms"
             ]
           }
         }
@@ -159,22 +156,10 @@
             "required": ["window_ms", "max_requests"],
             "additionalProperties": false
           }
-        },
-        "budgets": {
-          "type": "array",
-          "maxItems": 4096,
-          "items": {
-            "type": "object",
-            "properties": {
-              "dimension": { "enum": ["sessions", "input_tokens", "output_tokens", "cost_usd", "active_time_ms", "calendar_age_ms"] },
-              "scope": { "enum": ["global", "workflow"] },
-              "limit": { "type": ["number", "null"], "minimum": 0 }
-            },
-            "required": ["dimension", "scope", "limit"],
-            "additionalProperties": false
-          }
         }
       },
+      "required": ["enabled"],
+      "additionalProperties": false,
       "allOf": [
         {
           "if": {
@@ -182,6 +167,7 @@
             "required": ["enabled"]
           },
           "then": {
+            "$comment": "Runtime validation additionally requires renewal_interval_ms to be less than lease_duration_ms; portable JSON Schema cannot compare sibling numeric values.",
             "required": [
               "max_concurrent_workflows",
               "lease_duration_ms",
@@ -198,7 +184,8 @@
                 { "required": ["lease_duration_ms"] },
                 { "required": ["renewal_interval_ms"] },
                 { "required": ["recovery_attempt_limit"] },
-                { "required": ["retry_policy"] }
+                { "required": ["retry_policy"] },
+                { "required": ["rate_windows"] }
               ]
             }
           }
@@ -391,11 +378,39 @@
     "experimental_capabilities"
   ],
   "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "queue": {
+            "type": "object",
+            "properties": { "enabled": { "const": true } },
+            "required": ["enabled"]
+          }
+        },
+        "required": ["queue"]
+      },
+      "then": {
+        "properties": {
+          "automation": {
+            "type": "object",
+            "properties": {
+              "enabled": { "const": true },
+              "max_sessions": { "type": "integer", "minimum": 1, "maximum": 256 }
+            },
+            "required": ["enabled", "max_parallel_sessions", "max_sessions", "max_attempts_per_stage", "session_operation_timeout_ms"]
+          }
+        },
+        "required": ["automation"]
+      }
+    }
+  ],
   "$defs": {
     "safeIdentifier": {
       "type": "string",
       "maxLength": 64,
-      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+      "not": { "enum": ["__proto__", "prototype", "constructor"] }
     },
     "validationOperation": {
       "type": "object",

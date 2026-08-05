@@ -56,14 +56,18 @@ function validateReviewTransition(previous: EpicAttempt, next: EpicAttempt, labe
   if (!LAUNCH_STATE_ADJACENCY[previous.review.launch_state].has(next.review.launch_state)) {
     throw new EpicValidationError(`${label}.review has invalid launch state transition ${previous.review.launch_state} -> ${next.review.launch_state}`)
   }
+  const addsLateReviewEvidence = previous.review.child_session_id === null
+    && next.review.child_session_id !== null
+    && next.review.launch_state === 'ambiguous'
+    && (previous.review.launch_state === 'reserved' || previous.review.launch_state === 'ambiguous')
   if (previous.review.child_session_id === null && next.review.child_session_id !== null) {
-    if (previous.review.launch_state !== 'reserved' || next.review.launch_state !== 'created') {
+    if (!addsLateReviewEvidence && (previous.review.launch_state !== 'reserved' || next.review.launch_state !== 'created')) {
       throw new EpicValidationError(`${label}.review child_session_id may be set only during reserved -> created`)
     }
   } else assertEpicEqual(`${label}.review.child_session_id`, previous.review.child_session_id, next.review.child_session_id)
   if (previous.review.completed_at !== null) assertEpicEqual(`${label}.review`, previous.review, next.review)
   if (previous.review.completed_at === null && next.review.completed_at === null
-    && previous.review.launch_state === next.review.launch_state) assertEpicEqual(`${label}.review`, previous.review, next.review)
+    && previous.review.launch_state === next.review.launch_state && !addsLateReviewEvidence) assertEpicEqual(`${label}.review`, previous.review, next.review)
 }
 
 function validateAttemptTransition(previous: EpicAttempt, next: EpicAttempt, label: string): void {
@@ -82,8 +86,12 @@ function validateAttemptTransition(previous: EpicAttempt, next: EpicAttempt, lab
   }
   assertEpicEqual(`${label}.launch_id`, previous.launch_id, next.launch_id)
   if (!LAUNCH_STATE_ADJACENCY[previous.launch_state!].has(next.launch_state!)) throw new EpicValidationError(`${label} has invalid launch state transition ${previous.launch_state} -> ${next.launch_state}`)
+  const addsLateExecutionEvidence = previous.child_session_id === null
+    && next.child_session_id !== null
+    && next.launch_state === 'ambiguous'
+    && (previous.launch_state === 'reserved' || previous.launch_state === 'ambiguous')
   if (previous.child_session_id === null && next.child_session_id !== null) {
-    if (previous.launch_state !== 'reserved' || next.launch_state !== 'created') throw new EpicValidationError(`${label} child_session_id may be set only during reserved -> created`)
+    if (!addsLateExecutionEvidence && (previous.launch_state !== 'reserved' || next.launch_state !== 'created')) throw new EpicValidationError(`${label} child_session_id may be set only during reserved -> created`)
   } else assertEpicEqual(`${label}.child_session_id`, previous.child_session_id, next.child_session_id)
   if (previous.launch_state === 'reserved' && next.launch_state === 'settled'
     && (next.child_session_id !== null
@@ -108,7 +116,16 @@ function validateAttemptTransition(previous: EpicAttempt, next: EpicAttempt, lab
   if (previous.progress_commit !== next.progress_commit || previous.progress_tree_sha256 !== next.progress_tree_sha256) {
     if (previous.status !== 'running' || next.status !== 'running' || !['created', 'prompted'].includes(next.launch_state!)) throw new EpicValidationError(`${label} progress checkpoint may change only during running execution`)
   }
-  if (!ACTIVE_ATTEMPT_STATUSES.has(previous.status)) assertEpicEqual(label, previous, next)
+  if (!ACTIVE_ATTEMPT_STATUSES.has(previous.status)) {
+    let expected = previous
+    if (addsLateExecutionEvidence) expected = { ...expected, child_session_id: next.child_session_id }
+    const addsLateReviewEvidence = previous.review?.child_session_id === null
+      && next.review?.child_session_id !== null
+      && previous.review?.launch_state === 'ambiguous'
+      && next.review?.launch_state === 'ambiguous'
+    if (addsLateReviewEvidence) expected = { ...expected, review: { ...expected.review!, child_session_id: next.review!.child_session_id } }
+    assertEpicEqual(label, expected, next)
+  }
 }
 
 function expectedSettledAttemptStatus(itemStatus: EpicItemStatus): EpicAttemptStatus | null {

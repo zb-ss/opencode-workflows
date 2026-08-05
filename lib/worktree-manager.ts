@@ -10,7 +10,15 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { sha256Hex } from './canonical-json.ts'
 import type { WorktreeState, DelegationProvider } from './types.js'
-import { ensurePrivateDirectory, getRuntimeDir, hashIdentifier } from './paths.ts'
+import {
+  assertPrivateDirectoryWithoutSymlinks,
+  ensurePrivateDirectoryWithoutSymlinks,
+  getRuntimeDir,
+  hashIdentifier,
+} from './paths.ts'
+import { sandboxedGitArgs, sandboxedGitEnv, trustedGitExecutable } from './git-sandbox.ts'
+import { withRepositoryOperationLock } from './repository-operation-lock.ts'
+import { computeSandboxedMergeTree, updateWorktreeWithoutRepositoryDrivers } from './git-merge-sandbox.ts'
 
 const WORKTREE_DIRECTORY = 'worktrees'
 const WORKTREE_PREFIX = 'delegate-'
@@ -28,6 +36,15 @@ export interface MergeWorktreeOptions {
 
 export interface RemoveWorktreeOptions {
   force?: boolean
+}
+
+export class WorktreeMergeAmbiguousError extends Error {
+  readonly merge_commit: string
+  constructor(message: string, mergeCommit: string) {
+    super(message)
+    this.name = 'WorktreeMergeAmbiguousError'
+    this.merge_commit = mergeCommit
+  }
 }
 
 export interface ManagedWorktreeSnapshot {
@@ -74,40 +91,44 @@ export interface ManagedReviewPatchOptions {
 // ---------------------------------------------------------------------------
 
 function git(args: string[], cwd: string): string {
-  return execFileSync('git', args, {
+  return execFileSync(trustedGitExecutable(), sandboxedGitArgs(args, cwd), {
     cwd,
     encoding: 'utf8',
     maxBuffer: MAX_GIT_OUTPUT_BYTES,
     stdio: ['ignore', 'pipe', 'pipe'],
+    env: sandboxedGitEnv(),
   }).trim()
 }
 
 function gitRaw(args: string[], cwd: string): string {
-  return execFileSync('git', args, {
+  return execFileSync(trustedGitExecutable(), sandboxedGitArgs(args, cwd), {
     cwd,
     encoding: 'utf8',
     maxBuffer: MAX_GIT_OUTPUT_BYTES,
     stdio: ['ignore', 'pipe', 'pipe'],
+    env: sandboxedGitEnv(),
   })
 }
 
 function gitSucceeds(args: string[], cwd: string): boolean {
-  const result = spawnSync('git', args, {
+  const result = spawnSync(trustedGitExecutable(), sandboxedGitArgs(args, cwd), {
     cwd,
     encoding: 'utf8',
     maxBuffer: MAX_GIT_OUTPUT_BYTES,
     stdio: ['ignore', 'pipe', 'pipe'],
+    env: sandboxedGitEnv(),
   })
 
   return !result.error && result.status === 0
 }
 
 function gitBuffer(args: string[], cwd: string, maxBytes: number): Buffer {
-  const result = spawnSync('git', args, {
+  const result = spawnSync(trustedGitExecutable(), sandboxedGitArgs(args, cwd), {
     cwd,
     encoding: 'buffer',
     maxBuffer: maxBytes + 1,
     stdio: ['ignore', 'pipe', 'pipe'],
+    env: sandboxedGitEnv(),
   })
   if (result.error) {
     if ((result.error as NodeJS.ErrnoException).code === 'ENOBUFS') {
@@ -122,6 +143,23 @@ function gitBuffer(args: string[], cwd: string, maxBytes: number): Buffer {
   const output = Buffer.isBuffer(result.stdout) ? result.stdout : Buffer.alloc(0)
   if (output.byteLength > maxBytes) throw new Error(`Git output exceeds the ${maxBytes}-byte limit`)
   return output
+}
+
+function gitWithInput(args: string[], cwd: string, input: Buffer): string {
+  const result = spawnSync(trustedGitExecutable(), sandboxedGitArgs(args, cwd), {
+    cwd,
+    encoding: 'buffer',
+    input,
+    maxBuffer: MAX_GIT_OUTPUT_BYTES,
+    stdio: ['pipe', 'pipe', 'pipe'],
+    env: sandboxedGitEnv(),
+  })
+  if (result.error) throw result.error
+  if (result.status !== 0) {
+    const detail = Buffer.isBuffer(result.stderr) ? result.stderr.toString('utf8').trim() : ''
+    throw new Error(`Git command failed${detail ? `: ${detail}` : ''}`)
+  }
+  return (Buffer.isBuffer(result.stdout) ? result.stdout : Buffer.alloc(0)).toString('utf8').trim()
 }
 
 function resolveGitPath(cwd: string, gitPath: string): string {
@@ -148,6 +186,24 @@ function resolveProjectRoot(projectRoot: string): string {
   return repositoryRoot
 }
 
+function safeGitIndexPath(worktreePath: string): string {
+  const gitDirectory = fs.realpathSync(git(['rev-parse', '--absolute-git-dir'], worktreePath))
+  const reported = git(['rev-parse', '--git-path', 'index'], worktreePath)
+  const lexicalPath = path.resolve(worktreePath, reported)
+  const parent = fs.realpathSync(path.dirname(lexicalPath))
+  if (parent !== gitDirectory) throw new Error('Git index is outside the worktree metadata directory')
+  const indexPath = path.join(parent, path.basename(lexicalPath))
+  try {
+    const stat = fs.lstatSync(indexPath)
+    if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink !== 1) {
+      throw new Error('Git index is not one regular unlinked file')
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+  }
+  return indexPath
+}
+
 function isContainedPath(parentPath: string, candidatePath: string): boolean {
   const relativePath = path.relative(parentPath, candidatePath)
   return relativePath !== ''
@@ -156,14 +212,86 @@ function isContainedPath(parentPath: string, candidatePath: string): boolean {
     && !path.isAbsolute(relativePath)
 }
 
+interface WorktreeFileSnapshot {
+  mode: string
+  oid: string
+}
+
+function snapshotWorktreeFile(worktreePath: string, filePath: string, cachedMode: string | null): WorktreeFileSnapshot | null {
+  const fullPath = path.join(worktreePath, assertSafeRelativePath(filePath))
+  let stat: fs.Stats
+  try { stat = fs.lstatSync(fullPath) }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
+    throw error
+  }
+
+  const realParent = fs.realpathSync(path.dirname(fullPath))
+  if (realParent !== worktreePath && !isContainedPath(worktreePath, realParent)) {
+    throw new Error(`worktree path parent resolves outside the managed worktree: ${filePath}`)
+  }
+
+  if (stat.isSymbolicLink()) {
+    const target = fs.readlinkSync(fullPath)
+    const after = fs.lstatSync(fullPath)
+    if (after.dev !== stat.dev || after.ino !== stat.ino || !after.isSymbolicLink()) {
+      throw new Error(`worktree symlink changed while being checkpointed: ${filePath}`)
+    }
+    const oid = gitWithInput(['hash-object', '-w', '--stdin'], worktreePath, Buffer.from(target, 'utf8'))
+    validateOid(oid, 'staged symlink blob')
+    return { mode: '120000', oid }
+  }
+
+  if (stat.isDirectory() && cachedMode === '160000') {
+    throw new Error(`submodules cannot be checkpointed by the managed worktree boundary: ${filePath}`)
+  }
+
+  if (!stat.isFile()) throw new Error(`unsupported worktree file type cannot be checkpointed: ${filePath}`)
+  let fd: number | null = null
+  try {
+    fd = fs.openSync(fullPath, fs.constants.O_RDONLY | (fs.constants?.O_NOFOLLOW ?? 0x20000))
+    const opened = fs.fstatSync(fd, { bigint: true })
+    if (!opened.isFile() || Number(opened.dev) !== stat.dev || Number(opened.ino) !== stat.ino) {
+      throw new Error(`worktree file changed while being checkpointed: ${filePath}`)
+    }
+    if (opened.nlink !== 1n) throw new Error(`hard-linked worktree file cannot be checkpointed safely: ${filePath}`)
+    try {
+      const descriptorPath = fs.realpathSync(`/proc/self/fd/${fd}`)
+      if (!isContainedPath(worktreePath, descriptorPath)) {
+        throw new Error(`worktree file descriptor resolves outside the managed worktree: ${filePath}`)
+      }
+    } catch (error) {
+      if (process.platform === 'linux') throw error
+      const resolved = fs.realpathSync(fullPath)
+      if (!isContainedPath(worktreePath, resolved)) throw new Error(`worktree file resolves outside the managed worktree: ${filePath}`)
+    }
+    const content = fs.readFileSync(fd)
+    const afterRead = fs.fstatSync(fd, { bigint: true })
+    if (afterRead.dev !== opened.dev || afterRead.ino !== opened.ino
+      || afterRead.size !== opened.size || afterRead.mode !== opened.mode
+      || afterRead.mtimeNs !== opened.mtimeNs || afterRead.ctimeNs !== opened.ctimeNs
+      || afterRead.nlink !== opened.nlink) {
+      throw new Error(`worktree file changed while being checkpointed: ${filePath}`)
+    }
+    const oid = gitWithInput(['hash-object', '-w', '--stdin'], worktreePath, content)
+    validateOid(oid, 'staged blob')
+    return { mode: (opened.mode & 0o111n) !== 0n ? '100755' : '100644', oid }
+  } finally {
+    if (fd !== null) fs.closeSync(fd)
+  }
+}
+
 function resolveWorktreeDirectory(projectRoot: string, create: boolean): string | null {
   const worktreeRoot = path.join(getRuntimeDir(), WORKTREE_DIRECTORY)
   const worktreeDirectory = path.join(worktreeRoot, hashIdentifier(projectRoot))
 
-  if (!fs.existsSync(worktreeDirectory)) {
-    if (!create) return null
-    ensurePrivateDirectory(worktreeRoot)
-    ensurePrivateDirectory(worktreeDirectory)
+  if (create) {
+    ensurePrivateDirectoryWithoutSymlinks(worktreeRoot)
+    ensurePrivateDirectoryWithoutSymlinks(worktreeDirectory)
+  } else {
+    if (!fs.existsSync(worktreeDirectory)) return null
+    assertPrivateDirectoryWithoutSymlinks(worktreeRoot)
+    assertPrivateDirectoryWithoutSymlinks(worktreeDirectory)
   }
 
   const realWorktreeRoot = fs.realpathSync(worktreeRoot)
@@ -211,6 +339,35 @@ function parseNulPaths(output: Buffer): string[] {
     start = index + 1
   }
   return paths
+}
+
+/**
+ * Stage all changed files without invoking clean/smudge filters.
+ *
+ * Uses `git hash-object --no-filters -w` + `git update-index --cacheinfo`
+ * instead of `git add -A` so that repository-defined filter drivers in
+ * .gitattributes cannot execute arbitrary commands. Handles new, modified,
+ * and deleted files.
+ */
+function stageAllWithoutFilters(worktreePath: string): void {
+  // Use diff-files and ls-files --others instead of `git status --porcelain`
+  // to avoid invoking clean/smudge filters.
+  const statusOutput = gitRaw(['diff-files', '--name-only', '-z', '--no-ext-diff', '--no-textconv', '--'], worktreePath)
+  const unstagedFiles = statusOutput.split('\0').filter(Boolean)
+  const untrackedOutput = gitRaw(['ls-files', '--others', '--exclude-standard', '-z'], worktreePath)
+  const untrackedFiles = untrackedOutput.split('\0').filter(Boolean)
+
+  for (const filePath of new Set([...unstagedFiles, ...untrackedFiles])) {
+    if (!filePath) continue
+    assertSafeRelativePath(filePath)
+    const cachedMode = git(['ls-files', '--cached', '--format=%(objectmode)', '-z', '--', filePath], worktreePath).replace(/\0$/, '') || null
+    const snapshot = snapshotWorktreeFile(worktreePath, filePath, cachedMode)
+    if (snapshot === null) {
+      git(['update-index', '--remove', '--', filePath], worktreePath)
+      continue
+    }
+    git(['update-index', '--add', '--cacheinfo', `${snapshot.mode},${snapshot.oid},${filePath}`], worktreePath)
+  }
 }
 
 function capUtf8(value: string, maxBytes: number): { content: string; truncated: boolean } {
@@ -317,17 +474,42 @@ function parseStatusPaths(rawStatus: string): string[] {
   return changedFiles
 }
 
-function readStatus(worktreePath: string): { changed_files: string[]; diff_stat: string; has_changes: boolean } {
-  const rawStatus = gitRaw(
-    ['status', '--porcelain=v1', '-z', '--untracked-files=all'],
-    worktreePath,
-  )
-  const changedFiles = parseStatusPaths(rawStatus)
-  const diffStat = git(['diff', '--stat', 'HEAD', '--'], worktreePath)
+export function isWorktreeCleanAfterCommit(worktreePath: string, commitOid: string): boolean {
+  if (!gitSucceeds(['diff-index', '--cached', '--quiet', '--ignore-submodules=none', commitOid, '--'], worktreePath)) return false
+  const entries = gitRaw(['ls-files', '--stage', '-z'], worktreePath).split('\0').filter(Boolean)
+  for (const entry of entries) {
+    const match = /^(\d{6}) ([a-f0-9]{40}|[a-f0-9]{64}) ([0-3])\t([\s\S]+)$/.exec(entry)
+    if (!match || match[3] !== '0') return false
+    const snapshot = snapshotWorktreeFile(worktreePath, match[4]!, match[1]!)
+    if (snapshot === null || snapshot.mode !== match[1] || snapshot.oid !== match[2]) return false
+  }
+  return git(['ls-files', '--others', '-z'], worktreePath) === ''
+}
 
+function readStatus(worktreePath: string): { changed_files: string[]; diff_stat: string; has_changes: boolean } {
+  // Do NOT use `git status --porcelain` or `git diff --stat HEAD`: both
+  // compare the working tree against the index/HEAD and invoke clean/smudge
+  // filters defined in .gitattributes, which can execute arbitrary commands.
+  // Instead, use plumbing that does not invoke filters:
+  //   - diff-files: index vs working tree (stat-based, no clean filters)
+  //   - diff-index --cached: index vs HEAD (no working tree, no filters)
+  //   - ls-files --others: untracked files (no filters)
+  const changedFiles: string[] = []
+  const diffFiles = gitRaw(['diff-files', '--name-only', '-z', '--no-ext-diff', '--no-textconv', '--'], worktreePath)
+  for (const filePath of parseNulPaths(Buffer.from(diffFiles, 'utf8'))) {
+    if (!changedFiles.includes(filePath)) changedFiles.push(filePath)
+  }
+  const diffIndex = gitRaw(['diff-index', '--cached', '--name-only', '-z', '--no-ext-diff', '--no-textconv', 'HEAD', '--'], worktreePath)
+  for (const filePath of parseNulPaths(Buffer.from(diffIndex, 'utf8'))) {
+    if (!changedFiles.includes(filePath)) changedFiles.push(filePath)
+  }
+  const untracked = gitRaw(['ls-files', '--others', '-z'], worktreePath)
+  for (const filePath of parseNulPaths(Buffer.from(untracked, 'utf8'))) {
+    if (!changedFiles.includes(filePath)) changedFiles.push(filePath)
+  }
   return {
     changed_files: changedFiles,
-    diff_stat: diffStat,
+    diff_stat: '',
     has_changes: changedFiles.length > 0,
   }
 }
@@ -339,19 +521,20 @@ function isTargetWorktreeClean(projectRoot: string): boolean {
 function checkpointWorktree(worktreePath: string, taskId: string): void {
   if (!readStatus(worktreePath).has_changes) return
 
-  git(['add', '-A', '--'], worktreePath)
+  stageAllWithoutFilters(worktreePath)
   if (gitSucceeds(['diff', '--cached', '--quiet', '--exit-code'], worktreePath)) {
     throw new Error('worktree changes could not be staged for checkpoint')
   }
 
-  git([
-    '-c', 'commit.gpgSign=false',
-    '-c', 'user.name=OpenCode Workflows',
-    '-c', 'user.email=opencode-workflows@localhost',
-    'commit', '--no-verify', '-m', `chore(delegate): checkpoint ${taskId}`,
-  ], worktreePath)
+  // Use commit-tree + update-ref to avoid invoking clean/smudge filters.
+  const headCommit = git(['rev-parse', '--verify', 'HEAD^{commit}'], worktreePath)
+  const treeOid = git(['write-tree'], worktreePath)
+  validateOid(treeOid, 'checkpoint tree')
+  const commitOid = gitRaw(['commit-tree', treeOid, '-p', headCommit, '-m', `chore(delegate): checkpoint ${taskId}`], worktreePath).trim()
+  validateOid(commitOid, 'checkpoint commit')
+  git(['update-ref', 'HEAD', commitOid, headCommit], worktreePath)
 
-  if (readStatus(worktreePath).has_changes) {
+  if (!isWorktreeCleanAfterCommit(worktreePath, commitOid)) {
     throw new Error('worktree changed while its checkpoint commit was being created')
   }
 }
@@ -396,19 +579,34 @@ export function createManagedWorktree(
 
   const worktreePath = path.join(getWorktreeDir(realProjectRoot), worktreeName)
   if (fs.existsSync(worktreePath)) throw new Error(`worktree path already exists: ${worktreePath}`)
-  git(['worktree', 'add', '-b', branchName, worktreePath, baseBranch], realProjectRoot)
+  const baseCommit = git(['rev-parse', '--verify', `refs/heads/${baseBranch}^{commit}`], realProjectRoot)
+  git(['worktree', 'add', '--no-checkout', '-b', branchName, worktreePath, baseCommit], realProjectRoot)
   try {
+    if (git(['rev-parse', '--verify', `refs/heads/${branchName}^{commit}`], realProjectRoot) !== baseCommit) {
+      throw new Error('new managed worktree branch does not match its expected base commit')
+    }
+    const indexPath = safeGitIndexPath(worktreePath)
+    updateWorktreeWithoutRepositoryDrivers(realProjectRoot, indexPath, worktreePath, ['read-tree', '--reset', '-u', baseCommit])
     return inspectManagedWorktree(realProjectRoot, worktreePath, worktreeName, branchName)
   } catch (error) {
+    const cleanupErrors: unknown[] = []
     try {
       git(['worktree', 'remove', '--force', worktreePath], realProjectRoot)
-    } catch {
-      // Best-effort rollback retains the original inspection failure.
+    } catch (removeError) {
+      try {
+        fs.rmSync(worktreePath, { recursive: true, force: true })
+        git(['worktree', 'prune'], realProjectRoot)
+      } catch (fallbackError) {
+        cleanupErrors.push(removeError, fallbackError)
+      }
     }
     try {
-      git(['branch', '-D', branchName], realProjectRoot)
-    } catch {
-      // Best-effort rollback retains the original inspection failure.
+      git(['update-ref', '-d', `refs/heads/${branchName}`, baseCommit], realProjectRoot)
+    } catch (branchError) {
+      cleanupErrors.push(branchError)
+    }
+    if (cleanupErrors.length > 0) {
+      throw new AggregateError(cleanupErrors, `managed worktree rollback was incomplete for ${worktreePath}`, { cause: error })
     }
     throw error
   }
@@ -440,7 +638,7 @@ export function inspectManagedWorktree(
   const branchCommit = git(['rev-parse', '--verify', `refs/heads/${branch}^{commit}`], realProjectRoot)
   if (headCommit !== branchCommit) throw new Error('managed worktree HEAD does not match its branch ref')
   const status = readStatus(realWorktreePath)
-  const hasConflicts = gitRaw(['diff', '--name-only', '--diff-filter=U', '-z'], realWorktreePath)
+  const hasConflicts = gitRaw(['ls-files', '--unmerged', '-z'], realWorktreePath)
     .split('\0')
     .some(Boolean)
 
@@ -448,7 +646,7 @@ export function inspectManagedWorktree(
   const finalHeadCommit = git(['rev-parse', '--verify', 'HEAD^{commit}'], realWorktreePath)
   const finalBranchCommit = git(['rev-parse', '--verify', `refs/heads/${expectedBranch}^{commit}`], realProjectRoot)
   const finalStatus = readStatus(realWorktreePath)
-  const finalHasConflicts = gitRaw(['diff', '--name-only', '--diff-filter=U', '-z'], realWorktreePath)
+  const finalHasConflicts = gitRaw(['ls-files', '--unmerged', '-z'], realWorktreePath)
     .split('\0')
     .some(Boolean)
   const finalCommonDirectory = resolveGitPath(realWorktreePath, git(['rev-parse', '--git-common-dir'], realWorktreePath))
@@ -490,7 +688,7 @@ export function inspectManagedWorktree(
  * worktree. Hooks are intentionally honored. The returned tree SHA-256 binds
  * the repository's native tree OID without assuming its object format.
  */
-export function checkpointManagedWorktree(
+function checkpointManagedWorktreeUnlocked(
   projectRoot: string,
   worktreePath: string,
   expectedName: string,
@@ -516,7 +714,7 @@ export function checkpointManagedWorktree(
     }
   }
 
-  git(['add', '-A', '--'], before.path)
+  stageAllWithoutFilters(before.path)
   if (gitSucceeds(['diff', '--cached', '--quiet', '--exit-code', '--'], before.path)) {
     throw new Error('managed worktree changes could not be staged for checkpoint')
   }
@@ -524,15 +722,22 @@ export function checkpointManagedWorktree(
     gitRaw(['diff', '--cached', '--no-ext-diff', '--no-textconv', '--stat=120,200', '--'], before.path),
     MAX_DIFF_METADATA_BYTES,
   )
-  git([
-    '-c', 'commit.gpgSign=false',
-    '-c', 'user.name=OpenCode Workflows',
-    '-c', 'user.email=opencode-workflows@localhost',
-    'commit', '-m', `chore(epic): checkpoint ${checkpointId}`,
-  ], before.path)
-
+  // Use commit-tree + update-ref instead of `git commit` to avoid invoking
+  // clean/smudge filters that may be defined in .gitattributes.
+  const stagedTreeOid = git(['write-tree'], before.path)
+  validateOid(stagedTreeOid, 'checkpoint tree')
+  const commitOid = gitRaw(['commit-tree', stagedTreeOid, '-p', before.head_commit, '-m', `chore(epic): checkpoint ${checkpointId}`], before.path).trim()
+  validateOid(commitOid, 'checkpoint commit')
+  git(['update-ref', `refs/heads/${expectedBranch}`, commitOid, before.head_commit], projectRoot)
+  // Read the new commit's tree into the index so the index matches HEAD.
+  // The index already matches the new commit because we wrote the tree from
+  // it. We just need to verify there are no untracked files and the index
+  // matches the commit.
   const after = inspectManagedWorktree(projectRoot, before.path, expectedName, expectedBranch)
-  if (after.has_changes || after.has_conflicts) {
+  if (after.has_conflicts) {
+    throw new Error('managed worktree has unresolved conflicts after checkpoint')
+  }
+  if (!isWorktreeCleanAfterCommit(before.path, commitOid)) {
     throw new Error('managed worktree changed while its checkpoint commit was being created')
   }
   const treeOid = git(['rev-parse', '--verify', `${after.head_commit}^{tree}`], after.path)
@@ -546,6 +751,22 @@ export function checkpointManagedWorktree(
     diff_stat_truncated: diffMetadata.truncated,
     created_commit: true,
   }
+}
+
+export function checkpointManagedWorktree(
+  projectRoot: string,
+  worktreePath: string,
+  expectedName: string,
+  expectedBranch: string,
+  checkpointId: string,
+): ManagedWorktreeCheckpoint {
+  return withRepositoryOperationLock(projectRoot, () => checkpointManagedWorktreeUnlocked(
+    projectRoot,
+    worktreePath,
+    expectedName,
+    expectedBranch,
+    checkpointId,
+  ))
 }
 
 /** Produce one bounded, byte-exact patch for an immutable commit range. */
@@ -566,8 +787,9 @@ export function createManagedReviewPatch(
   }
 
   const before = inspectManagedWorktree(projectRoot, worktreePath, expectedName, expectedBranch)
-  if (before.has_changes || before.has_conflicts) throw new Error('review patch requires a clean managed worktree')
+  if (before.has_conflicts) throw new Error('review patch requires a worktree without conflicts')
   if (before.head_commit !== checkpointCommit) throw new Error('managed worktree HEAD does not equal the reviewed checkpoint')
+  if (!isWorktreeCleanAfterCommit(worktreePath, checkpointCommit)) throw new Error('review patch requires a clean managed worktree')
   if (!managedCommitIsAncestor(projectRoot, baseCommit, checkpointCommit)) {
     throw new Error('reviewed checkpoint is not descended from its bound base commit')
   }
@@ -586,10 +808,13 @@ export function createManagedReviewPatch(
   }
 
   const after = inspectManagedWorktree(projectRoot, before.path, expectedName, expectedBranch)
-  if (after.head_commit !== checkpointCommit || after.has_changes || after.has_conflicts
+  if (after.head_commit !== checkpointCommit || after.has_conflicts
     || after.directory_dev !== before.directory_dev || after.directory_ino !== before.directory_ino
     || after.git_common_directory_dev !== before.git_common_directory_dev
     || after.git_common_directory_ino !== before.git_common_directory_ino) {
+    throw new Error('managed worktree changed while its review patch was being created')
+  }
+  if (!isWorktreeCleanAfterCommit(before.path, checkpointCommit)) {
     throw new Error('managed worktree changed while its review patch was being created')
   }
   return {
@@ -610,8 +835,13 @@ export function removeManagedWorktree(
   expectedBranch: string,
 ): void {
   const snapshot = inspectManagedWorktree(projectRoot, worktreePath, expectedName, expectedBranch)
-  if (snapshot.has_changes || snapshot.has_conflicts) throw new Error('managed worktree with retained changes or conflicts cannot be removed')
+  if (snapshot.has_conflicts) throw new Error('managed worktree with unresolved conflicts cannot be removed')
+  if (!isWorktreeCleanAfterCommit(snapshot.path, snapshot.head_commit)) throw new Error('managed worktree with retained changes cannot be removed')
   const realProjectRoot = resolveProjectRoot(projectRoot)
+  const currentBranchTip = git(['rev-parse', '--verify', `refs/heads/${snapshot.branch}^{commit}`], realProjectRoot)
+  if (currentBranchTip !== snapshot.head_commit) {
+    throw new Error('managed branch advanced concurrently and cannot be removed')
+  }
   git(['worktree', 'remove', snapshot.path], realProjectRoot)
   git(['update-ref', '-d', `refs/heads/${snapshot.branch}`, snapshot.head_commit], realProjectRoot)
 }
@@ -644,6 +874,19 @@ export function managedCommitIsRetainedByAnotherBranch(
   return containingBranches.some(branch => branch !== `refs/heads/${excludedBranch}`)
 }
 
+/** Pin reviewed integration evidence before deleting its attempt branch. */
+export function retainManagedCommit(projectRoot: string, commit: string, identity: string): string {
+  validateOid(commit, 'retained commit')
+  const realProjectRoot = resolveProjectRoot(projectRoot)
+  const retentionRef = `refs/opencode-workflows/retained/${sha256Hex(`${identity}\0${commit}`).slice(0, 40)}`
+  const existing = gitSucceeds(['show-ref', '--verify', '--quiet', retentionRef], realProjectRoot)
+    ? git(['rev-parse', '--verify', `${retentionRef}^{commit}`], realProjectRoot)
+    : null
+  if (existing !== null && existing !== commit) throw new Error('retention ref points to a different commit')
+  if (existing === null) git(['update-ref', retentionRef, commit, ''], realProjectRoot)
+  return retentionRef
+}
+
 /**
  * Create a new git worktree for a delegation task.
  *
@@ -659,6 +902,7 @@ export function createWorktree(
   workflowId: string,
   provider: DelegationProvider = 'claude',
 ): WorktreeState | null {
+  let created: { projectRoot: string; worktreePath: string; branchName: string; baseCommit: string } | null = null
   try {
     validateSlug(taskId, 'task ID')
     validateSlug(workflowId, 'workflow ID')
@@ -676,7 +920,11 @@ export function createWorktree(
       throw new Error(`worktree path already exists: ${worktreePath}`)
     }
 
-    git(['worktree', 'add', '-b', branchName, worktreePath, baseBranch], realProjectRoot)
+    const baseCommit = git(['rev-parse', '--verify', `refs/heads/${baseBranch}^{commit}`], realProjectRoot)
+    git(['worktree', 'add', '--no-checkout', '-b', branchName, worktreePath, baseCommit], realProjectRoot)
+    created = { projectRoot: realProjectRoot, worktreePath, branchName, baseCommit }
+    const indexPath = safeGitIndexPath(worktreePath)
+    updateWorktreeWithoutRepositoryDrivers(realProjectRoot, indexPath, worktreePath, ['read-tree', '--reset', '-u', baseCommit])
     const realWorktreePath = resolveManagedWorktree(realProjectRoot, worktreePath)
 
     console.error(`[worktree-manager] created worktree: ${realWorktreePath} on branch ${branchName}`)
@@ -691,6 +939,22 @@ export function createWorktree(
       merged_at: null,
     }
   } catch (err) {
+    if (created !== null) {
+      try {
+        try {
+          git(['worktree', 'remove', '--force', created.worktreePath], created.projectRoot)
+        } catch {
+          fs.rmSync(created.worktreePath, { recursive: true, force: true })
+          git(['worktree', 'prune'], created.projectRoot)
+        }
+        const branchRef = `refs/heads/${created.branchName}`
+        if (gitSucceeds(['show-ref', '--verify', '--quiet', branchRef], created.projectRoot)) {
+          git(['update-ref', '-d', branchRef, created.baseCommit], created.projectRoot)
+        }
+      } catch (cleanupError) {
+        throw new Error(`worktree creation failed and rollback was incomplete for ${created.worktreePath}: ${cleanupError}`, { cause: err })
+      }
+    }
     console.error(`[worktree-manager] failed to create worktree for task ${taskId}: ${err}`)
     return null
   }
@@ -709,9 +973,10 @@ export function removeWorktree(
     const realProjectRoot = resolveProjectRoot(projectRoot)
     const realWorktreePath = resolveManagedWorktree(realProjectRoot, worktreePath)
     const branch = assertManagedBranch(realProjectRoot, realWorktreePath)
+    const branchHead = git(['rev-parse', '--verify', `refs/heads/${branch}^{commit}`], realProjectRoot)
 
     if (!options.force) {
-      if (readStatus(realWorktreePath).has_changes) {
+      if (!isWorktreeCleanAfterCommit(realWorktreePath, git(['rev-parse', '--verify', 'HEAD^{commit}'], realWorktreePath))) {
         throw new Error('worktree has uncommitted changes')
       }
       if (!branchWasMerged(realProjectRoot, branch)) {
@@ -726,7 +991,7 @@ export function removeWorktree(
     console.error(`[worktree-manager] removed worktree: ${realWorktreePath}`)
 
     try {
-      git(['branch', options.force ? '-D' : '-d', branch], realProjectRoot)
+      git(['update-ref', '-d', `refs/heads/${branch}`, branchHead], realProjectRoot)
       console.error(`[worktree-manager] deleted branch: ${branch}`)
     } catch (err) {
       console.error(`[worktree-manager] warning: could not delete branch ${branch}: ${err}`)
@@ -795,7 +1060,7 @@ export function listWorktrees(projectRoot: string): WorktreeState[] {
  * Checkpoint every task edit, then merge only the committed delegation branch
  * into the clean target worktree using --no-ff.
  */
-export function mergeWorktree(
+function mergeWorktreeUnlocked(
   projectRoot: string,
   worktreePath: string,
   targetBranch: string,
@@ -806,6 +1071,9 @@ export function mergeWorktree(
   let realProjectRoot: string
   let realWorktreePath: string
   let branch: string
+  let branchHead: string
+  let targetHead: string
+  let targetIndexPath: string
 
   try {
     realProjectRoot = resolveProjectRoot(projectRoot)
@@ -825,18 +1093,34 @@ export function mergeWorktree(
     if (!taskId) throw new Error(`invalid delegation branch: ${branch}`)
     checkpointWorktree(realWorktreePath, taskId)
 
-    const branchHead = git(['rev-parse', '--verify', `refs/heads/${branch}^{commit}`], realProjectRoot)
+    branchHead = git(['rev-parse', '--verify', `refs/heads/${branch}^{commit}`], realProjectRoot)
     const worktreeHead = git(['rev-parse', '--verify', 'HEAD^{commit}'], realWorktreePath)
-    if (branchHead !== worktreeHead || readStatus(realWorktreePath).has_changes) {
+    if (branchHead !== worktreeHead || !isWorktreeCleanAfterCommit(realWorktreePath, worktreeHead)) {
       throw new Error('delegation branch is not a clean, committed snapshot of the worktree')
     }
 
+    targetHead = git(['rev-parse', '--verify', `refs/heads/${targetBranch}^{commit}`], realProjectRoot)
     const aheadCount = Number.parseInt(
-      git(['rev-list', '--count', `${targetBranch}..${branch}`], realProjectRoot),
+      git(['rev-list', '--count', `${targetHead}..${branchHead}`], realProjectRoot),
       10,
     )
     if (!Number.isFinite(aheadCount) || aheadCount === 0) {
       if (options.allowNoop) {
+        const finalBranch = readWorktreeBranch(realProjectRoot)
+        const finalHead = git(['rev-parse', '--verify', 'HEAD^{commit}'], realProjectRoot)
+        const finalTarget = git(['rev-parse', '--verify', `refs/heads/${targetBranch}^{commit}`], realProjectRoot)
+        const finalSource = git(['rev-parse', '--verify', `refs/heads/${branch}^{commit}`], realProjectRoot)
+        const finalWorktreeHead = git(['rev-parse', '--verify', 'HEAD^{commit}'], realWorktreePath)
+        const finalAheadCount = Number.parseInt(
+          git(['rev-list', '--count', `${finalTarget}..${finalSource}`], realProjectRoot),
+          10,
+        )
+        if (finalBranch !== targetBranch || finalHead !== targetHead || finalTarget !== targetHead
+          || finalSource !== branchHead || finalWorktreeHead !== branchHead || finalAheadCount !== 0
+          || !isWorktreeCleanAfterCommit(realWorktreePath, finalWorktreeHead)
+          || !isTargetWorktreeClean(realProjectRoot)) {
+          throw new Error('target worktree changed before explicit no-op acceptance')
+        }
         console.error(`[worktree-manager] accepted explicit no-op for ${realWorktreePath}`)
         return { success: true, conflicts: [], merge_commit: null }
       }
@@ -846,40 +1130,87 @@ export function mergeWorktree(
     if (!isTargetWorktreeClean(realProjectRoot)) {
       throw new Error('target worktree changed before merge')
     }
+    if (git(['rev-parse', '--verify', `refs/heads/${targetBranch}^{commit}`], realProjectRoot) !== targetHead) {
+      throw new Error('target branch advanced before merge')
+    }
+    targetIndexPath = safeGitIndexPath(realProjectRoot)
   } catch (err) {
     console.error(`[worktree-manager] refused to merge worktree ${worktreePath}: ${err}`)
     return failure()
   }
 
+  let mergeTree: ReturnType<typeof computeSandboxedMergeTree>
   try {
-    git(
-      ['merge', '--no-ff', '-m', `merge: delegate/${parseDelegationBranch(branch)?.taskId}`, branch],
-      realProjectRoot,
-    )
-  } catch (err) {
-    console.error(`[worktree-manager] merge failed for branch ${branch}: ${err}`)
+    mergeTree = computeSandboxedMergeTree(realProjectRoot, targetHead, branchHead)
+  } catch (error) {
+    console.error(`[worktree-manager] merge-tree computation failed for branch ${branch}: ${error}`)
+    return failure()
+  }
+  if (mergeTree.tree_oid === null) return failure(mergeTree.conflict_paths)
+  if (git(['rev-parse', '--verify', `refs/heads/${targetBranch}^{commit}`], realProjectRoot) !== targetHead
+    || git(['rev-parse', '--verify', 'HEAD^{commit}'], realProjectRoot) !== targetHead
+    || git(['rev-parse', '--verify', `refs/heads/${branch}^{commit}`], realProjectRoot) !== branchHead
+    || git(['rev-parse', '--verify', 'HEAD^{commit}'], realWorktreePath) !== branchHead
+    || !isTargetWorktreeClean(realProjectRoot)
+    || !isWorktreeCleanAfterCommit(realWorktreePath, branchHead)) {
+    return failure()
+  }
+  for (const object of mergeTree.generated_objects) {
+    const persistedObject = gitWithInput(['hash-object', '-w', '-t', object.type, '--stdin'], realProjectRoot, object.bytes)
+    if (persistedObject !== object.oid) return failure()
+  }
+  if (!gitSucceeds(['cat-file', '-e', `${mergeTree.tree_oid}^{tree}`], realProjectRoot)) return failure()
 
-    let conflicts: string[] = []
-    try {
-      conflicts = gitRaw(['diff', '--name-only', '--diff-filter=U', '-z'], realProjectRoot)
-        .split('\0')
-        .filter(Boolean)
-    } catch {
-      // Best-effort conflict reporting.
+  const mergeCommit = gitRaw([
+    'commit-tree', mergeTree.tree_oid,
+    '-p', targetHead,
+    '-p', branchHead,
+    '-m', `merge: delegate/${parseDelegationBranch(branch)?.taskId}`,
+  ], realProjectRoot).trim()
+  validateOid(mergeCommit, 'delegation merge commit')
+  try {
+    git(['update-ref', `refs/heads/${targetBranch}`, mergeCommit, targetHead], realProjectRoot)
+  } catch (error) {
+    const currentTarget = git(['rev-parse', '--verify', `refs/heads/${targetBranch}^{commit}`], realProjectRoot)
+    if (currentTarget === mergeCommit) {
+      throw new WorktreeMergeAmbiguousError('delegation merge publication outcome is ambiguous', mergeCommit)
     }
-
-    try {
-      git(['merge', '--abort'], realProjectRoot)
-    } catch (abortError) {
-      console.error(`[worktree-manager] warning: could not abort failed merge: ${abortError}`)
-    }
-
-    return failure(conflicts)
+    console.error(`[worktree-manager] target branch compare-and-swap failed for ${branch}: ${error}`)
+    return failure()
   }
 
-  const mergeCommit = git(['rev-parse', '--verify', 'HEAD^{commit}'], realProjectRoot)
+  try {
+    if (safeGitIndexPath(realProjectRoot) !== targetIndexPath) throw new Error('Git index path changed before worktree synchronization')
+    updateWorktreeWithoutRepositoryDrivers(
+      realProjectRoot,
+      targetIndexPath,
+      realProjectRoot,
+      ['read-tree', '-m', '-u', targetHead, mergeCommit],
+    )
+  } catch (error) {
+    throw new WorktreeMergeAmbiguousError(`published merge worktree synchronization failed: ${error}`, mergeCommit)
+  }
+  const mergeParents = git(['rev-list', '--parents', '-n', '1', mergeCommit], realProjectRoot).split(/\s+/)
+  if (mergeParents.length !== 3 || mergeParents[1] !== targetHead || mergeParents[2] !== branchHead) {
+    throw new WorktreeMergeAmbiguousError('published merge does not preserve the exact reviewed parents', mergeCommit)
+  }
+  const finalBranch = readWorktreeBranch(realProjectRoot)
+  const finalHead = git(['rev-parse', '--verify', 'HEAD^{commit}'], realProjectRoot)
+  const finalTarget = git(['rev-parse', '--verify', `refs/heads/${targetBranch}^{commit}`], realProjectRoot)
+  if (finalBranch !== targetBranch || finalHead !== mergeCommit || finalTarget !== mergeCommit || !isTargetWorktreeClean(realProjectRoot)) {
+    throw new WorktreeMergeAmbiguousError('published merge target postconditions are uncertain', mergeCommit)
+  }
   console.error(`[worktree-manager] merged ${branch} into ${targetBranch}: ${mergeCommit}`)
   return { success: true, conflicts: [], merge_commit: mergeCommit }
+}
+
+export function mergeWorktree(
+  projectRoot: string,
+  worktreePath: string,
+  targetBranch: string,
+  options: MergeWorktreeOptions = {},
+): { success: boolean; conflicts: string[]; merge_commit: string | null } {
+  return withRepositoryOperationLock(projectRoot, () => mergeWorktreeUnlocked(projectRoot, worktreePath, targetBranch, options))
 }
 
 /**

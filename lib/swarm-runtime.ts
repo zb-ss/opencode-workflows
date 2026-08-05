@@ -493,6 +493,12 @@ export class SwarmRuntime {
     this.scheduled.add(controlKey)
     void this.queue.enqueue({ batchKey: key, taskId: task.id }, task.provider, async (item) => {
       await this.runTask(item.batchKey, item.taskId)
+    }, () => {
+      if (task.sessionId || terminal(task.status)) return
+      task.status = 'starting'
+      task.startedAt = this.now()
+      task.lastProgressAt = task.startedAt
+      this.persistCaller(this.batches.get(key)!.callerSessionId)
     }).catch((error) => {
       const current = this.task(key, task.id)
       if (current && !terminal(current.status)) this.finalize(key, current, 'failed', errorText(error))

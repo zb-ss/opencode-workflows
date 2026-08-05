@@ -156,6 +156,9 @@ export interface WorkflowEngineOptions {
   state?: AutomaticWorkflowState
   schedulingEnabled?: boolean
   autonomy?: AutonomyProfile
+  sessionOperationTimeoutMs: number
+  onSessionCreated?: (sessionID: string) => void | Promise<void>
+  onStateChanged?: (state: AutomaticWorkflowState) => void
   now?: () => number
 }
 
@@ -532,6 +535,20 @@ function normalizeAutomaticWorkflowState(parsed: unknown): unknown {
   const budget = candidate.budget as Record<string, unknown>
   const limits = budget.limits as Record<string, unknown> ?? {}
   const usage = budget.usage as Record<string, unknown> ?? {}
+  const legacyHasRunningStage = candidate.schema_version === 1
+    && candidate.stages !== null
+    && typeof candidate.stages === 'object'
+    && !Array.isArray(candidate.stages)
+    && Object.values(candidate.stages).some((stage) => (
+      stage !== null
+      && typeof stage === 'object'
+      && !Array.isArray(stage)
+      && (stage as Record<string, unknown>).status === 'running'
+    ))
+  const legacyActiveTimestamp = candidate.schema_version === 1
+    && (candidate.status === 'running' || (candidate.status === 'paused' && legacyHasRunningStage))
+    ? candidate.updated_at
+    : null
 
   // v1 to v2 migration: map max_wall_time_ms -> max_calendar_age_ms, add active-time fields, make budget fields nullable
   const migratedLimits = { ...limits }
@@ -552,8 +569,8 @@ function normalizeAutomaticWorkflowState(parsed: unknown): unknown {
       'bounded_read_bytes', 'bounded_write_bytes', 'validation_runs',
     ]) as Record<string, unknown>,
     active_time_ms: usage.active_time_ms ?? 0,
-    active_interval_started_at: usage.active_interval_started_at ?? null,
-    last_active_checkpoint_at: usage.last_active_checkpoint_at ?? null,
+    active_interval_started_at: usage.active_interval_started_at ?? legacyActiveTimestamp,
+    last_active_checkpoint_at: usage.last_active_checkpoint_at ?? legacyActiveTimestamp,
   }
 
   return {
@@ -596,8 +613,12 @@ export function validateAutomaticWorkflowState(input: unknown): asserts input is
   }
   dateTime(state.created_at, 'automatic workflow state created_at')
   dateTime(state.updated_at, 'automatic workflow state updated_at')
+  const createdAt = Date.parse(state.created_at as string)
+  const updatedAt = Date.parse(state.updated_at as string)
+  if (updatedAt < createdAt) throw new Error('automatic workflow updated_at cannot precede created_at')
   const stages = objectValue(state.stages, 'automatic workflow state stages')
   if (Object.keys(stages).length === 0) throw new Error('automatic workflow state has no stages')
+  let hasRunningStage = false
   for (const [id, inputStage] of Object.entries(stages)) {
     identifier(id, 'automatic workflow stage ID')
     const stage = objectValue(inputStage, `automatic workflow stage ${id}`)
@@ -607,6 +628,7 @@ export function validateAutomaticWorkflowState(input: unknown): asserts input is
     if (!['pending', 'running', 'passed', 'failed', 'blocked'].includes(String(stage.status))) {
       throw new Error(`automatic workflow stage ${id} has invalid status`)
     }
+    hasRunningStage ||= stage.status === 'running'
     nonNegativeInteger(stage.attempt, `automatic workflow stage ${id} attempt`)
     nullableString(stage.session_id, `automatic workflow stage ${id} session_id`)
     nonEmptyString(stage.agent, `automatic workflow stage ${id} agent`)
@@ -639,11 +661,23 @@ export function validateAutomaticWorkflowState(input: unknown): asserts input is
   if (!Number.isFinite(usage.cost_usd) || Number(usage.cost_usd) < 0) {
     throw new Error('automatic workflow usage cost_usd must be a non-negative number')
   }
-  if (usage.active_interval_started_at !== null && typeof usage.active_interval_started_at !== 'string') {
-    throw new Error('automatic workflow usage active_interval_started_at must be a string or null')
+  dateTime(usage.active_interval_started_at, 'automatic workflow usage active_interval_started_at', true)
+  dateTime(usage.last_active_checkpoint_at, 'automatic workflow usage last_active_checkpoint_at', true)
+  const intervalStartedAt = usage.active_interval_started_at as string | null
+  const lastCheckpointAt = usage.last_active_checkpoint_at as string | null
+  if ((intervalStartedAt === null) !== (lastCheckpointAt === null)) {
+    throw new Error('automatic workflow active-time interval timestamps must both be null or both be populated')
   }
-  if (usage.last_active_checkpoint_at !== null && typeof usage.last_active_checkpoint_at !== 'string') {
-    throw new Error('automatic workflow usage last_active_checkpoint_at must be a string or null')
+  if (intervalStartedAt !== null && lastCheckpointAt !== null && Date.parse(lastCheckpointAt) < Date.parse(intervalStartedAt)) {
+    throw new Error('automatic workflow active-time checkpoint cannot precede its interval start')
+  }
+  if (intervalStartedAt !== null && lastCheckpointAt !== null
+    && (Date.parse(intervalStartedAt) < createdAt || Date.parse(lastCheckpointAt) > updatedAt)) {
+    throw new Error('automatic workflow active-time interval must stay within the workflow update range')
+  }
+  const requiresOpenInterval = state.status === 'running' || (state.status === 'paused' && hasRunningStage)
+  if (requiresOpenInterval !== (intervalStartedAt !== null)) {
+    throw new Error('automatic workflow active-time interval is inconsistent with workflow and stage lifecycle state')
   }
   const messages = objectValue(usage.messages, 'automatic workflow usage messages')
   for (const [id, inputMessage] of Object.entries(messages)) {
@@ -691,6 +725,13 @@ function cloneState(state: AutomaticWorkflowState): AutomaticWorkflowState {
   return structuredClone(state)
 }
 
+interface WorkflowCreationTracker {
+  operation: Promise<Pick<Session, 'id'>>
+  settled: Promise<void>
+  accept(): void
+  abandon(): void
+}
+
 export class WorkflowEngine {
   private readonly adapter: WorkflowSessionAdapter
   private readonly definition: WorkflowDefinition
@@ -701,6 +742,9 @@ export class WorkflowEngine {
   private readonly configuredLimits: AutomationLimits
   private readonly validationOperations: string[]
   private readonly autonomy: AutonomyProfile
+  private readonly sessionOperationTimeoutMs: number
+  private readonly onSessionCreated?: (sessionID: string) => void | Promise<void>
+  private readonly onStateChanged?: (state: AutomaticWorkflowState) => void
   private readonly now: () => number
   private readonly topologicalOrder: string[]
   private state: AutomaticWorkflowState | null
@@ -709,6 +753,10 @@ export class WorkflowEngine {
   private wallTimer: ReturnType<typeof setTimeout> | null = null
   private wallAbortAttempted = false
   private readonly directPromptSessions = new Set<string>()
+  private readonly pendingCreations = new Set<WorkflowCreationTracker>()
+  private disposalPromise: Promise<void> | null = null
+  private disposalComplete = false
+  private disposalCancellationRequested = false
   private disposed = false
   private readonly boundedIoLedger: BoundedIoLedger
 
@@ -723,6 +771,9 @@ export class WorkflowEngine {
     this.validationOperations = [...new Set(options.validationOperations ?? [])].map((operation, index) =>
       identifier(operation, `validation operation ${index}`),
     ).sort()
+    this.sessionOperationTimeoutMs = positiveInteger(options.sessionOperationTimeoutMs, 'session operation timeout')
+    this.onSessionCreated = options.onSessionCreated
+    this.onStateChanged = options.onStateChanged
     this.now = options.now ?? Date.now
     this.topologicalOrder = topologicalStageIds(this.definition)
     this.schedulingEnabled = options.schedulingEnabled ?? true
@@ -745,7 +796,10 @@ export class WorkflowEngine {
       }
       if (this.state.definition_id !== this.definition.id) throw new Error('saved state does not match the workflow definition')
       this.assertStateStages()
-      this.state.budget.limits = this.configuredLimits
+      // Preserve persisted budget limits until explicit authorized resume.
+      // The constructor must NOT replace persisted limits with current
+      // configuration, as that could relax enforcement before the owner
+      // explicitly authorizes resume.
       if (this.state.status === 'running'
         || (this.state.status === 'paused' && Object.values(this.state.stages).some((stage) => stage.status === 'running'))) {
         this.scheduleWallTimer()
@@ -812,6 +866,7 @@ export class WorkflowEngine {
         },
       }
       this.persistDefinition()
+      this.openActiveInterval()
       this.persist()
       this.scheduleWallTimer()
       await this.schedule()
@@ -834,6 +889,36 @@ export class WorkflowEngine {
       this.persist()
       this.scheduleWallTimer()
       await this.reconcileInternal()
+      await this.schedule()
+      return cloneState(this.requiredState())
+    })
+  }
+
+  retryFailed(limits?: AutomationLimits): Promise<AutomaticWorkflowState> {
+    return this.serial(async () => {
+      this.assertNotDisposed()
+      const state = this.requiredState()
+      if (state.status !== 'failed') throw new Error('only a failed automatic workflow can be retried')
+      let reset = false
+      for (const stage of Object.values(state.stages)) {
+        if (stage.status !== 'failed' && stage.status !== 'blocked') continue
+        stage.status = 'pending'
+        stage.session_id = null
+        stage.started_at = null
+        stage.completed_at = null
+        stage.result = null
+        stage.error = null
+        reset = true
+      }
+      if (!reset) throw new Error('failed automatic workflow has no retryable stages')
+      if (limits) state.budget.limits = validateAutomationLimits(limits)
+      this.schedulingEnabled = true
+      this.wallAbortAttempted = false
+      state.status = 'running'
+      state.pause_reason = null
+      this.openActiveInterval()
+      this.persist()
+      this.scheduleWallTimer()
       await this.schedule()
       return cloneState(this.requiredState())
     })
@@ -926,27 +1011,36 @@ export class WorkflowEngine {
   cancel(): Promise<AutomaticWorkflowState> {
     return this.serial(async () => {
       this.assertNotDisposed()
-      const state = this.requiredState()
+      let state = this.requiredState()
       if (TERMINAL_WORKFLOW_STATUSES.has(state.status)) return cloneState(state)
-      const running = Object.values(state.stages).filter((stage) => stage.status === 'running' && stage.session_id)
+      await this.pauseInternal('Workflow cancellation requested by owner', true)
+      state = this.requiredState()
+      if (this.hasRunningStages()) return cloneState(state)
       const now = new Date(this.now()).toISOString()
       for (const stage of Object.values(state.stages)) {
         if (stage.status === 'pending') {
           stage.status = 'blocked'
           stage.error = 'Workflow cancelled by owner'
           stage.completed_at = now
-        } else if (stage.status === 'running') {
-          stage.status = 'failed'
-          stage.error = 'Workflow cancelled by owner'
-          stage.completed_at = now
         }
       }
       state.status = 'cancelled'
       state.pause_reason = null
+      this.schedulingEnabled = false
       this.clearWallTimer()
+      this.closeActiveInterval()
       this.persist()
-      await Promise.all(running.map((stage) => this.adapter.abort(stage.session_id!).catch(() => undefined)))
       return cloneState(state)
+    })
+  }
+
+  pause(reason: string): Promise<AutomaticWorkflowState> {
+    return this.serial(async () => {
+      this.assertNotDisposed()
+      const state = this.requiredState()
+      if (TERMINAL_WORKFLOW_STATUSES.has(state.status)) return cloneState(state)
+      await this.pauseInternal(reason, true)
+      return cloneState(this.requiredState())
     })
   }
 
@@ -992,15 +1086,159 @@ export class WorkflowEngine {
   }
 
   dispose(): void {
+    if (this.pendingCreations.size > 0) {
+      throw new Error('synchronous disposal cannot abandon unresolved child creation; await disposeAsync()')
+    }
     this.disposed = true
+    this.disposalComplete = true
     this.directPromptSessions.clear()
     this.clearWallTimer()
+    for (const tracker of this.pendingCreations) tracker.accept()
+  }
+
+  disposeAsync(cancelWorkflow = false): Promise<void> {
+    if (this.disposalComplete) return Promise.resolve()
+    this.disposalCancellationRequested ||= cancelWorkflow
+    if (this.disposalPromise) return this.disposalPromise
+    const disposal = this.drainForDisposal()
+      .then(() => { this.disposalComplete = true })
+      .finally(() => { this.disposalPromise = null })
+    this.disposalPromise = disposal
+    return disposal
+  }
+
+  private trackSessionCreation(stageId: string, operation: Promise<Pick<Session, 'id'>>): WorkflowCreationTracker {
+    let disposition: 'pending' | 'accepted' | 'abandoned' = 'pending'
+    let decide!: (value: 'accepted' | 'abandoned') => void
+    const decision = new Promise<'accepted' | 'abandoned'>(resolve => { decide = resolve })
+    const settle = (value: 'accepted' | 'abandoned'): void => {
+      if (disposition !== 'pending') return
+      disposition = value
+      decide(value)
+    }
+    let tracker!: WorkflowCreationTracker
+    const supervision = operation.then(async session => {
+      if (await decision === 'accepted') return
+      const state = this.requiredState()
+      const stage = state.stages[stageId]
+      let persistenceError: unknown = null
+      if (stage.session_id === null) {
+        stage.session_id = session.id
+        stage.error = 'Child session was created while the workflow runtime was disposing.'
+        state.status = 'paused'
+        state.pause_reason = 'Runtime disposal is supervising a late-created child session.'
+        try {
+          this.persistCurrentState()
+          await this.onSessionCreated?.(session.id)
+        } catch (error) { persistenceError = error }
+      }
+      try {
+        await this.abortAndVerifySession(session.id)
+      } catch (error) {
+        throw persistenceError ?? error
+      }
+      if (persistenceError !== null) throw persistenceError
+      if (stage.session_id === session.id) {
+        stage.status = 'pending'
+        stage.session_id = null
+        stage.completed_at = new Date(this.now()).toISOString()
+        stage.error = 'Workflow runtime disposed before child execution began.'
+      }
+      if (!this.hasRunningStages()) this.closeActiveInterval()
+      this.persistCurrentState()
+    }, () => undefined).finally(() => {
+      this.pendingCreations.delete(tracker)
+    })
+    tracker = {
+      operation,
+      settled: supervision,
+      accept: () => settle('accepted'),
+      abandon: () => settle('abandoned'),
+    }
+    this.pendingCreations.add(tracker)
+    void supervision.catch(() => { /* disposeAsync reports supervision failures. */ })
+    return tracker
+  }
+
+  private async abortAndVerifySession(sessionId: string): Promise<void> {
+    await this.withSessionOperationDeadline(this.adapter.abort(sessionId), 'child-session abort timed out')
+    const statuses = await this.withSessionOperationDeadline(this.adapter.statuses(), 'child-session status inspection timed out')
+    const status = statuses[sessionId]
+    if (status?.type === 'busy' || status?.type === 'retry') {
+      throw new Error(`child session ${sessionId} termination remains uncertain`)
+    }
+  }
+
+  private async drainForDisposal(): Promise<void> {
+    this.disposed = true
+    this.schedulingEnabled = false
+    this.directPromptSessions.clear()
+    this.clearWallTimer()
+    if (this.state === null) return
+
+    const state = this.requiredState()
+    if (!TERMINAL_WORKFLOW_STATUSES.has(state.status)) {
+      state.status = 'paused'
+      state.pause_reason = 'Workflow runtime is disposing.'
+      this.persistCurrentState()
+    }
+
+    const trackers = [...this.pendingCreations]
+    for (const tracker of trackers) tracker.abandon()
+    const knownSessions = Object.values(state.stages)
+      .filter(stage => stage.status === 'running' && stage.session_id !== null)
+      .map(stage => ({ stage, sessionId: stage.session_id! }))
+
+    const known = Promise.allSettled(knownSessions.map(async ({ stage, sessionId }) => {
+      await this.abortAndVerifySession(sessionId)
+      if (stage.status === 'running' && stage.session_id === sessionId) {
+        stage.status = 'pending'
+        stage.session_id = null
+        stage.completed_at = new Date(this.now()).toISOString()
+        stage.error = 'Workflow runtime disposed.'
+      }
+    }))
+    const creations = Promise.allSettled(trackers.map(tracker => tracker.settled))
+    const [knownResults, creationResults] = await this.withSessionOperationDeadline(
+      Promise.all([known, creations]),
+      'workflow disposal timed out while supervising child sessions',
+    )
+    const failures = [...knownResults, ...creationResults].filter(result => result.status === 'rejected')
+
+    if (!this.hasRunningStages()) {
+      this.closeActiveInterval()
+      if (this.disposalCancellationRequested && !TERMINAL_WORKFLOW_STATUSES.has(state.status)) {
+        const completedAt = new Date(this.now()).toISOString()
+        for (const stage of Object.values(state.stages)) {
+          if (stage.status !== 'pending') continue
+          stage.status = 'blocked'
+          stage.completed_at = completedAt
+          stage.error = 'Workflow cancelled during runtime disposal.'
+        }
+        state.status = 'cancelled'
+        state.pause_reason = null
+      }
+    }
+    this.persistCurrentState()
+    if (failures.length > 0) throw failures[0].reason
   }
 
   private serial<T>(operation: () => Promise<T>): Promise<T> {
     const result = this.operation.then(operation, operation)
     this.operation = result.then(() => undefined, () => undefined)
     return result
+  }
+
+  private async withSessionOperationDeadline<T>(operation: Promise<T>, message: string): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(message)), this.sessionOperationTimeoutMs)
+    })
+    try {
+      return await Promise.race([operation, timeout])
+    } finally {
+      if (timer !== null) clearTimeout(timer)
+    }
   }
 
   private async schedule(): Promise<void> {
@@ -1057,30 +1295,35 @@ export class WorkflowEngine {
     stage.error = null
     state.budget.usage.attempts++
     state.budget.usage.sessions++
-    if (!this.hasRunningStages()) this.openActiveInterval()
+    this.openActiveInterval()
     const candidates = this.modelCandidates(stage.agent, stageDefinition.model_tier)
     const candidate = candidates.length > 0 ? candidates[(stage.attempt - 1) % candidates.length] : undefined
     stage.model = candidate?.model ?? null
     this.persist()
 
-    try {
-      const session = await this.adapter.create(
+    const tracked = this.trackSessionCreation(stageId, Promise.resolve().then(() => this.adapter.create(
         `[${state.workflow_id}] ${stageId} (attempt ${stage.attempt})`,
         state.root_session_id,
         { agent: stage.agent, autonomy: this.autonomy },
-      )
+      )))
+    try {
+      const session = await this.withSessionOperationDeadline(tracked.operation, 'child-session creation timed out')
       if (this.disposed) {
-        await this.adapter.abort(session.id).catch(() => undefined)
         return
       }
       stage.session_id = session.id
       this.persist()
+      tracked.accept()
+      await this.onSessionCreated?.(session.id)
       this.directPromptSessions.add(session.id)
-      void this.adapter.prompt(session.id, this.stagePrompt(stageDefinition), {
-        agent: stage.agent,
-        ...(candidate ? { model: candidate } : {}),
-        format: stageResultOutputFormat(),
-      }).then(
+      void this.withSessionOperationDeadline(
+        this.adapter.prompt(session.id, this.stagePrompt(stageDefinition), {
+          agent: stage.agent,
+          ...(candidate ? { model: candidate } : {}),
+          format: stageResultOutputFormat(),
+        }),
+        'child-session structured prompt timed out',
+      ).then(
         message => this.serial(async () => {
           this.directPromptSessions.delete(session.id)
           if (this.disposed) return
@@ -1095,7 +1338,7 @@ export class WorkflowEngine {
           const status = promptHttpStatus(error)
           if (status !== null && DEFINITIVE_REQUEST_REJECTION_STATUSES.has(status)) {
             try {
-              await this.adapter.abort(session.id)
+              await this.abortAndVerifySession(session.id)
             } catch (abortError) {
               if (this.disposed) return
               await this.pauseInternal(
@@ -1113,6 +1356,7 @@ export class WorkflowEngine {
         }),
       ).catch(error => this.handleBackgroundFailure(error))
     } catch (error) {
+      tracked.abandon()
       if (this.disposed) return
       if (!stage.session_id) {
         const status = promptHttpStatus(error)
@@ -1126,7 +1370,7 @@ export class WorkflowEngine {
         return
       }
       try {
-        await this.adapter.abort(stage.session_id)
+        await this.abortAndVerifySession(stage.session_id)
       } catch (abortError) {
         if (this.disposed) return
         await this.pauseInternal(`Child-session cleanup failed during launch: ${errorText(abortError)}`, false)
@@ -1193,7 +1437,7 @@ export class WorkflowEngine {
     if (stage.status !== 'running' || stage.session_id !== sessionId) return
     let messages: Array<{ info: Message; parts: Part[] }>
     try {
-      messages = await this.adapter.messages(sessionId)
+      messages = await this.withSessionOperationDeadline(this.adapter.messages(sessionId), 'child-session message retrieval timed out')
       if (this.disposed) return
     } catch (error) {
       if (this.disposed) return
@@ -1261,7 +1505,7 @@ export class WorkflowEngine {
 
     let message: { info: Message; parts: Part[] }
     try {
-      message = await this.adapter.message(sessionId, messageId)
+      message = await this.withSessionOperationDeadline(this.adapter.message(sessionId, messageId), 'child-session message retrieval timed out')
     } catch {
       return false
     }
@@ -1383,7 +1627,7 @@ export class WorkflowEngine {
     if (running.length === 0) return
     let statuses: Record<string, SessionStatus> = {}
     try {
-      statuses = await this.adapter.statuses()
+      statuses = await this.withSessionOperationDeadline(this.adapter.statuses(), 'child-session status inspection timed out')
       if (this.disposed) return
     } catch (error) {
       if (this.disposed) return
@@ -1577,17 +1821,32 @@ export class WorkflowEngine {
 
     const results = await Promise.all(runningSessions.map(async ({ stage, sessionId }) => {
       try {
-        await this.adapter.abort(sessionId)
+        await this.withSessionOperationDeadline(this.adapter.abort(sessionId), 'child-session abort timed out')
         return { stage, sessionId, error: null }
       } catch (error) {
         return { stage, sessionId, error }
       }
     }))
     if (this.disposed) return
+    let statuses: Record<string, SessionStatus> | null = null
+    let statusError: unknown = null
+    if (results.some(result => result.error === null)) {
+      try {
+        statuses = await this.withSessionOperationDeadline(this.adapter.statuses(), 'child-session status inspection timed out')
+      } catch (error) {
+        statusError = error
+      }
+    }
+    if (this.disposed) return
     for (const result of results) {
       if (result.stage.status !== 'running' || result.stage.session_id !== result.sessionId) continue
       if (result.error) {
         result.stage.error = `${reason}; child abort failed: ${errorText(result.error)}`
+        continue
+      }
+      const observed = statuses?.[result.sessionId]
+      if (statusError !== null || observed?.type === 'busy' || observed?.type === 'retry') {
+        result.stage.error = `${reason}; child termination could not be verified${statusError === null ? '' : `: ${errorText(statusError)}`}`
         continue
       }
       result.stage.status = 'pending'
@@ -1625,11 +1884,16 @@ export class WorkflowEngine {
 
   private persist(): void {
     if (this.disposed) return
+    this.persistCurrentState()
+  }
+
+  private persistCurrentState(): void {
     const state = this.requiredState()
     state.updated_at = new Date(this.now()).toISOString()
     validateAutomaticWorkflowState(state)
     fs.mkdirSync(path.dirname(this.statePath), { recursive: true, mode: 0o700 })
     this.atomicWrite(this.statePath, state)
+    try { this.onStateChanged?.(cloneState(state)) } catch { /* The persisted engine state remains authoritative. */ }
   }
 
   private atomicWrite(filePath: string, value: unknown): void {
@@ -1691,7 +1955,7 @@ export class WorkflowEngine {
       const calendarRemaining = limits.max_calendar_age_ms - (this.now() - new Date(state.created_at).getTime())
       if (remaining === null || calendarRemaining < remaining) remaining = calendarRemaining
     }
-    if (limits.max_active_time_ms !== null && state.status === 'running') {
+    if (limits.max_active_time_ms !== null && (state.status === 'running' || (state.status === 'paused' && this.hasRunningStages()))) {
       const activeRemaining = limits.max_active_time_ms - this.computeActiveTime()
       if (remaining === null || activeRemaining < remaining) remaining = activeRemaining
     }
@@ -1703,7 +1967,7 @@ export class WorkflowEngine {
         const reason = this.exceededUsageReason()
         if (reason) await this.pauseInternal(reason, true)
         else await this.pauseInternal('Time budget exhausted', true)
-      })
+      }).catch(error => this.handleBackgroundFailure(error))
     }, Math.max(1, remaining))
     timer.unref?.()
     this.wallTimer = timer

@@ -516,7 +516,7 @@ describe('typed budgets and independent usage', () => {
   })
 
   it('requires exhausted and unmeasurable budget scopes to stop running', () => {
-    const exactUsage = { ...emptyAutomationUsageTelemetry(), sessions: 5 }
+    const exactUsage = { ...emptyAutomationUsageTelemetry(), sessions: 6 }
     const running = baseState({
       status: 'running',
       budgets: [budget({ limit: 5 })],
@@ -555,7 +555,7 @@ describe('typed budgets and independent usage', () => {
       items: { 'item-a': item({ item_id: 'item-a', status: 'running', attempts: [runningAttempt] }) },
       usage: [
         { scope: 'epic', item_id: null, usage: emptyAutomationUsageTelemetry() },
-        { scope: 'item', item_id: 'item-a', usage: { ...emptyAutomationUsageTelemetry(), sessions: 1 } },
+        { scope: 'item', item_id: 'item-a', usage: { ...emptyAutomationUsageTelemetry(), sessions: 2 } },
       ],
     }), /must not remain running/)
   })

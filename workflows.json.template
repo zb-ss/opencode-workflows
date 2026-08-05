@@ -29,6 +29,7 @@
     "max_parallel_sessions": 2,
     "max_sessions": 12,
     "max_attempts_per_stage": 3,
+    "session_operation_timeout_ms": 300000,
     "max_calendar_age_ms": 86400000,
     "max_active_time_ms": 3600000,
     "max_input_tokens": 5000000,
@@ -95,9 +96,6 @@
     },
     "rate_windows": [
       { "window_ms": 60000, "max_requests": 50 }
-    ],
-    "budgets": [
-      { "dimension": "sessions", "scope": "global", "limit": 200 }
     ]
   },
   "queue": {

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -112,17 +113,21 @@ function append(store: EpicStoreHandle, mutate: (state: EpicState) => EpicState)
   return store.append(next, loaded.revision, loaded.state_sha256, loaded.ownership_generation)!
 }
 
-function fixture() {
+function fixture(budgets?: EpicState['budgets']) {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'epic-recovery-'))
   const project = path.join(parent, 'project')
   process.env.OPENCODE_CONFIG_DIR = path.join(parent, 'config')
   fs.mkdirSync(project)
+  execFileSync('git', ['init', '--initial-branch=base'], {
+    cwd: project,
+    stdio: ['ignore', 'ignore', 'pipe'],
+  })
   temporaryDirectories.add(parent)
   const store = openEpicStore({
     root_session_id: 'root-example', project_root: project, epic_id: 'epic-example', config: CONFIG,
     runtime_incarnation: 'runtime-before-restart', mode: 'read_write',
   })
-  store.append(genesis(project), 0, null, 1)
+  store.append({ ...genesis(project), ...(budgets ? { budgets } : {}) }, 0, null, 1)
   append(store, (state) => {
     state.state_revision++
     state.status = 'running'
@@ -195,15 +200,17 @@ const runtime = (project: string): EpicCoordinatorRuntime => ({
   integrate() { throw new Error('not used') },
   mergeParents() { return [] },
   verifyRecoveredIntegration() {},
+  verifyRecoveredIntegrationObject() {},
+  repairRecoveredIntegration() {},
 })
 
-async function recover(project: string, previous: EpicLoadResult) {
+async function recover(project: string, previous: EpicLoadResult, sessionAdapter: EpicSessionAdapter = session) {
   const restarted = openEpicStore({
     root_session_id: 'root-example', project_root: project, epic_id: 'epic-example', config: CONFIG,
     runtime_incarnation: 'runtime-after-restart', mode: 'read_write',
   })
   return recoverEpic({
-    store: restarted, project_root: project, session, runtime: runtime(project), now: () => Date.parse(LATER),
+    store: restarted, project_root: project, session: sessionAdapter, runtime: runtime(project), now: () => Date.parse(LATER),
     expected_revision: previous.revision, expected_state_sha256: previous.state_sha256,
     expected_generation: previous.ownership_generation, former_runtime_terminated: true,
   })
@@ -217,6 +224,45 @@ afterEach(() => {
 })
 
 describe('attended epic recovery', { concurrency: false }, () => {
+  it('retains usage ambiguity when a recovered metered child may have consumed unpersisted usage', async () => {
+    const test = fixture([{
+      dimension: 'input_tokens', scope: 'epic', item_id: null, limit: 100, extensions: [],
+    }])
+    reserveExecution(test.store)
+    append(test.store, (state) => {
+      const attempt = state.items['item-a']!.attempts[0]!
+      state.state_revision++
+      attempt.child_session_id = 'executor-child'
+      attempt.launch_state = 'created'
+      return state
+    })
+    const launched = append(test.store, (state) => {
+      state.state_revision++
+      state.items['item-a']!.attempts[0]!.launch_state = 'prompted'
+      return state
+    })
+    const meteredSession: EpicSessionAdapter = {
+      ...session,
+      async inspect() {
+        return {
+          status: 'completed',
+          response: {
+            response_id: 'response-1',
+            result: { status: 'passed' },
+            usage: { input_tokens: 25, output_tokens: 5, cost_usd: null },
+          },
+        }
+      },
+    }
+
+    const result = await recover(test.project, launched, meteredSession)
+
+    assert.equal(result.ambiguous, true)
+    assert.deepEqual(result.reasons, ['usage_accounting:item-a'])
+    assert.equal(result.loaded.state.pause_code, 'usage_accounting_ambiguous')
+    assert.equal(result.loaded.state.items['item-a']!.attempts[0]!.failure_classification, 'ambiguous_launch')
+  })
+
   it('classifies a reserved execution as ambiguous and advances ownership generation', async () => {
     const test = fixture()
     const reserved = reserveExecution(test.store)

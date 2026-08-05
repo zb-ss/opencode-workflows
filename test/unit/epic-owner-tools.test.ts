@@ -233,6 +233,7 @@ describe('epic owner tools', () => {
       expected_state_sha256: awaited.epic.state_sha256, expected_generation: awaited.epic.ownership_generation,
       reason: 'Verify attended operator resume.',
     }, context) as string)
+    assert.equal(paused.epic.pause_code, 'operator_paused', JSON.stringify(paused))
     const resumed = JSON.parse(await hooks.tool.epic_resume.execute({
       epic_id: 'epic-runtime', expected_revision: paused.epic.revision,
       expected_state_sha256: paused.epic.state_sha256, expected_generation: paused.epic.ownership_generation,

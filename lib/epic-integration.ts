@@ -1,6 +1,5 @@
 import { spawnSync, type SpawnSyncReturns } from 'node:child_process'
 import fs from 'node:fs'
-import os from 'node:os'
 import path from 'node:path'
 
 import { sha256Hex } from './canonical-json.ts'
@@ -9,11 +8,14 @@ import {
   parseEpicWorktreeEvidence,
   type EpicWorktreeEvidence,
 } from './epic-worktree-manager.ts'
+import { sandboxedGitArgs, sandboxedGitEnv, trustedGitExecutable } from './git-sandbox.ts'
+import { isWorktreeCleanAfterCommit } from './worktree-manager.ts'
+import { withRepositoryOperationLock } from './repository-operation-lock.ts'
+import { computeSandboxedMergeTree, updateWorktreeWithoutRepositoryDrivers } from './git-merge-sandbox.ts'
 
 const GIT_OID_PATTERN = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/
 const SHA256_PATTERN = /^[a-f0-9]{64}$/
 const MAX_GIT_OUTPUT_BYTES = 1024 * 1024
-const MAX_CONFLICT_PATH_BYTES = 64 * 1024
 const OPERATION_STATE_NAMES = [
   'MERGE_HEAD',
   'rebase-merge',
@@ -86,7 +88,7 @@ export class EpicIntegrationAmbiguousError extends Error {
 
 interface GitOptions {
   env?: NodeJS.ProcessEnv
-  input?: string
+  input?: string | Buffer
   max_output_bytes?: number
 }
 
@@ -101,10 +103,10 @@ interface TargetWorktreeIdentity {
 
 function runGit(args: string[], cwd: string, options: GitOptions = {}): SpawnSyncReturns<Buffer> {
   const maxOutputBytes = options.max_output_bytes ?? MAX_GIT_OUTPUT_BYTES
-  return spawnSync('git', args, {
+  return spawnSync(trustedGitExecutable(), sandboxedGitArgs(args, cwd, options.env), {
     cwd,
     encoding: 'buffer',
-    env: options.env ? { ...process.env, ...options.env } : process.env,
+    env: sandboxedGitEnv(options.env),
     input: options.input,
     maxBuffer: maxOutputBytes + 1,
     stdio: ['pipe', 'pipe', 'pipe'],
@@ -197,13 +199,12 @@ function hasOperationState(projectRoot: string): boolean {
 }
 
 function isClean(projectRoot: string): boolean {
-  return git(['status', '--porcelain=v1', '-z', '--untracked-files=all'], projectRoot) === ''
+  const head = git(['rev-parse', '--verify', 'HEAD^{commit}'], projectRoot)
+  return isWorktreeCleanAfterCommit(projectRoot, head)
 }
 
 function indexAndWorktreeMatchCommit(projectRoot: string, commit: string): boolean {
-  if (!gitSucceeds(['diff-index', '--cached', '--quiet', '--ignore-submodules=none', commit, '--'], projectRoot)) return false
-  if (!gitSucceeds(['diff-files', '--quiet', '--ignore-submodules=none', '--'], projectRoot)) return false
-  return git(['ls-files', '--others', '--exclude-standard', '-z'], projectRoot) === ''
+  return isWorktreeCleanAfterCommit(projectRoot, commit)
 }
 
 function assertIntegrationBranch(projectRoot: string, integrationBranch: string): void {
@@ -230,104 +231,36 @@ function assertTargetReady(projectRoot: string, integrationBranch: string, expec
 
 function assertSourceReady(projectRoot: string, input: EpicIntegrationInput): void {
   const source = inspectEpicAttemptWorktree(projectRoot, input.source_worktree_path, input.worktree_evidence)
-  if (source.head_commit !== input.source_checkpoint_commit || source.has_changes || source.has_conflicts) {
+  if (source.head_commit !== input.source_checkpoint_commit || source.has_conflicts) {
+    throw new Error('source worktree is not at the exact reviewed checkpoint')
+  }
+  if (!isWorktreeCleanAfterCommit(source.path, input.source_checkpoint_commit)) {
     throw new Error('source worktree is not clean at the exact reviewed checkpoint')
   }
 }
 
-function assertSafeConflictPath(filePath: string): string {
-  if (!filePath || filePath.length > 4096 || filePath.includes('\0')
-    || path.posix.isAbsolute(filePath) || path.win32.isAbsolute(filePath)) {
-    throw new Error('Git returned an unsafe conflict path')
-  }
-  const segments = filePath.replaceAll('\\', '/').split('/')
-  if (segments.includes('..') || !segments.some(segment => segment !== '' && segment !== '.')) {
-    throw new Error('Git returned an unsafe conflict path')
-  }
-  return filePath
-}
-
-function parseUnmergedPaths(output: Buffer): string[] {
-  if (output.length === 0) return []
-  if (output.length > MAX_CONFLICT_PATH_BYTES || output.at(-1) !== 0) {
-    throw new Error('conflict path evidence exceeds its safe bound')
-  }
-  const paths = new Set<string>()
-  let start = 0
-  for (let index = 0; index < output.length; index++) {
-    if (output[index] !== 0) continue
-    const record = output.subarray(start, index)
-    const tab = record.indexOf(9)
-    if (tab < 0) throw new Error('Git returned malformed conflict path evidence')
-    const encoded = record.subarray(tab + 1)
-    const filePath = encoded.toString('utf8')
-    if (!Buffer.from(filePath, 'utf8').equals(encoded)) throw new Error('conflict path is not valid UTF-8')
-    paths.add(assertSafeConflictPath(filePath))
-    start = index + 1
-  }
-  return [...paths]
-}
-
 interface MergeTreeResult {
   tree_oid: string | null
+  generated_objects: Array<{ oid: string; type: 'blob' | 'tree'; bytes: Buffer }>
   conflict_paths: string[]
 }
 
 function computeMergeTree(projectRoot: string, targetCommit: string, sourceCommit: string): MergeTreeResult {
-  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'epic-merge-tree-'))
-  const temporaryWorktree = path.join(temporaryRoot, 'worktree')
-  const temporaryIndex = path.join(temporaryRoot, 'index')
-  fs.mkdirSync(temporaryWorktree, { mode: 0o700 })
-  const gitDirectory = fs.realpathSync(path.resolve(projectRoot, git(['rev-parse', '--git-common-dir'], projectRoot)))
-  const environment = {
-    GIT_DIR: gitDirectory,
-    GIT_INDEX_FILE: temporaryIndex,
-    GIT_WORK_TREE: temporaryWorktree,
-  }
-
-  let outcome: MergeTreeResult
-  try {
-    const mergeBases = git(['merge-base', '--all', targetCommit, sourceCommit], projectRoot)
-      .split('\n').filter(Boolean)
-    if (mergeBases.length === 0) throw new Error('source and target do not share a merge base')
-    mergeBases.forEach(base => validateOid(base, 'merge base'))
-    git(['read-tree', targetCommit], projectRoot, { env: environment })
-    git(['checkout-index', '--all', '--force'], temporaryWorktree, { env: environment })
-    git(['update-index', '--refresh'], temporaryWorktree, { env: environment })
-    const merge = runGit(
-      ['merge-recursive', ...mergeBases, '--', targetCommit, sourceCommit],
-      temporaryWorktree,
-      { env: environment },
-    )
-    if (merge.error) throw merge.error
-    if (merge.status === 0) {
-      const treeOid = git(['write-tree'], projectRoot, { env: environment })
-      validateOid(treeOid, 'computed merge tree')
-      outcome = { tree_oid: treeOid, conflict_paths: [] }
-    } else if (merge.status === 1) {
-      const unmerged = runGit(
-        ['ls-files', '--unmerged', '-z'],
-        projectRoot,
-        { env: environment, max_output_bytes: MAX_CONFLICT_PATH_BYTES },
-      )
-      if (unmerged.error || unmerged.status !== 0) throw new Error('could not read bounded conflict paths')
-      outcome = { tree_oid: null, conflict_paths: parseUnmergedPaths(unmerged.stdout) }
-      if (outcome.conflict_paths.length === 0) throw new Error('merge failed without conflict path evidence')
-    } else {
-      const detail = merge.stderr.toString('utf8').trim()
-      throw new Error(`merge-tree computation failed${detail ? `: ${detail}` : ''}`)
-    }
-  } finally {
-    fs.rmSync(temporaryRoot, { recursive: true, force: true })
-    if (fs.existsSync(temporaryRoot)) throw new Error('temporary merge state could not be removed')
-  }
-  return outcome
+  return computeSandboxedMergeTree(projectRoot, targetCommit, sourceCommit)
 }
 
-function createMergeCommit(projectRoot: string, input: EpicIntegrationInput, treeOid: string): string {
+function createMergeCommit(projectRoot: string, input: EpicIntegrationInput, mergeTree: MergeTreeResult): string {
+  if (mergeTree.tree_oid === null) throw new Error('cannot create a commit for a conflicted merge tree')
+  for (const object of mergeTree.generated_objects) {
+    const persisted = git(['hash-object', '-w', '-t', object.type, '--stdin'], projectRoot, { input: object.bytes })
+    if (persisted !== object.oid) throw new Error('persisted merge object does not match the reviewed sandbox result')
+  }
+  if (!gitSucceeds(['cat-file', '-e', `${mergeTree.tree_oid}^{tree}`], projectRoot)) {
+    throw new Error('reviewed merge tree is incomplete after generated objects were persisted')
+  }
   const message = `merge(epic): integrate ${input.worktree_evidence.item_id}/${input.worktree_evidence.attempt_id}`
   const commit = git([
-    'commit-tree', treeOid,
+    'commit-tree', mergeTree.tree_oid,
     '-p', input.expected_target_commit,
     '-p', input.source_checkpoint_commit,
     '-m', message,
@@ -398,7 +331,12 @@ function synchronizePublishedWorktree(
       throw new Error('integration index or worktree changed before synchronization')
     }
 
-    git(['read-tree', '-m', '-u', input.expected_target_commit, mergeCommit], projectRoot)
+    updateWorktreeWithoutRepositoryDrivers(
+      projectRoot,
+      resolveGitPath(projectRoot, 'index'),
+      projectRoot,
+      ['read-tree', '-m', '-u', input.expected_target_commit, mergeCommit],
+    )
     assertTargetWorktreeIdentity(projectRoot, expectedIdentity)
     assertTargetReady(projectRoot, input.integration_branch, mergeCommit)
     if (!indexAndWorktreeMatchCommit(projectRoot, mergeCommit)) {
@@ -416,7 +354,7 @@ function synchronizePublishedWorktree(
 }
 
 /** Compute and atomically publish one exact reviewed checkpoint. */
-export function integrateEpicCheckpoint(inputValue: EpicIntegrationInput): EpicIntegrationResult {
+function integrateEpicCheckpointUnlocked(inputValue: EpicIntegrationInput): EpicIntegrationResult {
   const input = { ...inputValue, worktree_evidence: parseEpicWorktreeEvidence(inputValue.worktree_evidence) }
   validateOid(input.expected_target_commit, 'expected target commit')
   validateOid(input.source_checkpoint_commit, 'source checkpoint commit')
@@ -455,7 +393,7 @@ export function integrateEpicCheckpoint(inputValue: EpicIntegrationInput): EpicI
     }
   }
 
-  const mergeCommit = createMergeCommit(projectRoot, input, mergeTree.tree_oid)
+  const mergeCommit = createMergeCommit(projectRoot, input, mergeTree)
   verifyMergeParents(projectRoot, mergeCommit, input)
   assertTargetReady(projectRoot, input.integration_branch, input.expected_target_commit)
   assertTargetWorktreeIdentity(projectRoot, targetIdentity)
@@ -471,8 +409,20 @@ export function integrateEpicCheckpoint(inputValue: EpicIntegrationInput): EpicI
   }
 }
 
-/** Recomputes the reviewed merge tree before accepting a published result after restart. */
-export function verifyRecoveredEpicIntegration(input: EpicRecoveredIntegrationVerificationInput): void {
+export function integrateEpicCheckpoint(inputValue: EpicIntegrationInput): EpicIntegrationResult {
+  return withRepositoryOperationLock(inputValue.project_root, () => integrateEpicCheckpointUnlocked(inputValue))
+}
+
+/**
+ * Verify the immutable properties of a recovered integration commit:
+ * project identity, branch head, exact parents, and recomputed merge tree.
+ *
+ * This performs NO filesystem mutation and does not touch the working tree
+ * or index. It only inspects Git object database state.
+ *
+ * Throws if any immutable property does not match the reviewed merge.
+ */
+export function verifyRecoveredIntegrationObject(input: EpicRecoveredIntegrationVerificationInput): void {
   validateOid(input.expected_target_commit, 'expected target commit')
   validateOid(input.source_checkpoint_commit, 'source checkpoint commit')
   validateOid(input.result_commit, 'result commit')
@@ -494,4 +444,82 @@ export function verifyRecoveredEpicIntegration(input: EpicRecoveredIntegrationVe
   }
 }
 
+/**
+ * Verify that the canonical checkout matches the published merge commit.
+ *
+ * This checks for incomplete Git operations and verifies the index and
+ * worktree match the result commit. It performs NO filesystem mutation.
+ *
+ * Throws if the checkout is stale, dirty, or has an incomplete operation.
+ */
+export function verifyRecoveredCheckout(input: EpicRecoveredIntegrationVerificationInput): void {
+  const projectRoot = resolveProjectRoot(input.project_root)
+  if (hasOperationState(projectRoot)) {
+    throw new Error('recovered integration target has an incomplete Git operation')
+  }
+  if (!indexAndWorktreeMatchCommit(projectRoot, input.result_commit)) {
+    throw new Error('recovered integration canonical checkout does not match the published merge commit')
+  }
+}
+
+/** Recomputes the reviewed merge tree before accepting a published result after restart. */
+export function verifyRecoveredEpicIntegration(input: EpicRecoveredIntegrationVerificationInput): void {
+  verifyRecoveredIntegrationObject(input)
+  verifyRecoveredCheckout(input)
+}
+
 export const integrateReviewedEpicCheckpoint = integrateEpicCheckpoint
+
+/**
+ * Safely synchronize the canonical checkout to a verified recovered merge
+ * commit. This is non-destructive: it refuses to touch a dirty or stale
+ * checkout and never runs `git checkout -f`.
+ *
+ * Prerequisites:
+ * - The result commit must be fully verified via verifyRecoveredIntegrationObject.
+ * - The integration branch must still point to the result commit.
+ * - The worktree must be at the expected target commit with no local changes.
+ * - There must be no incomplete Git operation.
+ *
+ * If any prerequisite fails, the function throws without modifying any files.
+ */
+function repairRecoveredEpicIntegrationUnlocked(input: EpicRecoveredIntegrationVerificationInput): void {
+  // First, verify the immutable object properties (parents, tree, identity).
+  // If the commit is forged or has an unreviewed tree, fail without any
+  // filesystem mutation.
+  verifyRecoveredIntegrationObject(input)
+
+  const projectRoot = resolveProjectRoot(input.project_root)
+  assertIntegrationBranch(projectRoot, input.integration_branch)
+
+  // Compare the index and worktree directly. Symbolic HEAD already resolves
+  // to the published result after the branch ref CAS, even when a crash left
+  // the checkout at the expected target.
+  if (hasOperationState(projectRoot)) {
+    throw new Error('recovered integration target has an incomplete Git operation; cannot repair')
+  }
+  if (indexAndWorktreeMatchCommit(projectRoot, input.result_commit)) {
+    verifyRecoveredCheckout(input)
+    return
+  }
+  if (!indexAndWorktreeMatchCommit(projectRoot, input.expected_target_commit)) {
+    throw new Error('recovered integration index or worktree does not match the expected target commit; cannot repair')
+  }
+
+  // Safely advance the checkout from the expected target to the verified merge.
+  // read-tree -m -u performs a merge-style update that preserves no local
+  // changes (we already verified the tree is clean).
+  updateWorktreeWithoutRepositoryDrivers(
+    projectRoot,
+    resolveGitPath(projectRoot, 'index'),
+    projectRoot,
+    ['read-tree', '-m', '-u', input.expected_target_commit, input.result_commit],
+  )
+
+  // Re-verify the checkout now matches the merge commit.
+  verifyRecoveredCheckout(input)
+}
+
+export function repairRecoveredEpicIntegration(input: EpicRecoveredIntegrationVerificationInput): void {
+  withRepositoryOperationLock(input.project_root, () => repairRecoveredEpicIntegrationUnlocked(input))
+}

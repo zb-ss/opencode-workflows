@@ -8,6 +8,8 @@ OpenCode Workflows provides related but distinct orchestration mechanisms. This 
 |---|---|---|---|
 | Manual workflow | `/workflow` | Supervisor calls the native Task tool and workflow tools | No; the supervisor advances each gate |
 | Automatic DAG | `/workflow-auto` | Plugin creates SDK child sessions from an installed JSON DAG | Yes, while enabled, authorized, within budget, loaded, and not blocked |
+| Epic coordinator | `epic_start` | Plugin runs dependency-ready items in isolated Git worktrees and requires exact checkpoint review | Yes, while enabled, owned, within policy, and not paused |
+| Durable queue | `queue_enqueue` | Fenced scheduler leases and drives installed automatic workflows | Yes, while enabled and holding authoritative scheduler ownership |
 | Native Task | A Task tool call | One OpenCode subagent | Only within that task; reuse `task_id` to continue it |
 | Swarm | `swarm_spawn_batch` | Parallel SDK child sessions | The queue drains within configured limits |
 | External CLI | `/delegate` or `delegate_run` | A `claude` or Antigravity `agy` child process | No; each run or follow-up is explicit |
@@ -153,7 +155,7 @@ node install.mjs --autonomy bounded
 
 The autonomy command requires an existing `workflows.json`. It changes only `automation.autonomy`; it does not install files, enable automation, or create or change budgets.
 
-`automation.enabled` defaults to `false`. When it is `true`, every budget field is required:
+`automation.enabled` defaults to `false`. When it is `true`, session, attempt, and operation-timeout limits are required; resource budgets remain operator-selected:
 
 ```json
 {
@@ -163,7 +165,9 @@ The autonomy command requires an existing `workflows.json`. It changes only `aut
     "max_parallel_sessions": 2,
     "max_sessions": 12,
     "max_attempts_per_stage": 2,
-    "max_wall_time_ms": 3600000,
+    "session_operation_timeout_ms": 300000,
+    "max_calendar_age_ms": 3600000,
+    "max_active_time_ms": 1800000,
     "max_input_tokens": 250000,
     "max_output_tokens": 80000,
     "max_bounded_read_bytes": 1048576,
@@ -173,7 +177,7 @@ The autonomy command requires an existing `workflows.json`. It changes only `aut
 }
 ```
 
-These values are examples, not defaults. Select limits for the project and provider account. The schema requires positive session, attempt, and wall-time limits; token limits may be zero; cost may be a non-negative number or `null`. Restart OpenCode after changing the autonomy profile, budgets, enabled state, or agent permissions. The engine persists the autonomy profile at workflow start and does not change it on resume; a configuration change applies only to newly started workflows.
+These values are examples, not defaults. Select limits for the project and provider account. The schema requires positive session, attempt, and session-operation limits; token limits may be zero; cost may be a non-negative number or `null`. Restart OpenCode after changing the autonomy profile, budgets, enabled state, or agent permissions. The engine persists the autonomy profile at workflow start and does not change it on resume; a configuration change applies only to newly started workflows.
 
 ### Start
 
@@ -236,7 +240,7 @@ Bounded read and write bytes are atomically reserved and persisted per workflow 
 
 A stage returns `blocked`, with a `required_action`, when it cannot proceed without information, access, credentials, approval, or authority. `retryable` is valid only for failed results; blocker fields are valid only for blocked results. The engine records the result, marks pending dependent stages blocked, aborts parallel siblings back to pending, and pauses the workflow. This is a safe outcome, not evidence that the requested work or validation completed.
 
-Treat the reported summary and required action as untrusted child output. Verify them against trusted project documentation; never provide secret values, run supplied commands, follow supplied URLs, or weaken permissions because blocker text requested it. Complete only a verified action before running `/workflow-auto-resume` in the same owning session. Restart OpenCode first if installed agent permissions changed. Resume reauthorizes routed agents under the persisted autonomy profile, refreshes configured budgets, reconciles existing children, and resets directly blocked stages and their dependency-blocked descendants to pending. Eligible stages are then scheduled within the remaining budgets. Resume does not switch or override the autonomy policy, reset attempts or accumulated usage, reset the original wall-clock age, or restart a terminal workflow.
+Treat the reported summary and required action as untrusted child output. Verify them against trusted project documentation; never provide secret values, run supplied commands, follow supplied URLs, or weaken permissions because blocker text requested it. Complete only a verified action before running `/workflow-auto-resume` in the same owning session. Restart OpenCode first if installed agent permissions changed. Resume reauthorizes routed agents under the persisted autonomy profile, refreshes configured budgets, reconciles existing children, and resets directly blocked stages and their dependency-blocked descendants to pending. Eligible stages are then scheduled within the remaining budgets. Resume does not switch or override the autonomy policy, reset attempts or accumulated usage, reset active-time history or calendar age from the original creation time, or restart a terminal workflow.
 
 Do not weaken bounded rules merely to force a pass. Protected control-file changes and credential access require an attended path. Credential-content scanning is defense in depth rather than a guarantee, so do not enable bounded reads for worktrees containing untracked credentials, data dumps, or personal data. Ordinary source edits can still introduce malicious behavior, so review the diff before any attended execution. If the required action is executable validation, keep the stage blocked or perform that validation through an explicitly attended workflow and report the boundary accurately.
 
@@ -250,14 +254,15 @@ The engine tracks:
 - Input tokens
 - Output and reasoning tokens
 - Reported message cost
-- Wall time from original workflow creation
+- Calendar age from original workflow creation, including paused time
+- Active execution time, excluding fully paused intervals
 - Configured validation operations consumed
 
 Before a launch, exhausted limits pause scheduling. If usage crosses a limit while stages are running, those sessions are aborted and returned to pending before the workflow pauses. Attempt exhaustion also pauses for explicit intervention.
 
 The validation broker consumes its persisted run count before process creation. A failed, timed-out, cancelled, or redacted run still consumes one run. See [Validation And Fixed-Point Review](./docs/validation-and-fixed-point-review.md).
 
-Increase or otherwise change budgets in `workflows.json`, restart OpenCode, and use `/workflow-auto-resume` to apply them. A resume refreshes saved limits but does not reset accumulated usage or original wall-clock age.
+Increase or otherwise change budgets in `workflows.json`, restart OpenCode, and use `/workflow-auto-resume` to apply them. A resume refreshes saved limits but does not reset accumulated usage, active-time history, or calendar age from the original creation time.
 
 ### Persistence And Reconciliation
 
@@ -278,6 +283,18 @@ The `workflow_auto_status` tool reports the current session's automatic workflow
 A completed automatic workflow can be published only from its owning root session. `/publication-preview <target>` creates a private immutable artifact after checking the exact worktree root, clean Git state, configured target and publisher policy, and all history reachable from the publication head. `/publication-execute <artifact-id> <artifact-sha256>` revalidates the source and publisher identities before and after one-shot approval, atomically claims the artifact, records dispatch intent, and invokes the fixed configured publisher. `/publication-status` reads durable artifact and execution state.
 
 Publication tools are explicitly rejected inside automatic child sessions. A protected target requests `workflow_publication_protected`; every external dispatch requests `workflow_publication_external`. Both must resolve to `ask`, use artifact-bound patterns, and provide no persistent `always` pattern. Nonzero exit, timeout, cancellation, signal, process uncertainty, or a restored dispatching record is ambiguous and is never automatically retried. See [Guarded Publication](./docs/guarded-publication.md).
+
+## Epic Coordination
+
+Epic coordination is an opt-in, root-owned dependency scheduler for reviewed work in isolated Git worktrees. `epic_start` freezes the selected policy, agents, model tiers, concurrency, and optional budgets. Dependency-ready executors produce exact checkpoints whose patch bytes and paths are scanned before a configured reviewer receives them as untrusted input. Only a zero-issue review bound to that checkpoint can proceed to `epic_integrate`, which records intent and publishes through Git compare-and-swap. Dependencies become ready only after their predecessors are integrated.
+
+Epic state mutations require the latest revision, state digest, and ownership generation. Active and calendar time are distinct budget dimensions, metered usage fails closed when authoritative evidence is missing, and retry classes have separate ceilings. Child-launch or integration ambiguity pauses for attended reconciliation; restart recovery requires confirmation that the former runtime has terminated. See [Epic Coordination](./docs/epic-coordination.md).
+
+## Durable Queue
+
+The durable queue is a separate opt-in, multiprocess scheduler for automatic workflows. One scheduler holds a renewable fencing lease; monotonically increasing generations reject stale writers after takeover. Queue records persist launch intents, status, rate-window counters, classified retry state, and exact revision/generation evidence for owner mutations. Transport, contract, semantic, and no-progress retries have separate ceilings, while ambiguous launches always pause.
+
+After restart, `queue_recover` requires attended confirmation that the former runtime has terminated before rebuilding the index and reconciling launch intents. Terminal records remain inspectable until the owner-authorized, CAS- and fencing-protected `queue_delete` operation reclaims their retained workflow storage and queue record. The queue is disabled by default and requires automatic workflows to be enabled before it can dispatch stages. See [Durable Queue](./docs/durable-queue.md).
 
 ## Capability Modes
 
@@ -407,7 +424,7 @@ Use `/translate-auto <component-path> <target-language>` for the orchestration c
 
 OpenCode permission rules remain authoritative. Workflow state does not grant filesystem, shell, task, or external process access.
 
-For the autonomy boundary and secure delivery roadmap, see [Autonomous Workflows](./docs/autonomous-workflows.md).
+For the autonomy and secure-delivery boundaries, see [Autonomous Workflows](./docs/autonomous-workflows.md).
 
 ## Diagnostics
 

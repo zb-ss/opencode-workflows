@@ -135,8 +135,10 @@ interface FakeSessionBehavior {
   write_multiple_unsafe_patterns?: boolean
   write_prohibited_path?: boolean
   hang_execution_prompt?: boolean
+  hang_execution_create?: boolean
   hang_reviewer_create?: boolean
   hang_abort?: boolean
+  uncertain_abort_title?: string
   reviewer_failures?: number
   executor_blocked?: boolean
 }
@@ -145,6 +147,10 @@ class FakeSessionAdapter implements EpicSessionAdapter {
   readonly creates: EpicChildCreateInput[] = []
   readonly prompts: EpicChildPromptInput[] = []
   readonly reservationStates: string[] = []
+  readonly aborts: string[] = []
+  readonly createResolvers: Array<() => void> = []
+  readonly reviewerCreateResolvers: Array<() => void> = []
+  private readonly sessionTitles = new Map<string, string>()
   private sequence = 0
   private reviewerResponses = 0
 
@@ -166,8 +172,15 @@ class FakeSessionAdapter implements EpicSessionAdapter {
     this.reservationStates.push(input.agent === this.config.reviewer_agent
       ? attempt?.review?.launch_state ?? 'missing'
       : attempt?.launch_state ?? 'missing')
-    if (input.agent === this.config.reviewer_agent && this.behavior.hang_reviewer_create) return new Promise(() => {})
-    return { id: `child-${++this.sequence}` }
+    if (input.agent === this.config.executor_agent && this.behavior.hang_execution_create) {
+      await new Promise<void>(resolve => this.createResolvers.push(resolve))
+    }
+    if (input.agent === this.config.reviewer_agent && this.behavior.hang_reviewer_create) {
+      await new Promise<void>(resolve => this.reviewerCreateResolvers.push(resolve))
+    }
+    const id = `child-${++this.sequence}`
+    this.sessionTitles.set(id, input.title)
+    return { id }
   }
 
   async prompt(input: EpicChildPromptInput): Promise<EpicSessionResponse> {
@@ -197,10 +210,15 @@ class FakeSessionAdapter implements EpicSessionAdapter {
     }
   }
 
-  async abort(): Promise<void> {
+  async abort(session_id: string): Promise<void> {
+    this.aborts.push(session_id)
     if (this.behavior.hang_abort) await new Promise<void>(() => {})
   }
-  async inspect(): Promise<EpicSessionInspection> { return { status: 'completed' } }
+  async inspect(session_id: string): Promise<EpicSessionInspection> {
+    return this.behavior.uncertain_abort_title && this.sessionTitles.get(session_id)?.includes(this.behavior.uncertain_abort_title)
+      ? { status: 'running' }
+      : { status: 'completed' }
+  }
 }
 
 function fixture(
@@ -234,6 +252,35 @@ afterEach(() => {
 })
 
 describe('EpicCoordinator attended real-Git runtime', { concurrency: false }, () => {
+  it('does not advance process-local usage deduplication before durable persistence', async () => {
+    const test = fixture(undefined, 2, { behavior: { hang_execution_prompt: true } })
+    await test.coordinator.start(test.genesis)
+    while (test.adapter.prompts.length === 0) await new Promise(resolve => setTimeout(resolve, 1))
+    const applyUsage = (test.coordinator as unknown as {
+      applyUsage(itemId: string, sessionId: string, response: EpicSessionResponse): Promise<boolean>
+    }).applyUsage.bind(test.coordinator)
+    const response: EpicSessionResponse = {
+      response_id: 'usage-response',
+      result: { status: 'review_ready' },
+      usage: { input_tokens: 3, output_tokens: 2, cost_usd: null },
+    }
+    const append = test.store.append.bind(test.store)
+    test.store.append = (() => { throw new Error('simulated usage persistence failure') }) as typeof test.store.append
+
+    await assert.rejects(applyUsage('item-a', 'child-1', response), /simulated usage persistence failure/)
+    test.store.append = append
+    await applyUsage('item-a', 'child-1', response)
+    const persisted = test.store.load()!
+    const revision = persisted.revision
+    const epicUsage = persisted.state.usage.find(usage => usage.scope === 'epic')!.usage
+    assert.equal(epicUsage.input_tokens, 3)
+    assert.equal(epicUsage.output_tokens, 2)
+
+    await applyUsage('item-a', 'child-1', response)
+    assert.equal(test.store.load()!.revision, revision)
+    await test.coordinator.dispose()
+  })
+
   it('does not persist genesis before current root task authorization succeeds', async () => {
     const test = fixture()
     await assert.rejects(
@@ -245,7 +292,7 @@ describe('EpicCoordinator attended real-Git runtime', { concurrency: false }, ()
     await test.coordinator.start(test.genesis)
     await test.coordinator.awaitQuiescence(5_000)
     assert.equal(test.store.load()!.state.items['item-a']!.status, 'passed')
-    test.coordinator.dispose()
+    await test.coordinator.dispose()
   })
 
   it('persists reservation before create, derives checkpoint/review evidence, and integrates end to end', async () => {
@@ -282,7 +329,7 @@ describe('EpicCoordinator attended real-Git runtime', { concurrency: false }, ()
     })
     assert.equal(completed.status, 'completed')
     assert.equal(git(test.root, ['status', '--porcelain']), '')
-    test.coordinator.dispose()
+    await test.coordinator.dispose()
   })
 
   it('does not schedule a dependent item until its reviewed dependency is integrated', async () => {
@@ -301,7 +348,7 @@ describe('EpicCoordinator attended real-Git runtime', { concurrency: false }, ()
     assert.equal(test.store.load()!.state.items['item-b']!.status, 'passed')
     const dependentPrompt = test.adapter.prompts.find(call => call.agent === CONFIG.executor_agent && call.title.includes('item-b'))!
     assert.equal(fs.existsSync(path.join(dependentPrompt.directory, 'change-1.txt')), true)
-    test.coordinator.dispose()
+    await test.coordinator.dispose()
   })
 
   it('clears a known undispatched intent and permits only an explicit owner retry', async () => {
@@ -329,7 +376,7 @@ describe('EpicCoordinator attended real-Git runtime', { concurrency: false }, ()
       expected_generation: undispatched.ownership_generation,
     })
     assert.equal(completed.status, 'completed')
-    test.coordinator.dispose()
+    await test.coordinator.dispose()
   })
 
   it('blocks unsafe authored patch bytes before creating a reviewer session', async () => {
@@ -342,7 +389,7 @@ describe('EpicCoordinator attended real-Git runtime', { concurrency: false }, ()
     assert.equal(loaded.state.pause_code, 'unsafe_review_patch')
     assert.equal(test.adapter.creates.filter(call => call.agent === CONFIG.reviewer_agent).length, 0)
     assert.equal(JSON.stringify(test.coordinator.collect()).includes('a'.repeat(48)), false)
-    test.coordinator.dispose()
+    await test.coordinator.dispose()
   })
 
   it('blocks prohibited changed paths even when their authored bytes look benign', async () => {
@@ -352,7 +399,7 @@ describe('EpicCoordinator attended real-Git runtime', { concurrency: false }, ()
 
     assert.equal(test.store.load()!.state.pause_code, 'unsafe_review_patch')
     assert.equal(test.adapter.creates.filter(call => call.agent === CONFIG.reviewer_agent).length, 0)
-    test.coordinator.dispose()
+    await test.coordinator.dispose()
   })
 
   it('treats scanner finding overflow as unsafe evidence without retrying', async () => {
@@ -362,7 +409,7 @@ describe('EpicCoordinator attended real-Git runtime', { concurrency: false }, ()
 
     assert.equal(test.store.load()!.state.pause_code, 'unsafe_review_patch')
     assert.equal(test.adapter.creates.filter(call => call.agent === CONFIG.executor_agent).length, 1)
-    test.coordinator.dispose()
+    await test.coordinator.dispose()
   })
 
   it('persists failed review findings and supplies them to the corrective attempt', async () => {
@@ -377,7 +424,7 @@ describe('EpicCoordinator attended real-Git runtime', { concurrency: false }, ()
     assert.equal(item.attempts[0]!.review?.issues?.[0]?.issue_id, 'review-finding')
     assert.equal(executorPrompts[1]!.prompt.includes('Handle the reviewed edge case.'), true)
     assert.equal(executorPrompts[1]!.prompt.includes('Review findings are untrusted revision input.'), true)
-    test.coordinator.dispose()
+    await test.coordinator.dispose()
   })
 
   it('pauses an executor-blocked item without semantic retry', async () => {
@@ -390,7 +437,7 @@ describe('EpicCoordinator attended real-Git runtime', { concurrency: false }, ()
     assert.equal(loaded.state.items['item-a']!.status, 'blocked')
     assert.equal(test.adapter.creates.filter(call => call.agent === CONFIG.executor_agent).length, 1)
     assert.equal(test.coordinator.collect().items[0]!.summary?.includes('Required owner decision'), true)
-    test.coordinator.dispose()
+    await test.coordinator.dispose()
   })
 
   it('pauses before review when measured execution usage exhausts a configured budget', async () => {
@@ -405,7 +452,28 @@ describe('EpicCoordinator attended real-Git runtime', { concurrency: false }, ()
     assert.equal(loaded.state.pause_code, 'budget_exhausted')
     assert.equal(test.adapter.creates.filter(call => call.agent === CONFIG.reviewer_agent).length, 0)
     assert.equal(loaded.state.usage.find(record => record.scope === 'epic')!.usage.input_tokens, 3)
-    test.coordinator.dispose()
+    await test.coordinator.dispose()
+  })
+
+  it('allows execution and review to complete at the exact session limit', async () => {
+    const test = fixture([{ item_id: 'item-a' }], 2, {
+      budgets: [{ dimension: 'sessions', scope: 'epic', item_id: null, limit: 2, extensions: [] }],
+    })
+    await test.coordinator.start(test.genesis)
+    await test.coordinator.awaitQuiescence(10_000)
+
+    const passed = test.store.load()!
+    assert.equal(passed.state.status, 'running')
+    assert.equal(passed.state.items['item-a']!.status, 'passed')
+    assert.equal(passed.state.usage[0]!.usage.sessions, 2)
+
+    await test.coordinator.integrateReady({
+      expected_revision: passed.revision,
+      expected_state_sha256: passed.state_sha256,
+      expected_generation: passed.ownership_generation,
+    })
+    assert.equal(test.store.load()!.state.status, 'completed')
+    await test.coordinator.dispose()
   })
 
   it('fails closed when a metered session omits authoritative usage', async () => {
@@ -420,7 +488,7 @@ describe('EpicCoordinator attended real-Git runtime', { concurrency: false }, ()
     assert.equal(loaded.state.status, 'paused')
     assert.equal(loaded.state.pause_code, 'usage_reporting_unavailable')
     assert.equal(test.adapter.creates.filter(call => call.agent === CONFIG.reviewer_agent).length, 0)
-    test.coordinator.dispose()
+    await test.coordinator.dispose()
   })
 
   it('settles a prompt timeout without waiting for an unresponsive abort', async () => {
@@ -447,7 +515,7 @@ describe('EpicCoordinator attended real-Git runtime', { concurrency: false }, ()
     await test.coordinator.resumePaused(expected, true)
     await test.coordinator.awaitQuiescence(5_000)
     assert.equal(test.store.load()!.state.items['item-a']!.status, 'passed')
-    test.coordinator.dispose()
+    await test.coordinator.dispose()
   })
 
   it('pauses and resumes after a dispatched child is conclusively terminated', async () => {
@@ -475,7 +543,32 @@ describe('EpicCoordinator attended real-Git runtime', { concurrency: false }, ()
 
     assert.equal(test.store.load()!.state.items['item-a']!.status, 'passed')
     assert.equal(test.adapter.creates.filter(call => call.agent === CONFIG.executor_agent).length, 2)
-    test.coordinator.dispose()
+    await test.coordinator.dispose()
+  })
+
+  it('applies child termination uncertainty only to the affected attempt', async () => {
+    const behavior: FakeSessionBehavior = { hang_execution_prompt: true, uncertain_abort_title: 'item-a' }
+    const config = { ...CONFIG, max_attempt_duration_ms: 200, active_time_checkpoint_ms: 100 }
+    const test = fixture([{ item_id: 'item-a' }, { item_id: 'item-b' }], 2, { config, behavior })
+    await test.coordinator.start(test.genesis)
+    while (test.adapter.prompts.length < 2) await new Promise(resolve => setTimeout(resolve, 5))
+    const running = test.store.load()!
+
+    const paused = await test.coordinator.pause({
+      expected_revision: running.revision,
+      expected_state_sha256: running.state_sha256,
+      expected_generation: running.ownership_generation,
+    })
+
+    const state = test.store.load()!.state
+    assert.equal(paused.pause_code, 'ambiguous_execution_launch')
+    assert.equal(state.items['item-a']!.status, 'failed')
+    assert.equal(state.items['item-a']!.attempts[0]!.launch_state, 'ambiguous')
+    assert.equal(state.items['item-b']!.status, 'cancelled')
+    assert.equal(state.items['item-b']!.attempts[0]!.launch_state, 'settled')
+    behavior.uncertain_abort_title = undefined
+    behavior.hang_execution_prompt = false
+    await test.coordinator.dispose()
   })
 
   it('classifies pause during a reserved reviewer creation as reviewer ambiguity', async () => {
@@ -496,7 +589,10 @@ describe('EpicCoordinator attended real-Git runtime', { concurrency: false }, ()
     assert.equal(paused.pause_code, 'ambiguous_reviewer_launch')
     assert.equal(attempt.review?.launch_state, 'ambiguous')
     assert.equal(attempt.launch_state, 'settled')
-    test.coordinator.dispose()
+    test.adapter.behavior.hang_reviewer_create = false
+    test.adapter.reviewerCreateResolvers.splice(0).forEach(resolve => resolve())
+    await test.coordinator.awaitQuiescence(1_000)
+    await test.coordinator.dispose()
   })
 
   it('resolves reviewer ambiguity through resume and clears the invariant on retry', async () => {
@@ -515,17 +611,20 @@ describe('EpicCoordinator attended real-Git runtime', { concurrency: false }, ()
     const paused = test.store.load()!
     assert.equal(paused.state.pause_code, 'ambiguous_reviewer_launch')
     test.adapter.behavior.hang_reviewer_create = false
+    test.adapter.reviewerCreateResolvers.splice(0).forEach(resolve => resolve())
+    await test.coordinator.awaitQuiescence(1_000)
+    const reconciled = test.store.load()!
 
     await test.coordinator.resumePaused({
-      expected_revision: paused.revision,
-      expected_state_sha256: paused.state_sha256,
-      expected_generation: paused.ownership_generation,
+      expected_revision: reconciled.revision,
+      expected_state_sha256: reconciled.state_sha256,
+      expected_generation: reconciled.ownership_generation,
     }, true)
     await test.coordinator.awaitQuiescence(10_000)
 
     const loaded = test.store.load()!
     assert.equal(loaded.state.items['item-a']!.status, 'passed')
-    test.coordinator.dispose()
+    await test.coordinator.dispose()
   })
 
   it('derives bounded attempt and review IDs for 60-character item IDs', async () => {
@@ -547,7 +646,102 @@ describe('EpicCoordinator attended real-Git runtime', { concurrency: false }, ()
     assert.equal(attempt.attempt_id.length <= 64, true)
     assert.equal(attempt.launch_id != null && attempt.launch_id.length <= 64, true)
     if (attempt.review) assert.equal(attempt.review.review_id.length <= 64, true)
-    test.coordinator.dispose()
+    await test.coordinator.dispose()
+  })
+
+  it('waits for and terminates a child created concurrently with disposal', async () => {
+    const test = fixture([{ item_id: 'item-a' }], 2, { behavior: { hang_execution_create: true } })
+    await test.coordinator.start(test.genesis)
+    while (test.adapter.createResolvers.length === 0) await new Promise(resolve => setTimeout(resolve, 5))
+
+    const disposing = test.coordinator.dispose()
+    test.adapter.createResolvers.splice(0).forEach(resolve => resolve())
+    await disposing
+
+    assert.equal(test.adapter.aborts.length >= 1, true)
+    assert.equal(test.adapter.aborts.every(id => id === 'child-1'), true)
+  })
+
+  it('keeps timed-out child creation under supervision until a late child is terminated', async () => {
+    const config = { ...CONFIG, max_attempt_duration_ms: 20, active_time_checkpoint_ms: 10 }
+    const test = fixture([{ item_id: 'item-a' }], 2, { config, behavior: { hang_execution_create: true } })
+    await test.coordinator.start(test.genesis)
+    while (test.adapter.createResolvers.length === 0) await new Promise(resolve => setTimeout(resolve, 5))
+    while (test.store.load()!.state.status !== 'paused') await new Promise(resolve => setTimeout(resolve, 5))
+
+    const waiting = await test.coordinator.awaitQuiescence(30)
+    assert.equal(waiting.timed_out, true)
+    test.adapter.createResolvers.splice(0).forEach(resolve => resolve())
+    const settled = await test.coordinator.awaitQuiescence(1_000)
+
+    assert.equal(settled.quiescent, true)
+    assert.deepEqual(test.adapter.aborts, ['child-1'])
+    await test.coordinator.dispose()
+  })
+
+  it('keeps disposal attached to a creation that resolves after its operation deadline', async () => {
+    const config = { ...CONFIG, max_attempt_duration_ms: 100, active_time_checkpoint_ms: 50 }
+    const test = fixture([{ item_id: 'item-a' }], 2, { config, behavior: { hang_execution_create: true } })
+    await test.coordinator.start(test.genesis)
+    while (test.adapter.createResolvers.length === 0) await new Promise(resolve => setTimeout(resolve, 5))
+
+    const disposing = test.coordinator.dispose()
+    await new Promise(resolve => setTimeout(resolve, 120))
+    test.adapter.createResolvers.splice(0).forEach(resolve => resolve())
+    await disposing
+
+    assert.equal(test.adapter.aborts.length >= 1, true)
+    assert.equal(test.adapter.aborts.every(id => id === 'child-1'), true)
+    const attempt = test.store.load()!.state.items['item-a']!.attempts[0]!
+    assert.equal(attempt.child_session_id, 'child-1')
+    assert.equal(attempt.launch_state, 'ambiguous')
+  })
+
+  it('allows a failed disposal to be retried after pending creation is reconciled', async () => {
+    const config = { ...CONFIG, max_attempt_duration_ms: 30, active_time_checkpoint_ms: 10 }
+    const test = fixture([{ item_id: 'item-a' }], 2, { config, behavior: { hang_execution_create: true } })
+    await test.coordinator.start(test.genesis)
+    while (test.adapter.createResolvers.length === 0) await new Promise(resolve => setTimeout(resolve, 5))
+
+    await assert.rejects(test.coordinator.dispose(), /timed out while supervising unresolved child creation/)
+    test.adapter.createResolvers.splice(0).forEach(resolve => resolve())
+    await new Promise(resolve => setTimeout(resolve, 50))
+
+    await assert.doesNotReject(test.coordinator.dispose())
+    assert.equal(test.adapter.aborts.length >= 1, true)
+    assert.equal(test.adapter.aborts.every(id => id === 'child-1'), true)
+  })
+
+  it('reports late-child identity persistence failure even after termination succeeds', async () => {
+    const test = fixture([{ item_id: 'item-a' }], 2, { behavior: { hang_execution_create: true } })
+    await test.coordinator.start(test.genesis)
+    while (test.adapter.createResolvers.length === 0) await new Promise(resolve => setTimeout(resolve, 5))
+    const append = test.store.append.bind(test.store)
+    test.store.append = (() => { throw new Error('simulated late persistence failure') }) as typeof test.store.append
+
+    const disposing = test.coordinator.dispose()
+    test.adapter.createResolvers.splice(0).forEach(resolve => resolve())
+    await assert.rejects(disposing, /simulated late persistence failure/)
+    assert.equal(test.adapter.aborts.every(id => id === 'child-1'), true)
+    test.store.append = append
+  })
+
+  it('supervises pending creation when periodic active-time accounting pauses the epic', async () => {
+    const config = { ...CONFIG, max_attempt_duration_ms: 500, active_time_checkpoint_ms: 10 }
+    const test = fixture([{ item_id: 'item-a' }], 2, {
+      config,
+      behavior: { hang_execution_create: true },
+      budgets: [{ dimension: 'active_time_ms', scope: 'epic', item_id: null, limit: 1, extensions: [] }],
+    })
+    await test.coordinator.start(test.genesis)
+    while (test.adapter.createResolvers.length === 0) await new Promise(resolve => setTimeout(resolve, 5))
+    while (test.store.load()!.state.status !== 'paused') await new Promise(resolve => setTimeout(resolve, 5))
+
+    assert.equal((await test.coordinator.awaitQuiescence(20)).timed_out, true)
+    test.adapter.createResolvers.splice(0).forEach(resolve => resolve())
+    assert.equal((await test.coordinator.awaitQuiescence(1_000)).quiescent, true)
+    assert.deepEqual(test.adapter.aborts, ['child-1'])
+    await test.coordinator.dispose()
   })
 
   it('completes after resume when all items are already integrated', async () => {
@@ -563,6 +757,6 @@ describe('EpicCoordinator attended real-Git runtime', { concurrency: false }, ()
     })
     const integrated = test.store.load()!
     assert.equal(integrated.state.status, 'completed')
-    test.coordinator.dispose()
+    await test.coordinator.dispose()
   })
 })

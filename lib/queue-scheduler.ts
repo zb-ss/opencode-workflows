@@ -1,7 +1,6 @@
-import { randomUUID } from 'node:crypto'
+import path from 'node:path'
 
 import {
-  assertFencingGeneration,
   type FencingLeaseHandle,
   type FencingLeaseRecord,
 } from './fencing-lease.ts'
@@ -10,9 +9,12 @@ import {
   type QueueLaunchIntent,
   type QueueLaunchState,
   type QueueWorkflowRecord,
+  type QueueWorkflowStatus,
 } from './queue-contracts.ts'
 import type { EnabledQueueConfig } from './queue-policy.ts'
+import { QueueRateLimiter } from './queue-rate-limiter.ts'
 import type { QueueStore } from './queue-store.ts'
+import { sha256Hex } from './canonical-json.ts'
 
 export class QueueSchedulerError extends Error {
   readonly code: string
@@ -27,20 +29,38 @@ export interface QueueSchedulerOptions {
   store: QueueStore
   config: EnabledQueueConfig
   now: () => number
-  onWorkflowReady?: (workflowId: string) => void
+  onWorkflowReady?: (workflowId: string, leaseHandle: FencingLeaseHandle) => void
+  onRecoverLaunch?: (record: QueueWorkflowRecord, leaseHandle: FencingLeaseHandle) => Promise<QueueRecoveredLaunch | null>
+  onLeaseLost?: () => void
   interval?: (callback: () => void, delayMs: number) => unknown
   clearInterval?: (handle: unknown) => void
 }
 
+export interface QueueRecoveredLaunch {
+  status: 'paused' | 'completed' | 'failed' | 'cancelled'
+  pause_reason: string | null
+  child_session_ids: string[]
+}
+
 export interface QueueSchedulerHandle {
   generation: number
+  lease: FencingLeaseHandle
   renew(): void
   dispose(): void
-  recover(): Promise<void>
+  recover(): Promise<QueueRecoveryResult>
+  schedule(): void
+}
+
+export interface QueueRecoveryResult {
+  recovered: boolean
+  reconciled: number
+  failed: number
+  failures: Array<{ workflow_id: string; error: string }>
 }
 
 const AMBIGUOUS_LAUNCH_STATES: ReadonlySet<QueueLaunchState> = new Set(['reserved', 'created', 'prompted'])
 const TERMINAL_LAUNCH_STATES: ReadonlySet<QueueLaunchState> = new Set(['settled', 'ambiguous'])
+const CAPACITY_CONSUMING_STATUSES: ReadonlySet<QueueWorkflowStatus> = new Set(['leased', 'recovering', 'running'])
 
 function assertConfig(config: EnabledQueueConfig): Required<Pick<EnabledQueueConfig, 'max_concurrent_workflows' | 'lease_duration_ms' | 'renewal_interval_ms' | 'recovery_attempt_limit'>> {
   if (config.max_concurrent_workflows === undefined) {
@@ -54,6 +74,9 @@ function assertConfig(config: EnabledQueueConfig): Required<Pick<EnabledQueueCon
   }
   if (config.recovery_attempt_limit === undefined) {
     throw new QueueSchedulerError('config_incomplete', 'recovery_attempt_limit is required')
+  }
+  if (config.retry_policy === undefined) {
+    throw new QueueSchedulerError('config_incomplete', 'retry_policy is required')
   }
   if (config.renewal_interval_ms >= config.lease_duration_ms) {
     throw new QueueSchedulerError('config_invalid', 'renewal_interval_ms must be less than lease_duration_ms')
@@ -69,32 +92,49 @@ function defaultClearInterval(handle: unknown): void {
   if (handle !== null && handle !== undefined) clearInterval(handle as ReturnType<typeof setInterval>)
 }
 
+type SchedulerState = 'stopped' | 'recovering' | 'active' | 'disposed'
+
 export class QueueScheduler {
   private readonly store: QueueStore
   private readonly config: Required<Pick<EnabledQueueConfig, 'max_concurrent_workflows' | 'lease_duration_ms' | 'renewal_interval_ms' | 'recovery_attempt_limit'>>
   private readonly now: () => number
-  private readonly onWorkflowReady?: (workflowId: string) => void
+  private readonly onWorkflowReady?: (workflowId: string, leaseHandle: FencingLeaseHandle) => void
+  private readonly onRecoverLaunch?: (record: QueueWorkflowRecord, leaseHandle: FencingLeaseHandle) => Promise<QueueRecoveredLaunch | null>
+  private readonly onLeaseLost?: () => void
   private readonly intervalFn: (callback: () => void, delayMs: number) => unknown
   private readonly clearIntervalFn: (handle: unknown) => void
+  private readonly rateLimiter: QueueRateLimiter | null
   private leaseHandle: FencingLeaseHandle | null = null
   private leaseRecord: FencingLeaseRecord | null = null
   private renewalTimer: unknown | null = null
-  private disposed = false
+  private schedulerState: SchedulerState = 'stopped'
+  private recoveryPromise: Promise<QueueRecoveryResult> | null = null
 
   constructor(options: QueueSchedulerOptions) {
     this.store = options.store
     this.config = assertConfig(options.config)
     this.now = options.now
     this.onWorkflowReady = options.onWorkflowReady
+    this.onRecoverLaunch = options.onRecoverLaunch
+    this.onLeaseLost = options.onLeaseLost
     this.intervalFn = options.interval ?? defaultInterval
     this.clearIntervalFn = options.clearInterval ?? defaultClearInterval
+    this.rateLimiter = options.config.rate_windows && options.config.rate_windows.length > 0
+      ? new QueueRateLimiter({
+          rate_directory: path.join(options.store.getConfigDirectory(), 'rate'),
+          windows: options.config.rate_windows,
+          now: this.now,
+        })
+      : null
   }
 
-  start(): QueueSchedulerHandle {
-    if (this.disposed) throw new QueueSchedulerError('disposed', 'scheduler has been disposed')
+  start(options?: { schedule?: boolean }): QueueSchedulerHandle {
+    const shouldSchedule = options?.schedule ?? true
+    if (this.schedulerState === 'disposed') throw new QueueSchedulerError('disposed', 'scheduler has been disposed')
     if (this.leaseHandle !== null) {
       if (this.leaseHandle.is_valid()) {
-        this.schedule()
+        if (this.schedulerState === 'stopped') this.schedulerState = 'active'
+        if (shouldSchedule && this.schedulerState === 'active') this.schedule()
         return this.handleFromCurrentLease()
       }
       this.handleLeaseLoss()
@@ -102,8 +142,9 @@ export class QueueScheduler {
     const leaseStore = this.store.getLeaseStore()
     this.leaseHandle = leaseStore.acquire()
     this.leaseRecord = this.leaseHandle.lease
+    this.schedulerState = this.leaseRecord.fencing_generation > 1 ? 'recovering' : 'active'
     this.startRenewalTimer()
-    this.schedule()
+    if (shouldSchedule && this.schedulerState === 'active') this.schedule()
     return this.handleFromCurrentLease()
   }
 
@@ -115,19 +156,26 @@ export class QueueScheduler {
     return this.leaseHandle !== null && this.leaseHandle.is_valid()
   }
 
+  get recoveryRequired(): boolean {
+    return this.schedulerState === 'recovering'
+  }
+
   private handleFromCurrentLease(): QueueSchedulerHandle {
     const generation = this.leaseRecord!.fencing_generation
+    const leaseHandle = this.leaseHandle!
     const self = this
     return {
       generation,
+      lease: leaseHandle,
       renew(): void { self.renew() },
       dispose(): void { self.dispose() },
-      async recover(): Promise<void> { await self.recover() },
+      async recover(): Promise<QueueRecoveryResult> { return await self.recover() },
+      schedule(): void { self.schedule() },
     }
   }
 
   renew(): void {
-    if (this.disposed || this.leaseHandle === null) return
+    if (this.schedulerState === 'disposed' || this.leaseHandle === null) return
     try {
       this.leaseRecord = this.leaseHandle.renew()
     } catch {
@@ -135,110 +183,258 @@ export class QueueScheduler {
     }
   }
 
-  async recover(): Promise<void> {
-    if (this.disposed) throw new QueueSchedulerError('disposed', 'scheduler has been disposed')
+  recover(): Promise<QueueRecoveryResult> {
+    if (this.schedulerState === 'disposed') return Promise.reject(new QueueSchedulerError('disposed', 'scheduler has been disposed'))
+    if (this.recoveryPromise) return this.recoveryPromise
+    const recovery = this.recoverOnce().finally(() => {
+      if (this.recoveryPromise === recovery) this.recoveryPromise = null
+    })
+    this.recoveryPromise = recovery
+    return recovery
+  }
+
+  private async recoverOnce(): Promise<QueueRecoveryResult> {
     if (this.leaseHandle === null || this.leaseRecord === null) {
       throw new QueueSchedulerError('no_lease', 'recovery requires an active lease')
     }
+    // Enter recovering state: schedule() is disabled until recovery completes.
+    this.schedulerState = 'recovering'
+    const leaseHandle = this.leaseHandle
     const generation = this.leaseRecord.fencing_generation
-    assertFencingGeneration(this.store.getLeaseStore(), generation)
     const index = this.store.rebuildIndex()
     for (const entry of index) {
       if (entry.fencing_generation > generation) {
         throw new QueueSchedulerError('stale_generation', `recovery saw a newer generation ${entry.fencing_generation}`)
       }
     }
+    const failures: Array<{ workflow_id: string; error: string }> = []
+    let reconciled = 0
     for (const entry of index) {
       const record = this.store.load(entry.workflow_id)
       if (record === null) continue
-      if (record.launch_intent === null) continue
+      if (record.launch_intent === null) {
+        // Queued/paused/terminal records can be re-stamped directly. A
+        // capacity-consuming record without launch evidence cannot have a
+        // surviving engine after restart, so pause it for attended repair.
+        try {
+          this.store.reconcile(record.workflow_id, record.state_revision, leaseHandle, (next) => {
+            next.fencing_generation = generation
+            if (CAPACITY_CONSUMING_STATUSES.has(next.status)) {
+              next.status = 'paused'
+              next.pause_reason = 'capacity-consuming workflow lacks durable launch evidence'
+            }
+            return next
+          })
+          reconciled += 1
+        } catch (error) {
+          failures.push({ workflow_id: record.workflow_id, error: (error as Error).message })
+        }
+        continue
+      }
       if (record.launch_intent.fencing_generation > generation) {
         throw new QueueSchedulerError('stale_generation', `launch intent carries a newer generation ${record.launch_intent.fencing_generation}`)
       }
-      if (TERMINAL_LAUNCH_STATES.has(record.launch_intent.launch_state)) continue
-      const isAmbiguous = AMBIGUOUS_LAUNCH_STATES.has(record.launch_intent.launch_state)
-      if (isAmbiguous) {
-        this.reconcileRecovery(record, generation, (next) => {
-          next.status = 'paused'
-          next.pause_reason = 'ambiguous launch intent during recovery'
-          if (next.launch_intent !== null) {
-            next.launch_intent = { ...next.launch_intent, launch_state: 'ambiguous' }
+      const launchState = record.launch_intent.launch_state
+      try {
+        switch (launchState) {
+          case 'settled': {
+            // A settled launch without a terminal outer workflow outcome has
+            // no surviving engine that can finish settlement after restart.
+            // Pause it for attended resolution rather than consuming capacity
+            // forever or guessing the missing outcome.
+            this.store.reconcile(record.workflow_id, record.state_revision, leaseHandle, (next) => {
+              next.fencing_generation = generation
+              if (CAPACITY_CONSUMING_STATUSES.has(next.status)) {
+                next.status = 'paused'
+                next.pause_reason = 'settled launch lacks a durable terminal workflow outcome'
+              }
+              return next
+            })
+            reconciled += 1
+            break
           }
-          return next
-        })
-      } else {
-        this.reconcileRecovery(record, generation, (next) => {
-          next.status = 'queued'
-          next.launch_intent = null
-          return next
-        })
+          case 'ambiguous': {
+            // No engine from the confirmed-dead former runtime can retain
+            // capacity. Pause legacy capacity-consuming records explicitly.
+            this.store.reconcile(record.workflow_id, record.state_revision, leaseHandle, (next) => {
+              next.fencing_generation = generation
+              if (CAPACITY_CONSUMING_STATUSES.has(next.status)) {
+                next.status = 'paused'
+                next.pause_reason = 'ambiguous launch requires attended resolution'
+              }
+              return next
+            })
+            reconciled += 1
+            break
+          }
+          case 'reserved': {
+            // Ambiguous: a reservation was made but no child session was
+            // created. We cannot prove whether the launch occurred.
+            this.store.reconcile(record.workflow_id, record.state_revision, leaseHandle, (next) => {
+              next.fencing_generation = generation
+              next.status = 'paused'
+              next.pause_reason = 'ambiguous launch intent during recovery'
+              if (next.launch_intent !== null) {
+                next.launch_intent = { ...next.launch_intent, launch_state: 'ambiguous' }
+              }
+              return next
+            })
+            reconciled += 1
+            break
+          }
+          case 'created':
+          case 'prompted': {
+            let recoveredLaunch: QueueRecoveredLaunch | null = null
+            if (this.onRecoverLaunch) {
+              recoveredLaunch = await this.onRecoverLaunch(record, leaseHandle)
+              if (!recoveredLaunch) throw new QueueSchedulerError('child_termination_uncertain', 'recovery could not prove child-session termination')
+            }
+            // Ambiguous: a child session may have been created. We cannot
+            // infer its outcome, but a configured owner callback can prove
+            // termination and make a later state-preserving resume safe.
+            this.store.reconcile(record.workflow_id, record.state_revision, leaseHandle, (next) => {
+              next.fencing_generation = generation
+              next.status = recoveredLaunch?.status ?? 'paused'
+              next.pause_reason = recoveredLaunch
+                ? recoveredLaunch.pause_reason
+                : 'ambiguous launch intent during recovery'
+              if (next.launch_intent !== null) {
+                const childSessionIds = recoveredLaunch
+                  ? [...new Set([...next.launch_intent.child_session_ids, ...recoveredLaunch.child_session_ids])]
+                  : next.launch_intent.child_session_ids
+                next.launch_intent = recoveredLaunch
+                  ? {
+                      ...next.launch_intent,
+                      session_id: next.launch_intent.session_id ?? childSessionIds[0] ?? null,
+                      child_session_ids: childSessionIds,
+                      launch_state: 'settled',
+                      settled_at: new Date(this.now()).toISOString(),
+                    }
+                  : { ...next.launch_intent, launch_state: 'ambiguous' }
+              }
+              return next
+            })
+            reconciled += 1
+            break
+          }
+          default: {
+            // Exhaustive: any future launch state must be handled explicitly.
+            failures.push({ workflow_id: record.workflow_id, error: `unhandled launch state: ${launchState}` })
+          }
+        }
+      } catch (error) {
+        failures.push({ workflow_id: record.workflow_id, error: (error as Error).message })
       }
     }
+    const result: QueueRecoveryResult = {
+      recovered: failures.length === 0,
+      reconciled,
+      failed: failures.length,
+      failures,
+    }
+    // Only activate scheduling after successful recovery. If any record
+    // failed reconciliation, keep the scheduler non-dispatching so the
+    // operator can inspect and resolve before work is admitted.
+    if ((this.schedulerState as SchedulerState) !== 'disposed') {
+      if (result.recovered) {
+        this.schedulerState = 'active'
+      } else {
+        // Stay in recovering state; repeated start() calls must not reactivate
+        // dispatch before every record has been reconciled successfully.
+        this.schedulerState = 'recovering'
+      }
+    }
+    return result
   }
 
   dispose(): void {
-    if (this.disposed) return
-    this.disposed = true
+    if (this.schedulerState === 'disposed') return
+    this.schedulerState = 'disposed'
     this.stopRenewalTimer()
     if (this.leaseHandle !== null) {
-      this.returnLeasedToQueued()
+      this.preserveLaunchIntents()
       this.leaseHandle.release()
       this.leaseHandle = null
       this.leaseRecord = null
     }
   }
 
-  private schedule(): void {
-    if (this.disposed || this.leaseHandle === null || this.leaseRecord === null) return
+  schedule(): void {
+    if (this.schedulerState !== 'active' || this.leaseHandle === null || this.leaseRecord === null) return
     if (!this.leaseHandle.is_valid()) {
       this.handleLeaseLoss()
       return
     }
+    const leaseHandle = this.leaseHandle
     const generation = this.leaseRecord.fencing_generation
+    let index: QueueIndexEntry[]
     try {
-      assertFencingGeneration(this.store.getLeaseStore(), generation)
+      index = this.store.rebuildIndex()
     } catch {
+      // A corrupt index is fail-closed: stop scheduling until attended repair.
       this.handleLeaseLoss()
       return
     }
-    const index = this.store.rebuildIndex()
-    const runningCount = this.countRunning(index)
+    const activeCount = this.countActive(index)
     const maxConcurrent = this.config.max_concurrent_workflows
-    if (runningCount >= maxConcurrent) return
+    if (activeCount >= maxConcurrent) return
     const queued = index.filter(entry => entry.status === 'queued')
-    let slots = maxConcurrent - runningCount
+    let slots = maxConcurrent - activeCount
     for (const entry of queued) {
       if (slots <= 0) break
-      if (this.admitWorkflow(entry, generation)) slots -= 1
+      try {
+        if (this.admitWorkflow(entry, generation, leaseHandle)) slots -= 1
+      } catch {
+        this.handleLeaseLoss()
+        return
+      }
     }
   }
 
-  private countRunning(index: QueueIndexEntry[]): number {
+  private countActive(index: QueueIndexEntry[]): number {
     let count = 0
-    for (const entry of index) if (entry.status === 'running') count += 1
+    for (const entry of index) {
+      if (CAPACITY_CONSUMING_STATUSES.has(entry.status)) count += 1
+    }
     return count
   }
 
-  private admitWorkflow(entry: QueueIndexEntry, generation: number): boolean {
+  private admitWorkflow(entry: QueueIndexEntry, generation: number, leaseHandle: FencingLeaseHandle): boolean {
     const record = this.store.load(entry.workflow_id)
     if (record === null) return false
     if (record.status !== 'queued') return false
     if (record.launch_intent !== null) return false
-    try {
-      assertFencingGeneration(this.store.getLeaseStore(), generation)
-    } catch {
+    if (record.retry_not_before !== null && this.now() < Date.parse(record.retry_not_before)) return false
+    if (!this.leaseHandle?.is_valid()) {
       this.handleLeaseLoss()
       return false
     }
     const reservedIntent = this.createReservedIntent(record, generation)
+    if (this.rateLimiter !== null && !this.rateLimiter.tryAcquire(reservedIntent.intent_id)) {
+      return false
+    }
     try {
-      const updated = this.store.update(record.workflow_id, record.state_revision, record.fencing_generation, (next) => {
+      const updated = this.store.update(record.workflow_id, record.state_revision, leaseHandle, (next) => {
         next.status = 'leased'
         next.launch_intent = reservedIntent
         return next
       })
       if (updated.status !== 'leased' || updated.launch_intent === null) return false
-      this.onWorkflowReady?.(record.workflow_id)
+      try {
+        this.onWorkflowReady?.(record.workflow_id, leaseHandle)
+      } catch {
+        try {
+          this.store.update(record.workflow_id, updated.state_revision, leaseHandle, (next) => {
+            next.status = 'paused'
+            next.pause_reason = 'workflow dispatch callback failed before execution began'
+            next.failure_classification = 'transport'
+            if (next.launch_intent !== null) {
+              next.launch_intent = { ...next.launch_intent, launch_state: 'settled', settled_at: new Date(this.now()).toISOString() }
+            }
+            return next
+          })
+        } catch { /* The durable leased reservation continues consuming capacity. */ }
+      }
       return true
     } catch {
       return false
@@ -248,10 +444,12 @@ export class QueueScheduler {
   private createReservedIntent(record: QueueWorkflowRecord, generation: number): QueueLaunchIntent {
     const nowIso = new Date(this.now()).toISOString()
     return {
-      intent_id: `intent-${randomUUID()}`,
+      intent_id: sha256Hex(`${record.workflow_id}\0${record.recovery_attempt_count}`),
       workflow_id: record.workflow_id,
       fencing_generation: generation,
       session_id: null,
+      child_session_ids: [],
+      engine_instance_id: null,
       agent: record.mode,
       model: record.definition_id,
       launch_state: 'reserved',
@@ -262,52 +460,66 @@ export class QueueScheduler {
     }
   }
 
-  private reconcileRecovery(
-    record: QueueWorkflowRecord,
-    generation: number,
-    mutate: (record: QueueWorkflowRecord) => QueueWorkflowRecord,
-  ): void {
+  private preserveLaunchIntents(): void {
+    if (this.leaseHandle === null) return
+    const leaseHandle = this.leaseHandle
+    let index: QueueIndexEntry[]
     try {
-      assertFencingGeneration(this.store.getLeaseStore(), generation)
+      index = this.store.rebuildIndex()
     } catch {
-      throw new QueueSchedulerError('stale_generation', `recovery lost authority during reconciliation of ${record.workflow_id}`)
+      return
     }
-    try {
-      this.store.reconcile(record.workflow_id, record.state_revision, generation, mutate)
-    } catch {
-      // Best effort during recovery — a failed reconciliation leaves the record untouched.
-    }
-  }
-
-  private returnLeasedToQueued(): void {
-    const index = this.store.rebuildIndex()
     for (const entry of index) {
       if (entry.status !== 'leased') continue
-      const record = this.store.load(entry.workflow_id)
+      let record: QueueWorkflowRecord | null
+      try { record = this.store.load(entry.workflow_id) }
+      catch { return }
       if (record === null) continue
-      try {
-        this.store.update(record.workflow_id, record.state_revision, record.fencing_generation, (next) => {
-          next.status = 'queued'
-          next.launch_intent = null
-          return next
-        })
-      } catch {
-        // Best effort during lease loss or disposal.
+      if (record.launch_intent === null) continue
+      // During lease loss or disposal, we cannot prove whether a child
+      // session was created. All non-terminal launch intents are
+      // ambiguous and must be preserved as paused.
+      if (!TERMINAL_LAUNCH_STATES.has(record.launch_intent.launch_state)) {
+        try {
+          this.store.update(record.workflow_id, record.state_revision, leaseHandle, (next) => {
+            next.status = 'paused'
+            next.pause_reason = 'ambiguous launch intent preserved during lease loss'
+            if (next.launch_intent !== null) {
+              next.launch_intent = { ...next.launch_intent, launch_state: 'ambiguous' }
+            }
+            return next
+          })
+        } catch {
+          // Best effort during lease loss.
+        }
       }
     }
   }
 
   private handleLeaseLoss(): void {
     this.stopRenewalTimer()
+    this.schedulerState = 'stopped'
     if (this.leaseHandle === null || this.leaseRecord === null) return
-    this.returnLeasedToQueued()
+    // A successor reconciles records after actual expiry. This process may
+    // persist ambiguity only while its current lease is still authoritative.
+    if (this.leaseHandle.is_valid()) this.preserveLaunchIntents()
     this.leaseHandle = null
     this.leaseRecord = null
+    // Notify the owner that lease authority was lost so it can cancel any
+    // running engines that were dispatched under the expired lease.
+    this.onLeaseLost?.()
   }
 
   private startRenewalTimer(): void {
     if (this.leaseRecord === null) return
-    this.renewalTimer = this.intervalFn(() => this.renew(), this.config.renewal_interval_ms)
+    this.renewalTimer = this.intervalFn(() => {
+      try {
+        this.renew()
+        this.schedule()
+      } catch {
+        try { this.handleLeaseLoss() } catch { /* Timer failures must not escape the plugin host. */ }
+      }
+    }, this.config.renewal_interval_ms)
   }
 
   private stopRenewalTimer(): void {

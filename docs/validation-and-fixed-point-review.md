@@ -1,6 +1,6 @@
 # Validation And Fixed-Point Review
 
-Phase 2 adds two opt-in capabilities: a typed validation broker for attended interactive automatic stages and a structured fixed-point review coordinator built on the existing swarm runtime. Neither capability enables automation, grants publication authority, or provides an operating-system sandbox.
+OpenCode Workflows provides two related opt-in capabilities: a typed validation broker for attended interactive automatic stages and a structured fixed-point review coordinator built on the existing swarm runtime. Neither capability enables automation, grants publication authority, or provides an operating-system sandbox.
 
 ## Validation Broker
 
@@ -93,7 +93,7 @@ The loop stops with:
 | `blocked` | The correction agent reported a missing capability or operator decision |
 | `failed` | A batch timed out, a child failed, or structured output was invalid |
 
-There is no majority vote and no pass inferred from missing prose. Review and read-only correction-proposal batches use the persistent swarm queue, but the multi-batch coordinator itself is not resumed automatically after a plugin restart. Durable unattended queue recovery remains a later roadmap phase.
+There is no majority vote and no pass inferred from missing prose. Review and read-only correction-proposal batches use the persistent swarm queue, but the multi-batch coordinator itself is not resumed automatically after a plugin restart. It does not use the separate durable automatic-workflow queue.
 
 ## Related Documentation
 

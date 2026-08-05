@@ -32,6 +32,7 @@ const HARD_DENIES: readonly PermissionRule[] = [
   { permission: 'queue_pause', pattern: '*', action: 'deny' },
   { permission: 'queue_resume', pattern: '*', action: 'deny' },
   { permission: 'queue_cancel', pattern: '*', action: 'deny' },
+  { permission: 'queue_delete', pattern: '*', action: 'deny' },
   { permission: 'queue_recover', pattern: '*', action: 'deny' },
   { permission: 'bash', pattern: '*', action: 'deny' },
   { permission: 'edit', pattern: '*', action: 'deny' },

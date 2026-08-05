@@ -31,7 +31,7 @@ Automatic E2E state is owned by the starting OpenCode session, directory, and wo
 /workflow-auto-resume
 ```
 
-Resume reauthorizes agents and reconciles any saved child sessions before continuing. Token, cost, wall-time, session, parallelism, and attempt budgets apply to E2E stages.
+Resume reauthorizes agents and reconciles any saved child sessions before continuing. Configured token, cost, calendar-age, active-time, session, parallelism, and attempt budgets apply to E2E stages.
 
 ## Browser Evidence
 

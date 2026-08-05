@@ -86,7 +86,7 @@ function createHarness(test: TestContext): Harness {
   const worktree = path.join(root, 'worktree')
   const binaryDirectory = path.join(root, 'bin')
   const logPath = path.join(root, 'fake-cli.log')
-  fs.mkdirSync(configDirectory, { recursive: true })
+  fs.mkdirSync(configDirectory, { recursive: true, mode: 0o700 })
   fs.mkdirSync(worktree, { recursive: true })
   fs.mkdirSync(binaryDirectory, { recursive: true })
   for (const provider of ['claude', 'agy']) {
@@ -193,7 +193,7 @@ describe('external CLI delegation', () => {
     }, harness.context('session-worktree'))
     const invocation = harness.invocations()[0]
 
-    assert.equal(result.success, true)
+    assert.equal(result.success, true, JSON.stringify(result))
     assert.match(String(result.branch_name), /^delegate\/session-[a-f0-9]{24}\/task-private$/)
     assert.equal(invocation.cwd.startsWith(`${harness.worktree}${path.sep}`), false)
     assert.ok(invocation.cwd.startsWith(path.join(harness.configDirectory, 'workflows', 'runtime', 'worktrees')))

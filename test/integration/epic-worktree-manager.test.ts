@@ -57,10 +57,16 @@ function installCleanupBranchRace(
   fs.writeFileSync(shimPath, `#!/usr/bin/env node
 const { spawnSync } = require('node:child_process')
 const args = process.argv.slice(2)
-const result = spawnSync(process.env.REAL_GIT, args, { cwd: process.cwd(), env: process.env, stdio: 'inherit' })
+const realGit = ${JSON.stringify(realGit)}
+const branch = ${JSON.stringify(`refs/heads/${branch}`)}
+const competingCommit = ${JSON.stringify(competingCommit)}
+const expectedHead = ${JSON.stringify(expectedHead)}
+const result = spawnSync(realGit, args, { cwd: process.cwd(), env: process.env, stdio: 'inherit' })
 if (result.status !== 0) process.exit(result.status || 1)
-if (args[0] === 'worktree' && args[1] === 'remove') {
-  const advanced = spawnSync(process.env.REAL_GIT, ['update-ref', process.env.RACE_BRANCH, process.env.RACE_COMMIT, process.env.RACE_EXPECTED], { cwd: process.cwd(), stdio: 'inherit' })
+// Privileged Git calls now prepend sandboxed -c options, so match by subcommand.
+const worktreeIndex = args.indexOf('worktree')
+if (worktreeIndex >= 0 && args[worktreeIndex + 1] === 'remove') {
+  const advanced = spawnSync(realGit, ['update-ref', branch, competingCommit, expectedHead], { cwd: process.cwd(), stdio: 'inherit' })
   if (advanced.status !== 0) process.exit(advanced.status || 1)
 }
 process.exit(0)
@@ -68,16 +74,11 @@ process.exit(0)
   fs.chmodSync(shimPath, 0o700)
   const previousPath = process.env.PATH
   process.env.PATH = `${shimDirectory}${path.delimiter}${previousPath ?? ''}`
-  process.env.REAL_GIT = realGit
-  process.env.RACE_BRANCH = `refs/heads/${branch}`
-  process.env.RACE_COMMIT = competingCommit
-  process.env.RACE_EXPECTED = expectedHead
   return {
     competingCommit,
     restore: () => {
       if (previousPath === undefined) delete process.env.PATH
       else process.env.PATH = previousPath
-      for (const name of ['REAL_GIT', 'RACE_BRANCH', 'RACE_COMMIT', 'RACE_EXPECTED']) delete process.env[name]
     },
   }
 }
@@ -116,7 +117,7 @@ describe('epic worktree isolation and provenance', { concurrency: false }, () =>
     assert.deepEqual(noOp.changed_files, [])
   })
 
-  it('runs epic checkpoint hooks and preserves work when a hook rejects the commit', () => {
+  it('does not execute repository hooks during epic checkpoint commits', () => {
     const { parent, root } = repository()
     const created = createEpicAttemptWorktree(root, 'refs/heads/main', 'epic-1', 'item-1', 'attempt-1')
     const hook = path.join(root, '.git', 'hooks', 'pre-commit')
@@ -124,14 +125,8 @@ describe('epic worktree isolation and provenance', { concurrency: false }, () =>
     fs.writeFileSync(hook, `#!/bin/sh\nprintf ran > "${marker}"\n`)
     fs.chmodSync(hook, 0o700)
     fs.writeFileSync(path.join(created.path, 'tracked.txt'), 'hooked checkpoint\n')
-    const checkpoint = checkpointEpicAttemptWorktree(root, created.path, created.evidence)
-    assert.equal(fs.readFileSync(marker, 'utf8'), 'ran')
-
-    fs.writeFileSync(hook, '#!/bin/sh\nexit 1\n')
-    fs.writeFileSync(path.join(created.path, 'tracked.txt'), 'rejected checkpoint\n')
-    assert.throws(() => checkpointEpicAttemptWorktree(root, created.path, created.evidence))
-    assert.equal(git(created.path, ['rev-parse', 'HEAD']), checkpoint.checkpoint_commit)
-    assert.match(git(created.path, ['status', '--porcelain']), /tracked\.txt/)
+    checkpointEpicAttemptWorktree(root, created.path, created.evidence)
+    assert.equal(fs.existsSync(marker), false, 'repository hook must not execute during checkpoint')
   })
 
   it('creates an exact bounded review patch and refuses post-checkpoint mutations', () => {
@@ -206,7 +201,7 @@ describe('epic worktree isolation and provenance', { concurrency: false }, () =>
     assert.throws(() => git(root, ['show-ref', '--verify', `refs/heads/${created.evidence.branch_name}`]))
   })
 
-  it('retains a concurrently advanced attempt branch during cleanup', () => {
+  it('does not execute a PATH-substituted Git binary during cleanup', () => {
     const { parent, root } = repository()
     const created = createEpicAttemptWorktree(root, 'refs/heads/main', 'epic-1', 'item-1', 'attempt-1')
     fs.writeFileSync(path.join(created.path, 'tracked.txt'), 'reviewed change\n')
@@ -226,12 +221,12 @@ describe('epic worktree isolation and provenance', { concurrency: false }, () =>
         created.evidence,
         checkpoint.checkpoint_commit,
         integrationCommit,
-      ), false)
+      ), true)
     } finally {
       race.restore()
     }
     assert.equal(fs.existsSync(created.path), false)
-    assert.equal(git(root, ['rev-parse', `refs/heads/${created.evidence.branch_name}`]), race.competingCommit)
+    assert.throws(() => git(root, ['rev-parse', `refs/heads/${created.evidence.branch_name}`]))
   })
 
   it('rejects identifier injection before creating work and preserves existing files', () => {

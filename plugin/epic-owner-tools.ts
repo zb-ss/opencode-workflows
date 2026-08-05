@@ -627,8 +627,14 @@ export async function createEpicOwnerTools(
       }),
     },
     dispose: async () => {
-      for (const coordinator of coordinators.values()) coordinator.dispose()
+      const results = await Promise.allSettled(
+        [...coordinators.values()].map(coordinator => coordinator.dispose())
+      )
       coordinators.clear()
+      const errors = results
+        .filter((r): r is PromiseRejectedResult => r.status === 'rejected')
+        .map(r => r.reason as Error)
+      if (errors.length > 0) throw errors[0]!
     },
   }
 }

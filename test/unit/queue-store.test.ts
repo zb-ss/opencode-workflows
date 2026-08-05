@@ -4,9 +4,9 @@ import os from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, it } from 'node:test'
 
-import { FencingLeaseStore } from '../../lib/fencing-lease.ts'
+import { FencingLeaseStore, type FencingLeaseHandle } from '../../lib/fencing-lease.ts'
 import { QueueStore, QueueStoreError } from '../../lib/queue-store.ts'
-import type { QueueWorkflowRecord } from '../../lib/queue-contracts.ts'
+import { parseQueueWorkflowRecord, QUEUE_SCHEMA_VERSION, type QueueWorkflowRecord } from '../../lib/queue-contracts.ts'
 
 const temporaryDirectories = new Set<string>()
 const FIXED_NOW = Date.parse('2026-07-24T12:00:00.000Z')
@@ -30,6 +30,7 @@ function fixture() {
   const dir = tempDir('queue-store-')
   const leaseStore = new FencingLeaseStore({
     lease_directory: path.join(dir, 'lease'),
+    lock_directory: dir,
     owner: 'test-scheduler',
     lease_duration_ms: 60_000,
     now: clockNow,
@@ -58,7 +59,7 @@ function workflowInput(id = 'wf-1') {
 describe('QueueStore', () => {
   it('enqueues a workflow with fencing generation and revision 1', () => {
     const test = fixture()
-    const record = test.store.enqueue(workflowInput(), test.generation)
+    const record = test.store.enqueue(workflowInput(), test.handle)
 
     assert.equal(record.status, 'queued')
     assert.equal(record.state_revision, 1)
@@ -68,7 +69,7 @@ describe('QueueStore', () => {
 
   it('loads an enqueued workflow by ID', () => {
     const test = fixture()
-    test.store.enqueue(workflowInput(), test.generation)
+    test.store.enqueue(workflowInput(), test.handle)
     const loaded = test.store.load('wf-1')
 
     assert.notEqual(loaded, null)
@@ -83,53 +84,110 @@ describe('QueueStore', () => {
 
   it('rejects duplicate enqueue with already_exists', () => {
     const test = fixture()
-    test.store.enqueue(workflowInput(), test.generation)
+    test.store.enqueue(workflowInput(), test.handle)
     assert.throws(
-      () => test.store.enqueue(workflowInput(), test.generation),
+      () => test.store.enqueue(workflowInput(), test.handle),
       (err: Error) => err instanceof QueueStoreError && err.code === 'already_exists',
     )
   })
 
+  it('reclaims bounded storage only after an authorized terminal removal', () => {
+    const test = fixture()
+    const store = new QueueStore({
+      config_directory: test.dir,
+      owner: 'test-scheduler',
+      now: clockNow,
+      max_workflows: 1,
+    })
+    const initial = store.enqueue(workflowInput('wf-old'), test.handle)
+    assert.throws(
+      () => store.removeTerminal('wf-old', initial.state_revision, test.handle, initial.fencing_generation),
+      (error: Error) => error instanceof QueueStoreError && error.code === 'not_terminal',
+    )
+    const leased = store.update('wf-old', initial.state_revision, test.handle, (record) => {
+      record.status = 'leased'
+      return record
+    })
+    const completed = store.update('wf-old', leased.state_revision, test.handle, (record) => {
+      record.status = 'completed'
+      return record
+    })
+    assert.throws(
+      () => store.enqueue(workflowInput('wf-new'), test.handle),
+      (error: Error) => error instanceof QueueStoreError && error.code === 'queue_full',
+    )
+
+    store.removeTerminal('wf-old', completed.state_revision, test.handle, completed.fencing_generation)
+
+    assert.equal(store.load('wf-old'), null)
+    assert.equal(store.enqueue(workflowInput('wf-new'), test.handle).status, 'queued')
+  })
+
   it('updates a workflow with CAS on revision and generation', () => {
     const test = fixture()
-    const initial = test.store.enqueue(workflowInput(), test.generation)
+    const initial = test.store.enqueue(workflowInput(), test.handle)
 
-    const updated = test.store.update('wf-1', initial.state_revision, test.generation, (record) => {
-      record.status = 'running'
+    const updated = test.store.update('wf-1', initial.state_revision, test.handle, (record) => {
+      record.status = 'leased'
       return record
     })
 
-    assert.equal(updated.status, 'running')
+    assert.equal(updated.status, 'leased')
     assert.equal(updated.state_revision, 2)
   })
 
   it('rejects update with stale revision', () => {
     const test = fixture()
-    const initial = test.store.enqueue(workflowInput(), test.generation)
+    const initial = test.store.enqueue(workflowInput(), test.handle)
 
     assert.throws(
-      () => test.store.update('wf-1', initial.state_revision + 99, test.generation, () => initial),
+      () => test.store.update('wf-1', initial.state_revision + 99, test.handle, () => initial),
       (err: Error) => err instanceof QueueStoreError && err.code === 'stale_revision',
     )
   })
 
-  it('rejects update with stale fencing generation', () => {
+  it('checks caller generation inside the same atomic update', () => {
     const test = fixture()
-    const initial = test.store.enqueue(workflowInput(), test.generation)
+    const initial = test.store.enqueue(workflowInput(), test.handle)
 
     assert.throws(
-      () => test.store.update('wf-1', initial.state_revision, test.generation + 99, () => initial),
+      () => test.store.update('wf-1', initial.state_revision, test.handle, record => record, initial.fencing_generation + 1),
       (err: Error) => err instanceof QueueStoreError && err.code === 'stale_generation',
+    )
+    assert.equal(test.store.load('wf-1')!.state_revision, initial.state_revision)
+  })
+
+  it('rejects update with stale fencing generation', () => {
+    const test = fixture()
+    const initial = test.store.enqueue(workflowInput(), test.handle)
+
+    // Simulate this scheduler losing authority and a new scheduler taking over.
+    // Expire the current lease and acquire a new, higher-generation lease in a
+    // separate store; passing the original handle should be rejected.
+    advance(61_000)
+    const newLeaseStore = new FencingLeaseStore({
+      lease_directory: path.join(test.dir, 'lease'),
+      lock_directory: test.dir,
+      owner: 'test-scheduler-next',
+      lease_duration_ms: 60_000,
+      now: clockNow,
+    })
+    const newHandle = newLeaseStore.acquire()
+    assert.ok(newHandle.lease.fencing_generation > test.generation, 'new generation should exceed the original')
+
+    assert.throws(
+      () => test.store.update('wf-1', initial.state_revision, test.handle, () => initial),
+      (err: Error) => err instanceof Error && /generation|lease/.test(err.message),
     )
   })
 
   it('rebuilds the index from persisted workflow records', () => {
     const test = fixture()
-    test.store.enqueue(workflowInput('wf-a'), test.generation)
+    test.store.enqueue(workflowInput('wf-a'), test.handle)
     advance(1000)
-    test.store.enqueue(workflowInput('wf-b'), test.generation)
+    test.store.enqueue(workflowInput('wf-b'), test.handle)
     advance(1000)
-    test.store.enqueue(workflowInput('wf-c'), test.generation)
+    test.store.enqueue(workflowInput('wf-c'), test.handle)
 
     const index = test.store.rebuildIndex()
     assert.equal(index.length, 3)
@@ -141,15 +199,16 @@ describe('QueueStore', () => {
 
   it('skips corrupt records during index rebuild', () => {
     const test = fixture()
-    test.store.enqueue(workflowInput('wf-a'), test.generation)
-    test.store.enqueue(workflowInput('wf-b'), test.generation)
+    test.store.enqueue(workflowInput('wf-a'), test.handle)
+    test.store.enqueue(workflowInput('wf-b'), test.handle)
 
     const corruptPath = path.join(test.dir, 'workflows', 'wf-corrupt.json')
     fs.writeFileSync(corruptPath, '{ invalid json', { mode: 0o600 })
 
-    const index = test.store.rebuildIndex()
-    assert.equal(index.length, 2)
-    assert.equal(index.every(e => e.workflow_id !== 'wf-corrupt'), true)
+    assert.throws(
+      () => test.store.rebuildIndex(),
+      (err: Error) => err instanceof QueueStoreError && err.code === 'record_corrupt',
+    )
   })
 
   it('returns empty index when no workflows exist', () => {
@@ -157,17 +216,31 @@ describe('QueueStore', () => {
     assert.deepEqual(test.store.rebuildIndex(), [])
   })
 
+  it('fails closed when the workflow directory cannot be enumerated', () => {
+    const test = fixture()
+    const workflows = path.join(test.dir, 'workflows')
+    fs.rmSync(workflows, { recursive: true })
+    fs.writeFileSync(workflows, 'not a directory')
+
+    assert.throws(
+      () => test.store.rebuildIndex(),
+      (err: Error) => err instanceof QueueStoreError && err.code === 'store_unreadable',
+    )
+  })
+
   it('persists launch intent through update', () => {
     const test = fixture()
-    const initial = test.store.enqueue(workflowInput(), test.generation)
+    const initial = test.store.enqueue(workflowInput(), test.handle)
 
-    const updated = test.store.update('wf-1', initial.state_revision, test.generation, (record) => {
+    const updated = test.store.update('wf-1', initial.state_revision, test.handle, (record) => {
       record.status = 'leased'
       record.launch_intent = {
         intent_id: 'intent-1',
         workflow_id: 'wf-1',
         fencing_generation: test.generation,
         session_id: null,
+        child_session_ids: [],
+        engine_instance_id: null,
         agent: 'wf-executor',
         model: 'provider/model',
         launch_state: 'reserved',
@@ -191,6 +264,7 @@ describe('QueueStore', () => {
     const dir = tempDir('queue-crash-')
     const leaseStore = new FencingLeaseStore({
       lease_directory: path.join(dir, 'lease'),
+      lock_directory: dir,
       owner: 'proc-a',
       lease_duration_ms: 60_000,
       now: clockNow,
@@ -199,17 +273,436 @@ describe('QueueStore', () => {
     const gen = handle.lease.fencing_generation
 
     const store1 = new QueueStore({ config_directory: dir, owner: 'proc-a', now: clockNow })
-    store1.enqueue(workflowInput('wf-a'), gen)
-    const initial = store1.enqueue(workflowInput('wf-b'), gen)
-    store1.update('wf-b', initial.state_revision, gen, (r) => { r.status = 'running'; return r })
+    store1.enqueue(workflowInput('wf-a'), handle)
+    const initial = store1.enqueue(workflowInput('wf-b'), handle)
+    store1.update('wf-b', initial.state_revision, handle, (r) => { r.status = 'leased'; return r })
 
     const store2 = new QueueStore({ config_directory: dir, owner: 'proc-b', now: clockNow })
     const index = store2.rebuildIndex()
     assert.equal(index.length, 2)
-    assert.equal(index.find(e => e.workflow_id === 'wf-b')!.status, 'running')
+    assert.equal(index.find(e => e.workflow_id === 'wf-b')!.status, 'leased')
 
     const loaded = store2.load('wf-b')
-    assert.equal(loaded!.status, 'running')
+    assert.equal(loaded!.status, 'leased')
     assert.equal(loaded!.state_revision, 2)
+  })
+
+  it('a stale generation cannot commit a queue record after a newer generation takes over', () => {
+    const dir = tempDir('queue-fence-takeover-')
+
+    // Process A acquires generation 1 and enqueues a workflow.
+    const leaseStoreA = new FencingLeaseStore({
+      lease_directory: path.join(dir, 'lease'),
+      lock_directory: dir,
+      owner: 'proc-a',
+      lease_duration_ms: 60_000,
+      now: clockNow,
+    })
+    const handleA = leaseStoreA.acquire()
+    assert.equal(handleA.lease.fencing_generation, 1)
+    const storeA = new QueueStore({ config_directory: dir, owner: 'proc-a', now: clockNow })
+    const initial = storeA.enqueue(workflowInput(), handleA)
+
+    // A's lease expires. Process B acquires generation 2.
+    advance(61_000)
+    const leaseStoreB = new FencingLeaseStore({
+      lease_directory: path.join(dir, 'lease'),
+      lock_directory: dir,
+      owner: 'proc-b',
+      lease_duration_ms: 60_000,
+      now: clockNow,
+    })
+    const handleB = leaseStoreB.acquire()
+    assert.equal(handleB.lease.fencing_generation, 2)
+
+    // A (with its stale generation 1 handle) must NOT be able to update
+    // the queue record. The shared lock guarantees that lease validation
+    // and queue writes are atomic: B's takeover happened under the same
+    // lock, so A's stale authority is detected before the write commits.
+    assert.throws(
+      () => storeA.update('wf-1', initial.state_revision, handleA, (record) => {
+        record.status = 'paused'
+        record.pause_reason = 'stale writer committed'
+        return record
+      }),
+      (err: Error) => err instanceof Error && /generation|lease|stale/.test(err.message),
+    )
+
+    // The record must still be in its original state (queued, revision 1).
+    const reloaded = storeA.load('wf-1')
+    assert.equal(reloaded!.status, 'queued')
+    assert.equal(reloaded!.state_revision, 1)
+    assert.equal(reloaded!.fencing_generation, 1)
+
+    // B (generation 2) can write successfully.
+    const updated = storeA.update('wf-1', initial.state_revision, handleB, (record) => {
+      record.status = 'leased'
+      return record
+    })
+    assert.equal(updated.status, 'leased')
+    assert.equal(updated.fencing_generation, 2)
+  })
+})
+
+function retryFixture(maxNoProgressAttempts = 10, recoveryAttemptLimit = 10) {
+  const dir = tempDir('queue-retry-')
+  const leaseStore = new FencingLeaseStore({
+    lease_directory: path.join(dir, 'lease'),
+    lock_directory: dir,
+    owner: 'test-scheduler',
+    lease_duration_ms: 60_000,
+    now: clockNow,
+  })
+  const handle = leaseStore.acquire()
+  const store = new QueueStore({
+    config_directory: dir,
+    owner: 'test-scheduler',
+    now: clockNow,
+    retry_policy: {
+      max_semantic_attempts: 3,
+      max_contract_attempts: 3,
+      max_transport_attempts: 3,
+      max_no_progress_attempts: maxNoProgressAttempts,
+      transport_backoff: { strategy: 'exponential', initial_delay_ms: 1000, maximum_delay_ms: 8000, multiplier: 2 },
+    },
+    recovery_attempt_limit: recoveryAttemptLimit,
+  })
+  return { dir, leaseStore, handle, store }
+}
+
+function failRecord(store: QueueStore, workflowId: string, revision: number, handle: FencingLeaseHandle, classification: string): QueueWorkflowRecord {
+  return store.update(workflowId, revision, handle, (r) => {
+    r.status = 'failed'
+    r.failure_classification = classification as never
+    return r
+  })
+}
+
+describe('QueueStore applyRetryPolicy', () => {
+  it('does not consume recovery attempts for ordinary owner pause and resume cycles', () => {
+    const test = retryFixture(10, 1)
+    let record = test.store.enqueue(workflowInput(), test.handle)
+    for (let cycle = 0; cycle < 2; cycle += 1) {
+      record = test.store.update('wf-1', record.state_revision, test.handle, (next) => {
+        next.status = 'paused'
+        return next
+      })
+      record = test.store.applyRetryPolicy('wf-1', record.state_revision, test.handle)
+      assert.equal(record.status, 'queued')
+      assert.equal(record.recovery_attempt_count, 0)
+    }
+  })
+
+  it('conservatively enforces the no-progress ceiling for whole-workflow retries', () => {
+    const test = retryFixture(2)
+    const initial = test.store.enqueue(workflowInput(), test.handle)
+    const firstFailure = failRecord(test.store, 'wf-1', initial.state_revision, test.handle, 'semantic')
+    const firstRetry = test.store.applyRetryPolicy('wf-1', firstFailure.state_revision, test.handle)
+    assert.equal(firstRetry.status, 'queued')
+    assert.equal(firstRetry.retry_counters!.consecutive_no_progress_attempts, 1)
+
+    const secondFailure = failRecord(test.store, 'wf-1', firstRetry.state_revision, test.handle, 'semantic')
+    const blocked = test.store.applyRetryPolicy('wf-1', secondFailure.state_revision, test.handle)
+    assert.equal(blocked.status, 'failed')
+    assert.equal(blocked.retry_counters!.consecutive_no_progress_attempts, 2)
+    assert.match(blocked.pause_reason!, /retry policy ceiling/)
+  })
+  it('atomically clears settled launch evidence when requeuing a paused workflow', () => {
+    const test = retryFixture()
+    const initial = test.store.enqueue(workflowInput(), test.handle)
+    const paused = test.store.update('wf-1', initial.state_revision, test.handle, (record) => {
+      record.status = 'paused'
+      record.launch_intent = {
+        intent_id: 'intent-resume',
+        workflow_id: 'wf-1',
+        fencing_generation: test.handle.lease.fencing_generation,
+        session_id: 'child-1',
+        child_session_ids: ['child-1'],
+        engine_instance_id: 'engine-1',
+        agent: 'standard',
+        model: 'development',
+        launch_state: 'settled',
+        reserved_at: new Date(clock).toISOString(),
+        created_at: new Date(clock).toISOString(),
+        prompted_at: new Date(clock).toISOString(),
+        settled_at: new Date(clock).toISOString(),
+      }
+      return record
+    })
+
+    const resumed = test.store.applyRetryPolicy('wf-1', paused.state_revision, test.handle)
+
+    assert.equal(resumed.status, 'queued')
+    assert.equal(resumed.launch_intent, null)
+    assert.equal(resumed.state_revision, paused.state_revision + 1)
+  })
+
+  it('repeated transport failures increment counters and use exponential backoff', () => {
+    const test = retryFixture()
+    const initial = test.store.enqueue(workflowInput(), test.handle)
+
+    const f1 = failRecord(test.store, 'wf-1', initial.state_revision, test.handle, 'transport')
+    const r1 = test.store.applyRetryPolicy('wf-1', f1.state_revision, test.handle)
+    assert.equal(r1.status, 'queued')
+    assert.equal(r1.retry_counters!.transport_attempts, 1)
+    assert.equal(r1.retry_not_before, new Date(clock + 1000).toISOString())
+    assert.equal(r1.recovery_attempt_count, 1)
+
+    const f2 = failRecord(test.store, 'wf-1', r1.state_revision, test.handle, 'transport')
+    const r2 = test.store.applyRetryPolicy('wf-1', f2.state_revision, test.handle)
+    assert.equal(r2.retry_counters!.transport_attempts, 2)
+    assert.equal(r2.retry_not_before, new Date(clock + 2000).toISOString())
+    assert.equal(r2.recovery_attempt_count, 2)
+
+    const f3 = failRecord(test.store, 'wf-1', r2.state_revision, test.handle, 'transport')
+    const r3 = test.store.applyRetryPolicy('wf-1', f3.state_revision, test.handle)
+    assert.equal(r3.status, 'failed')
+    assert.equal(r3.retry_counters!.transport_attempts, 3)
+    assert.equal(r3.retry_not_before, null)
+    assert.match(r3.pause_reason!, /retry policy ceiling/)
+  })
+
+  it('semantic and contract counters are independent', () => {
+    const test = retryFixture()
+    const initial = test.store.enqueue(workflowInput(), test.handle)
+
+    // First semantic failure
+    const f1 = failRecord(test.store, 'wf-1', initial.state_revision, test.handle, 'semantic')
+    const r1 = test.store.applyRetryPolicy('wf-1', f1.state_revision, test.handle)
+    assert.equal(r1.retry_counters!.semantic_attempts, 1)
+    assert.equal(r1.retry_counters!.contract_attempts, 0)
+    assert.equal(r1.retry_counters!.transport_attempts, 0)
+    assert.equal(r1.retry_not_before, null)
+
+    // Then a contract failure — only contract counter increments
+    const f2 = failRecord(test.store, 'wf-1', r1.state_revision, test.handle, 'contract')
+    const r2 = test.store.applyRetryPolicy('wf-1', f2.state_revision, test.handle)
+    assert.equal(r2.retry_counters!.semantic_attempts, 1)
+    assert.equal(r2.retry_counters!.contract_attempts, 1)
+    assert.equal(r2.retry_counters!.transport_attempts, 0)
+    assert.equal(r2.retry_not_before, null)
+  })
+
+  it('ambiguous_launch and cancelled are never retried', () => {
+    const test = retryFixture()
+    const initial = test.store.enqueue(workflowInput(), test.handle)
+
+    const f1 = failRecord(test.store, 'wf-1', initial.state_revision, test.handle, 'ambiguous_launch')
+    const r1 = test.store.applyRetryPolicy('wf-1', f1.state_revision, test.handle)
+    assert.equal(r1.status, 'failed')
+    assert.match(r1.pause_reason!, /not retryable/)
+
+    // Reset to failed with cancelled classification
+    const f2 = failRecord(test.store, 'wf-1', r1.state_revision, test.handle, 'cancelled')
+    const r2 = test.store.applyRetryPolicy('wf-1', f2.state_revision, test.handle)
+    assert.equal(r2.status, 'failed')
+    assert.match(r2.pause_reason!, /not retryable/)
+  })
+
+  it('persisted counters survive QueueStore reconstruction', () => {
+    const dir = tempDir('queue-retry-reconstruct-')
+    const leaseStore = new FencingLeaseStore({
+      lease_directory: path.join(dir, 'lease'),
+      lock_directory: dir,
+      owner: 'proc-a',
+      lease_duration_ms: 60_000,
+      now: clockNow,
+    })
+    const handle = leaseStore.acquire()
+    const store1 = new QueueStore({
+      config_directory: dir,
+      owner: 'proc-a',
+      now: clockNow,
+      retry_policy: {
+        max_semantic_attempts: 3, max_contract_attempts: 3, max_transport_attempts: 3,
+        max_no_progress_attempts: 2,
+        transport_backoff: { strategy: 'exponential', initial_delay_ms: 1000, maximum_delay_ms: 8000, multiplier: 2 },
+      },
+      recovery_attempt_limit: 10,
+    })
+    const initial = store1.enqueue(workflowInput(), handle)
+    const f1 = failRecord(store1, 'wf-1', initial.state_revision, handle, 'transport')
+    const r1 = store1.applyRetryPolicy('wf-1', f1.state_revision, handle)
+    assert.equal(r1.retry_counters!.transport_attempts, 1)
+
+    // Reconstruct store from same directory
+    const store2 = new QueueStore({
+      config_directory: dir,
+      owner: 'proc-b',
+      now: clockNow,
+      retry_policy: {
+        max_semantic_attempts: 3, max_contract_attempts: 3, max_transport_attempts: 3,
+        max_no_progress_attempts: 2,
+        transport_backoff: { strategy: 'exponential', initial_delay_ms: 1000, maximum_delay_ms: 8000, multiplier: 2 },
+      },
+      recovery_attempt_limit: 10,
+    })
+    const loaded = store2.load('wf-1')
+    assert.equal(loaded!.retry_counters!.transport_attempts, 1)
+    assert.equal(loaded!.recovery_attempt_count, 1)
+
+    // Second failure on reconstructed store increments from 1 to 2
+    const f2 = failRecord(store2, 'wf-1', loaded!.state_revision, handle, 'transport')
+    const r2 = store2.applyRetryPolicy('wf-1', f2.state_revision, handle)
+    assert.equal(r2.retry_counters!.transport_attempts, 2)
+  })
+
+  it('stale revision does not double-increment counters', () => {
+    const test = retryFixture()
+    const initial = test.store.enqueue(workflowInput(), test.handle)
+    const f1 = failRecord(test.store, 'wf-1', initial.state_revision, test.handle, 'transport')
+    const r1 = test.store.applyRetryPolicy('wf-1', f1.state_revision, test.handle)
+    assert.equal(r1.retry_counters!.transport_attempts, 1)
+
+    // Try to apply retry policy with the old (stale) revision
+    assert.throws(
+      () => test.store.applyRetryPolicy('wf-1', f1.state_revision, test.handle),
+      (err: Error) => err instanceof QueueStoreError && err.code === 'stale_revision',
+    )
+
+    // Counters must not have been double-incremented
+    const loaded = test.store.load('wf-1')
+    assert.equal(loaded!.retry_counters!.transport_attempts, 1)
+  })
+})
+
+describe('QueueStore schema migration', () => {
+  it('migrates a legacy v1 record without data loss', () => {
+    const dir = tempDir('queue-v1-migrate-')
+    const leaseStore = new FencingLeaseStore({
+      lease_directory: path.join(dir, 'lease'),
+      lock_directory: dir,
+      owner: 'proc-a',
+      lease_duration_ms: 60_000,
+      now: clockNow,
+    })
+    const handle = leaseStore.acquire()
+    const store = new QueueStore({ config_directory: dir, owner: 'proc-a', now: clockNow })
+
+    // Write a legacy v1 record directly to disk (no recovery_attempt_count,
+    // no child_session_ids, no engine_instance_id).
+    const v1Record = {
+      schema_version: 1,
+      workflow_id: 'wf-legacy',
+      definition_id: 'development',
+      root_session_id: 'root-1',
+      directory: '/project',
+      worktree: '/project',
+      mode: 'standard',
+      task: 'Legacy workflow.',
+      status: 'queued',
+      pause_reason: null,
+      fencing_generation: handle.lease.fencing_generation,
+      state_revision: 1,
+      launch_intent: null,
+      failure_classification: null,
+      retry_counters: null,
+      retry_not_before: null,
+      created_at: new Date(clock).toISOString(),
+      updated_at: new Date(clock).toISOString(),
+      usage: {
+        sessions: 0, attempts: 0, input_tokens: 0, output_tokens: 0,
+        bounded_read_bytes: 0, bounded_write_bytes: 0, validation_runs: 0,
+        active_time_ms: 0, cost_evidence: { kind: 'unknown' },
+        active_interval_started_at: null, last_active_checkpoint_at: null,
+      },
+    }
+    fs.writeFileSync(path.join(dir, 'workflows', 'wf-legacy.json'), JSON.stringify(v1Record) + '\n', { mode: 0o600 })
+
+    // Load through the store — should migrate to v2.
+    const loaded = store.load('wf-legacy')
+    assert.equal(loaded!.schema_version, QUEUE_SCHEMA_VERSION)
+    assert.equal(loaded!.recovery_attempt_count, 0)
+    assert.equal(loaded!.workflow_id, 'wf-legacy')
+    assert.equal(loaded!.status, 'queued')
+  })
+
+  it('migrates a legacy v1 record with a launch intent', () => {
+    const v1WithIntent = {
+      schema_version: 1,
+      workflow_id: 'wf-intent',
+      definition_id: 'development',
+      root_session_id: 'root-1',
+      directory: '/project',
+      worktree: '/project',
+      mode: 'standard',
+      task: 'Legacy with intent.',
+      status: 'leased',
+      pause_reason: null,
+      fencing_generation: 1,
+      state_revision: 2,
+      launch_intent: {
+        intent_id: 'intent-legacy',
+        workflow_id: 'wf-intent',
+        fencing_generation: 1,
+        session_id: 'child-1',
+        agent: 'standard',
+        model: 'development',
+        launch_state: 'prompted',
+        reserved_at: new Date(clock).toISOString(),
+        created_at: new Date(clock).toISOString(),
+        prompted_at: new Date(clock).toISOString(),
+        settled_at: null,
+      },
+      failure_classification: null,
+      retry_counters: null,
+      retry_not_before: null,
+      created_at: new Date(clock).toISOString(),
+      updated_at: new Date(clock).toISOString(),
+      usage: {
+        sessions: 1, attempts: 1, input_tokens: 100, output_tokens: 50,
+        bounded_read_bytes: 0, bounded_write_bytes: 0, validation_runs: 0,
+        active_time_ms: 5000, cost_evidence: { kind: 'unknown' },
+        active_interval_started_at: null, last_active_checkpoint_at: null,
+      },
+    }
+
+    const migrated = parseQueueWorkflowRecord(v1WithIntent)
+    assert.equal(migrated.schema_version, QUEUE_SCHEMA_VERSION)
+    assert.equal(migrated.recovery_attempt_count, 0)
+    assert.deepEqual(migrated.launch_intent!.child_session_ids, [])
+    assert.equal(migrated.launch_intent!.engine_instance_id, 'intent-legacy')
+    assert.equal(migrated.launch_intent!.session_id, 'child-1')
+    assert.equal(migrated.launch_intent!.launch_state, 'prompted')
+  })
+
+  it('malformed v1 record fails closed', () => {
+    const malformed = {
+      schema_version: 1,
+      workflow_id: 'wf-bad',
+      // missing required fields
+    }
+    assert.throws(() => parseQueueWorkflowRecord(malformed))
+  })
+
+  it('unknown schema version fails closed', () => {
+    const unknown = {
+      schema_version: 99,
+      workflow_id: 'wf-unknown',
+    }
+    assert.throws(() => parseQueueWorkflowRecord(unknown))
+  })
+
+  it('rejects launch intents whose durable identity or lifecycle evidence is impossible', () => {
+    const test = fixture()
+    const base = test.store.enqueue(workflowInput('wf-relational'), test.handle) as QueueWorkflowRecord
+    base.status = 'leased'
+    base.launch_intent = {
+      intent_id: 'intent-relational',
+      workflow_id: 'different-workflow',
+      fencing_generation: base.fencing_generation + 1,
+      session_id: null,
+      child_session_ids: [],
+      engine_instance_id: null,
+      agent: 'standard',
+      model: 'development',
+      launch_state: 'prompted',
+      reserved_at: new Date(clock).toISOString(),
+      created_at: null,
+      prompted_at: null,
+      settled_at: null,
+    }
+
+    assert.throws(() => parseQueueWorkflowRecord(base))
   })
 })

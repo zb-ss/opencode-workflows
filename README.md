@@ -1,6 +1,6 @@
 # OpenCode Workflows
 
-OpenCode Workflows installs agents, commands, skills, plugins, workflow definitions, schemas, and supporting libraries into an [OpenCode](https://opencode.ai) configuration directory. It supports manual gate-driven workflows, opt-in declarative workflow automation, native OpenCode subagents, SDK-backed swarm batches, and direct Claude Code or Antigravity CLI delegation.
+OpenCode Workflows installs agents, commands, skills, plugins, workflow definitions, schemas, and supporting libraries into an [OpenCode](https://opencode.ai) configuration directory. It supports manual gate-driven workflows, opt-in declarative workflow automation, reviewed epic coordination in isolated Git worktrees, a durable workflow queue, native OpenCode subagents, SDK-backed swarm batches, and direct Claude Code or Antigravity CLI delegation.
 
 These are separate execution paths. Installing the project does not enable unattended workflow automation or external CLI execution by default.
 
@@ -125,6 +125,8 @@ npm run test:integration
 |---|---|---|---|---|
 | Manual workflow | `/workflow`, `/workflow-resume`, `/workflow-status` | Supervisor agent | Org file, state sidecar, session binding, saved Task IDs | User-visible gate orchestration with explicit completion checks |
 | Automatic workflow | `/workflow-auto`, `/workflow-auto-resume` | Declarative DAG engine | Session-owned definition and state | Opt-in deterministic scheduling of installed `development` or `e2e` DAGs |
+| Epic coordination | `epic_start`, `epic_await`, `epic_integrate` | Dependency-aware epic coordinator | Epic state, review evidence, integration events, isolated worktrees | Reviewed multi-item delivery with guarded Git integration |
+| Durable queue | `queue_enqueue`, `queue_recover`, queue owner tools | Fenced multiprocess scheduler | Leased queue records, launch intents, retry and rate state | Restart-safe scheduling of automatic workflows |
 | Guarded publication | `/publication-preview`, `/publication-execute`, `/publication-status` | Root-side publication broker | Immutable artifacts, one-shot claims, hash-chained execution events | Attended publication through an operator-configured trusted publisher |
 | Native subagent | OpenCode Task tool | Calling agent | OpenCode task/session ID | One agent task, resumed with the same `task_id` |
 | Swarm batch | `swarm_*` tools | SDK session runtime | Session-scoped batch state | Parallel independent OpenCode subagent sessions |
@@ -157,7 +159,7 @@ node install.mjs --autonomy bounded --dry-run
 node install.mjs --autonomy bounded
 ```
 
-These commands update only `automation.autonomy` in an existing `workflows.json`. Configure `automation.enabled: true` and every required budget separately, then restart OpenCode and start the workflow:
+These commands update only `automation.autonomy` in an existing `workflows.json`. Configure `automation.enabled: true`, the required scheduler and operation limits, and any resource budgets you want to enforce, then restart OpenCode and start the workflow:
 
 ```text
 /workflow-auto development Implement the requested change --mode=standard
@@ -165,9 +167,9 @@ These commands update only `automation.autonomy` in an existing `workflows.json`
 /workflow-auto-resume
 ```
 
-Before enabling automation, configure child-session, parallel-session, attempt, wall-time, input-token, output-token, bounded-read-byte, bounded-write-byte, and cost budgets in `workflows.json`. `max_cost_usd` may be `null`; the field is still required. Input and output limits are cumulative workflow usage across every model turn and retry; they are not model context-window limits. A model with a 1M-token context can therefore consume more than 1M input tokens over a multi-stage workflow as its context is billed again on later turns. Bounded file I/O atomically reserves complete serialized read/list responses against `max_bounded_read_bytes` and written UTF-8 content against `max_bounded_write_bytes`, independently of normal model-token accounting. Each bounded byte limit is capped at 16 MiB.
+Before enabling automation, configure `max_parallel_sessions`, `max_sessions`, `max_attempts_per_stage`, and `session_operation_timeout_ms`. Calendar-age, active-time, input-token, output-token, bounded-read-byte, bounded-write-byte, and cost limits are optional and independently enforced when configured. Input and output limits are cumulative workflow usage across every model turn and retry; they are not model context-window limits. A model with a 1M-token context can therefore consume more than 1M input tokens over a multi-stage workflow as its context is billed again on later turns. Bounded file I/O atomically reserves complete serialized read/list responses against `max_bounded_read_bytes` and written UTF-8 content against `max_bounded_write_bytes`, independently of normal model-token accounting. Each bounded byte limit is capped at 16 MiB.
 
-`workflows.json.template` includes a complete inactive `_example_automation` object. Replace the active `automation` object with reviewed values from that example rather than enabling automation with missing limits. The numbers are illustrative safety budgets, not defaults selected for a repository or provider account.
+`workflows.json.template` includes an inactive `_example_automation` object with all required controls and examples of every optional resource budget. Replace the active `automation` object with reviewed values from that example, retaining only the optional limits you intend to enforce. The numbers are illustrative safety budgets, not defaults selected for a repository or provider account.
 
 `node install.mjs --migrate` initializes missing bounded byte budgets to `0`; it never infers byte authority from token limits. Choose explicit nonzero values before using bounded file tools.
 
@@ -182,6 +184,12 @@ After an automatic workflow completes, guarded publication can create an immutab
 The inactive `_example_publication` object in `workflows.json.template` contains every required policy field. Replace its repository-specific paths, refs, URL, marker, limits, and publisher before enabling it. The publisher is a separately compiled, operator-controlled native adapter; the guarded-publication guide documents its exact request and acknowledgment protocol.
 
 State is written atomically below the selected config directory, including the autonomy profile selected at start. That profile is immutable for the workflow lifetime; changing `workflows.json` affects only new workflows. Older version-1 states without a profile are normalized to `interactive`. After a plugin or OpenCode restart, saved workflows are restored without launching new stages. `/workflow-auto-resume` reauthorizes agents under the persisted profile, reconciles child sessions, refreshes budgets, and retries eligible blocked paths while retaining accumulated usage and attempts. Runtime tools also expose status, capability reporting, and cancellation for the workflow owned by the current session.
+
+## Epic Coordination And Durable Queue
+
+Epic coordination is disabled by default. Copy `_example_epic` from `workflows.json.template`, select reviewed executor and reviewer agents, configure retry and runtime limits, and restart OpenCode before using `epic_start`. Each dependency-ready item runs in an isolated Git worktree, produces an exact checkpoint, and requires a zero-issue review bound to that checkpoint before `epic_integrate` can publish a compare-and-swap merge. Optional budgets independently cover sessions, tokens, cost, active time, and calendar age; missing authoritative usage pauses a metered epic rather than treating it as zero. Ambiguous child launches and uncertain integrations also pause for attended reconciliation. See [Epic Coordination](./docs/epic-coordination.md).
+
+The durable queue is a separate opt-in scheduler for installed automatic workflows. Copy `_example_queue` into `queue`, configure lease, concurrency, retry, and optional rate-window policy, enable automatic workflows, then restart OpenCode. Fencing generations reject stale schedulers, queue mutations use exact revision and generation evidence, classified retries have independent ceilings, and ambiguous launches are never retried automatically. Recovery requires attended confirmation that the former runtime has terminated. Terminal records remain inspectable until the owner-authorized `queue_delete` operation reclaims them. See [Durable Queue](./docs/durable-queue.md).
 
 ## Models
 
@@ -213,6 +221,8 @@ Plugin v2 availability is detected from the loaded plugin runtime rather than an
 - Delegated worktree operations request `worktree` and edit permission before creating or merging changes.
 - Translation paths outside the current worktree request `external_directory` plus read or edit permission.
 - Automatic workflows are owned by the starting session and exact directory/worktree context.
+- Epic mutations require exact state evidence; integration requires a reviewed checkpoint and an unchanged target.
+- Queue mutations require current revision and fencing-generation evidence; restart recovery is attended.
 - Guarded publication requires the completed workflow's root session, immutable preview digest, effective one-shot `ask` authority, and a separate external-side-effect approval.
 - Bounded autonomy removes child permission prompts but does not grant denied authority; blocked is an expected safe outcome.
 - Swarm sessions share their configured working directory; use only independent tasks unless worktrees are managed separately.

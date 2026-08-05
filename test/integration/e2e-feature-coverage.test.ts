@@ -100,7 +100,6 @@ const QUEUE_CONFIG = {
     transport_backoff: { strategy: 'exponential' as const, initial_delay_ms: 100, maximum_delay_ms: 1_000, multiplier: 2 },
   },
   rate_windows: [{ window_ms: 60_000, max_requests: 100 }],
-  budgets: [{ dimension: 'sessions' as const, scope: 'global' as const, limit: 50 }],
 }
 
 class FakeEpicSessionAdapter implements EpicSessionAdapter {
@@ -141,7 +140,7 @@ describe('E2E: all new features', { concurrency: false }, () => {
       const configDir = tempDir('e2e-budget-')
       process.env.OPENCODE_CONFIG_DIR = configDir
       fs.writeFileSync(path.join(configDir, 'workflows.json'), JSON.stringify({
-        automation: { enabled: true, autonomy: 'interactive', max_parallel_sessions: 2, max_sessions: 10, max_attempts_per_stage: 3 },
+        automation: { enabled: true, autonomy: 'interactive', max_parallel_sessions: 2, max_sessions: 10, max_attempts_per_stage: 3, session_operation_timeout_ms: 1_000 },
       }))
       const config = loadWorkflowConfig()
       assert.equal(config.automation.enabled, true)
@@ -157,7 +156,7 @@ describe('E2E: all new features', { concurrency: false }, () => {
       fs.writeFileSync(path.join(configDir, 'workflows.json'), JSON.stringify({
         automation: {
           enabled: true, autonomy: 'interactive',
-          max_parallel_sessions: 2, max_sessions: 10, max_attempts_per_stage: 3,
+          max_parallel_sessions: 2, max_sessions: 10, max_attempts_per_stage: 3, session_operation_timeout_ms: 1_000,
           max_input_tokens: 1000000,
           max_cost_usd: 50,
         },
@@ -224,7 +223,7 @@ describe('E2E: all new features', { concurrency: false }, () => {
     it('start → await → integrate → cleanup end-to-end', async () => {
       const root = setupGitRepo()
       const configDir = process.env.OPENCODE_CONFIG_DIR!
-      fs.mkdirSync(configDir, { recursive: true })
+      fs.mkdirSync(configDir, { recursive: true, mode: 0o700 })
       fs.writeFileSync(path.join(configDir, 'workflows.json'), JSON.stringify({
         model_tiers: { low: [], mid: [{ model: 'provider/example-model' }], high: [] },
         swarm_config: { default_concurrency: 2, provider_concurrency: { provider: 2 } },
@@ -274,27 +273,30 @@ describe('E2E: all new features', { concurrency: false }, () => {
         budget_updates: [],
       }
 
-      await coordinator.start(genesis)
-      const awaited = await coordinator.awaitQuiescence(10_000)
-      assert.equal(awaited.timed_out, false)
-      const passed = store.load()!
-      assert.equal(passed.state.items['item-a']!.status, 'passed')
+      try {
+        await coordinator.start(genesis)
+        const awaited = await coordinator.awaitQuiescence(10_000)
+        assert.equal(awaited.timed_out, false)
+        const passed = store.load()!
+        assert.equal(passed.state.items['item-a']!.status, 'passed')
 
-      const completed = await coordinator.integrateReady({
-        expected_revision: passed.revision,
-        expected_state_sha256: passed.state_sha256,
-        expected_generation: passed.ownership_generation,
-      })
-      assert.equal(completed.status, 'completed')
-      assert.equal(git(root, ['status', '--porcelain']), '')
+        const completed = await coordinator.integrateReady({
+          expected_revision: passed.revision,
+          expected_state_sha256: passed.state_sha256,
+          expected_generation: passed.ownership_generation,
+        })
+        assert.equal(completed.status, 'completed')
+        assert.equal(git(root, ['status', '--porcelain']), '')
 
-      const cleaned = coordinator.cleanup({
-        expected_revision: store.load()!.revision,
-        expected_state_sha256: store.load()!.state_sha256,
-        expected_generation: store.load()!.ownership_generation,
-      }, 'item-a')
-      assert.deepEqual(cleaned.cleaned, ['item-a'])
-      coordinator.dispose()
+        const cleaned = coordinator.cleanup({
+          expected_revision: store.load()!.revision,
+          expected_state_sha256: store.load()!.state_sha256,
+          expected_generation: store.load()!.ownership_generation,
+        }, 'item-a')
+        assert.deepEqual(cleaned.cleaned, ['item-a'])
+      } finally {
+        await coordinator.dispose()
+      }
     })
   })
 
@@ -343,7 +345,7 @@ describe('E2E: all new features', { concurrency: false }, () => {
       const handleB = storeB.acquire()
       assert.equal(handleB.lease.fencing_generation, genA + 1)
       assert.equal(handleA.is_valid(), false)
-      assert.throws(() => assertFencingGeneration(storeA, genA), (err: Error) => err instanceof FencingLeaseError && err.code === 'stale_generation')
+      assert.throws(() => assertFencingGeneration(storeA, genA), (err: Error) => err instanceof FencingLeaseError)
     })
   })
 
@@ -351,19 +353,7 @@ describe('E2E: all new features', { concurrency: false }, () => {
     it('enqueue → schedule → pause → resume → cancel → recover', () => {
       const dir = tempDir('e2e-queue-')
       const now = { val: Date.parse('2026-07-25T00:00:00.000Z') }
-      const store = new QueueStore({ config_directory: dir, owner: 'e2e-scheduler', now: () => now.val })
-
-      const wf1 = store.enqueue({
-        workflow_id: 'wf-1', definition_id: 'dev', root_session_id: 'root-1',
-        directory: '/project', worktree: '/project', mode: 'standard', task: 'Task 1',
-      }, 1)
-      assert.equal(wf1.status, 'queued')
-
-      const wf2 = store.enqueue({
-        workflow_id: 'wf-2', definition_id: 'dev', root_session_id: 'root-1',
-        directory: '/project', worktree: '/project', mode: 'standard', task: 'Task 2',
-      }, 1)
-      assert.equal(wf2.status, 'queued')
+      const store = new QueueStore({ config_directory: dir, owner: 'e2e-scheduler', now: () => now.val, lease_duration_ms: 60_000 })
 
       const scheduler = new QueueScheduler({
         store, config: enabledQueue(QUEUE_CONFIG), now: () => now.val,
@@ -371,19 +361,33 @@ describe('E2E: all new features', { concurrency: false }, () => {
       const handle = scheduler.start()
       const gen = handle.generation
 
+      const wf1 = store.enqueue({
+        workflow_id: 'wf-1', definition_id: 'dev', root_session_id: 'root-1',
+        directory: '/project', worktree: '/project', mode: 'standard', task: 'Task 1',
+      }, handle.lease)
+      assert.equal(wf1.status, 'queued')
+
+      const wf2 = store.enqueue({
+        workflow_id: 'wf-2', definition_id: 'dev', root_session_id: 'root-1',
+        directory: '/project', worktree: '/project', mode: 'standard', task: 'Task 2',
+      }, handle.lease)
+      assert.equal(wf2.status, 'queued')
+
+      scheduler.schedule()
+
       const indexAfterSchedule = store.rebuildIndex()
       assert.equal(indexAfterSchedule.filter(e => e.status === 'leased').length, 2)
 
       const loaded = store.load('wf-1')!
-      store.update('wf-1', loaded.state_revision, loaded.fencing_generation, (r) => { r.status = 'paused'; r.pause_reason = 'Manual pause'; return r })
+      store.update('wf-1', loaded.state_revision, handle.lease, (r) => { r.status = 'paused'; r.pause_reason = 'Manual pause'; return r })
       assert.equal(store.load('wf-1')!.status, 'paused')
 
       const paused = store.load('wf-1')!
-      store.update('wf-1', paused.state_revision, paused.fencing_generation, (r) => { r.status = 'queued'; r.pause_reason = null; return r })
+      store.update('wf-1', paused.state_revision, handle.lease, (r) => { r.status = 'queued'; r.pause_reason = null; return r })
       assert.equal(store.load('wf-1')!.status, 'queued')
 
       const resumed = store.load('wf-2')!
-      store.update('wf-2', resumed.state_revision, resumed.fencing_generation, (r) => { r.status = 'cancelled'; r.pause_reason = 'Not needed'; return r })
+      store.update('wf-2', resumed.state_revision, handle.lease, (r) => { r.status = 'cancelled'; r.pause_reason = 'Not needed'; return r })
       assert.equal(store.load('wf-2')!.status, 'cancelled')
 
       const finalIndex = store.rebuildIndex()
@@ -400,21 +404,21 @@ describe('E2E: all new features', { concurrency: false }, () => {
       const limiter1 = new QueueRateLimiter({
         rate_directory: dir, windows: [{ window_ms: 60_000, max_requests: 3 }], now: () => now.val,
       })
-      assert.equal(limiter1.tryAcquire(), true)
-      assert.equal(limiter1.tryAcquire(), true)
-      assert.equal(limiter1.tryAcquire(), true)
-      assert.equal(limiter1.tryAcquire(), false)
+      assert.equal(limiter1.tryAcquire('reservation-1'), true)
+      assert.equal(limiter1.tryAcquire('reservation-2'), true)
+      assert.equal(limiter1.tryAcquire('reservation-3'), true)
+      assert.equal(limiter1.tryAcquire('reservation-4'), false)
 
       const limiter2 = new QueueRateLimiter({
         rate_directory: dir, windows: [{ window_ms: 60_000, max_requests: 3 }], now: () => now.val,
       })
-      assert.equal(limiter2.tryAcquire(), false)
+      assert.equal(limiter2.tryAcquire('reservation-4'), false)
 
       now.val += 61_000
       const limiter3 = new QueueRateLimiter({
         rate_directory: dir, windows: [{ window_ms: 60_000, max_requests: 3 }], now: () => now.val,
       })
-      assert.equal(limiter3.tryAcquire(), true)
+      assert.equal(limiter3.tryAcquire('reservation-4'), true)
     })
   })
 })

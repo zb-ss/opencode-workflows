@@ -11,6 +11,7 @@ import {
   loadAutomaticWorkflowState,
   parseStageResult,
   topologicalStageIds,
+  validateAutomaticWorkflowState,
   validateWorkflowDefinition,
   type AutomationLimits,
   type WorkflowDefinition,
@@ -241,6 +242,8 @@ function createEngine(
     candidates?: Array<{ model: string; variant?: string }>
     validationOperations?: string[]
     autonomy?: 'interactive' | 'bounded'
+    sessionOperationTimeoutMs?: number
+    onSessionCreated?: (sessionID: string) => void | Promise<void>
   } = {},
 ): { engine: WorkflowEngine; statePath: string; definitionPath: string } {
   const directory = options.directory ?? fs.mkdtempSync(path.join(os.tmpdir(), 'workflow-engine-'))
@@ -261,6 +264,8 @@ function createEngine(
     state: options.state,
     schedulingEnabled: options.schedulingEnabled,
     autonomy: options.autonomy,
+    sessionOperationTimeoutMs: options.sessionOperationTimeoutMs ?? 1_000,
+    onSessionCreated: options.onSessionCreated,
     now: options.now,
   })
   engines.push(engine)
@@ -423,6 +428,43 @@ describe('declarative workflow validation', () => {
       }
     }
   })
+
+  it('rejects malformed or inconsistent persisted active-time intervals', async () => {
+    const adapter = new FakeAdapter()
+    const { engine } = createEngine(definition([{ id: 'active' }]), adapter)
+    await start(engine)
+    const valid = engine.snapshot()
+
+    const malformed = structuredClone(valid)
+    malformed.budget.usage.last_active_checkpoint_at = 'not-a-date'
+    assert.throws(() => validateAutomaticWorkflowState(malformed), /date-time/)
+
+    const incomplete = structuredClone(valid)
+    incomplete.budget.usage.last_active_checkpoint_at = null
+    assert.throws(() => validateAutomaticWorkflowState(incomplete), /both be null or both be populated/)
+
+    const reversed = structuredClone(valid)
+    reversed.budget.usage.active_interval_started_at = '2026-07-30T12:00:01.000Z'
+    reversed.budget.usage.last_active_checkpoint_at = '2026-07-30T12:00:00.000Z'
+    assert.throws(() => validateAutomaticWorkflowState(reversed), /cannot precede/)
+
+    const future = structuredClone(valid)
+    future.budget.usage.last_active_checkpoint_at = new Date(Date.parse(valid.updated_at) + 1).toISOString()
+    assert.throws(() => validateAutomaticWorkflowState(future), /within the workflow update range/)
+
+    const closedWhileRunning = structuredClone(valid)
+    closedWhileRunning.budget.usage.active_interval_started_at = null
+    closedWhileRunning.budget.usage.last_active_checkpoint_at = null
+    assert.throws(() => validateAutomaticWorkflowState(closedWhileRunning), /inconsistent with workflow and stage lifecycle/)
+
+    const openWhileSettled = structuredClone(valid)
+    openWhileSettled.status = 'paused'
+    for (const stage of Object.values(openWhileSettled.stages)) {
+      stage.status = 'pending'
+      stage.session_id = null
+    }
+    assert.throws(() => validateAutomaticWorkflowState(openWhileSettled), /inconsistent with workflow and stage lifecycle/)
+  })
 })
 
 describe('WorkflowEngine scheduling and events', () => {
@@ -573,6 +615,26 @@ describe('WorkflowEngine scheduling and events', () => {
     assert.equal(adapter.calls.filter((call) => call.name === 'abort' && call.sessionId === siblingSession).length, 2)
   })
 
+  it('does not report cancellation until every running child abort succeeds', async () => {
+    const adapter = new FakeAdapter()
+    adapter.abortError = new Error('abort endpoint unavailable')
+    const { engine } = createEngine(definition([{ id: 'source' }]), adapter)
+    await start(engine)
+    const sessionId = engine.snapshot().stages.source.session_id!
+
+    const uncertain = await engine.cancel()
+    assert.equal(uncertain.status, 'paused')
+    assert.equal(uncertain.stages.source.status, 'running')
+    assert.equal(uncertain.stages.source.session_id, sessionId)
+    assert.match(uncertain.stages.source.error!, /abort failed/)
+
+    adapter.abortError = null
+    const cancelled = await engine.cancel()
+    assert.equal(cancelled.status, 'cancelled')
+    assert.equal(cancelled.stages.source.status, 'blocked')
+    assert.equal(cancelled.stages.source.session_id, null)
+  })
+
   it('resets a direct blocker and dependency-blocked descendants on resume but preserves failures', async () => {
     const adapter = new FakeAdapter()
     const { engine } = createEngine(definition([
@@ -707,8 +769,8 @@ describe('WorkflowEngine scheduling and events', () => {
     assert.equal(normalizedLegacy.budget.limits.max_bounded_write_bytes, null)
     assert.equal(normalizedLegacy.budget.limits.max_validation_runs, null)
     assert.equal(normalizedLegacy.budget.usage.active_time_ms, 0)
-    assert.equal(normalizedLegacy.budget.usage.active_interval_started_at, null)
-    assert.equal(normalizedLegacy.budget.usage.last_active_checkpoint_at, null)
+    assert.equal(normalizedLegacy.budget.usage.active_interval_started_at, saved.updated_at)
+    assert.equal(normalizedLegacy.budget.usage.last_active_checkpoint_at, saved.updated_at)
     assert.equal(normalizedLegacy.budget.usage.bounded_read_bytes, 0)
     assert.equal(normalizedLegacy.budget.usage.bounded_write_bytes, 0)
     assert.equal(normalizedLegacy.budget.usage.validation_runs, 0)
@@ -1119,6 +1181,27 @@ describe('WorkflowEngine scheduling and events', () => {
     assert.equal(adapter.calls.filter((call) => call.name === 'create').length, 2)
   })
 
+  it('does not retry a definitive rejection until acknowledged abort is verified', async () => {
+    const adapter = new FakeAdapter()
+    const { engine } = createEngine(definition([{ id: 'verify-abort' }]), adapter, {
+      budget: { max_attempts_per_stage: 2, max_sessions: 3 },
+    })
+    await start(engine)
+    const sessionId = engine.snapshot().stages['verify-abort'].session_id!
+    adapter.abort = async (id: string) => {
+      adapter.calls.push({ name: 'abort', sessionId: id })
+    }
+
+    adapter.rejectPrompt(sessionId, new Error('schema rejected', { cause: { status: 400 } }))
+    await waitFor(() => engine.snapshot().status === 'paused', 'uncertain abort did not pause the workflow')
+
+    const state = engine.snapshot()
+    assert.equal(state.stages['verify-abort'].status, 'running')
+    assert.equal(state.stages['verify-abort'].session_id, sessionId)
+    assert.equal(adapter.calls.filter(call => call.name === 'create').length, 1)
+    assert.match(state.pause_reason!, /cleanup failed/)
+  })
+
   it('does not retry a definitive rejection when child-session cleanup fails', async () => {
     const adapter = new FakeAdapter()
     adapter.abortError = new Error('cleanup unavailable')
@@ -1233,7 +1316,7 @@ describe('WorkflowEngine scheduling and events', () => {
     assert.equal(restored.engine.snapshot().stages.restore.session_id, sessionId)
   })
 
-  it('does not persist or dispatch after disposal during child creation', async () => {
+  it('refuses synchronous disposal during unresolved child creation', async () => {
     const adapter = new FakeAdapter()
     let releaseCreate!: () => void
     adapter.createBarrier = new Promise<void>((resolve) => { releaseCreate = resolve })
@@ -1249,33 +1332,182 @@ describe('WorkflowEngine scheduling and events', () => {
       () => adapter.calls.some((call) => call.name === 'create'),
       'child creation did not reach the adapter',
     )
-    original.engine.dispose()
-    const persistedBefore = fs.readFileSync(original.statePath, 'utf8')
-    const restored = createEngine(workflowDefinition, adapter, {
-      directory,
-      state: loadAutomaticWorkflowState(original.statePath),
-      schedulingEnabled: false,
-    })
-
+    assert.throws(() => original.engine.dispose(), /await disposeAsync/)
+    const disposing = original.engine.disposeAsync()
     releaseCreate()
-    await starting
+    await Promise.all([starting, disposing])
 
-    assert.equal(fs.readFileSync(original.statePath, 'utf8'), persistedBefore)
-    assert.equal(restored.engine.snapshot().stages.restore.status, 'running')
-    assert.equal(restored.engine.snapshot().stages.restore.session_id, null)
-    assert.equal(restored.engine.snapshot().stages.second.status, 'pending')
-    assert.equal(restored.engine.snapshot().budget.usage.sessions, 1)
+    const disposed = loadAutomaticWorkflowState(original.statePath)
+    assert.equal(disposed.status, 'paused')
+    assert.equal(disposed.stages.restore.status, 'pending')
+    assert.equal(disposed.stages.restore.session_id, null)
+    assert.equal(disposed.stages.second.status, 'pending')
+    assert.equal(disposed.budget.usage.sessions, 1)
     assert.equal(adapter.calls.filter((call) => call.name === 'create').length, 1)
     assert.equal(adapter.calls.filter((call) => call.name === 'prompt').length, 0)
-    await restored.engine.resume(limits({ max_sessions: 1 }))
-    assert.equal(restored.engine.snapshot().status, 'paused')
-    assert.match(restored.engine.snapshot().pause_reason!, /no recoverable child-session identity/)
-    assert.equal(adapter.calls.filter((call) => call.name === 'create').length, 1)
     await assert.rejects(original.engine.resume(), /engine is disposed/)
     await assert.rejects(original.engine.reconcile(), /engine is disposed/)
     await assert.rejects(original.engine.cancel(), /engine is disposed/)
     await assert.rejects(original.engine.consumeValidationRun('child-1'), /engine is disposed/)
     await assert.rejects(original.engine.reserveBoundedIo('read', 1), /engine is disposed/)
+  })
+
+  it('awaits and conclusively terminates child creation during draining disposal', async () => {
+    const adapter = new FakeAdapter()
+    let releaseCreate!: () => void
+    adapter.createBarrier = new Promise<void>(resolve => { releaseCreate = resolve })
+    const original = createEngine(definition([{ id: 'late' }]), adapter)
+    const starting = start(original.engine)
+    await waitFor(() => adapter.calls.some(call => call.name === 'create'), 'child creation did not start')
+
+    const disposing = original.engine.disposeAsync()
+    releaseCreate()
+    await Promise.all([starting, disposing])
+
+    const state = loadAutomaticWorkflowState(original.statePath)
+    assert.equal(state.status, 'paused')
+    assert.equal(state.stages.late.status, 'pending')
+    assert.equal(state.stages.late.session_id, null)
+    assert.equal(adapter.calls.filter(call => call.name === 'abort').length, 1)
+    assert.equal(adapter.calls.filter(call => call.name === 'statuses').length, 1)
+  })
+
+  it('bounds normal child creation while retaining late-child supervision', async () => {
+    const adapter = new FakeAdapter()
+    let releaseCreate!: () => void
+    adapter.createBarrier = new Promise<void>(resolve => { releaseCreate = resolve })
+    const { engine } = createEngine(definition([{ id: 'late' }]), adapter, { sessionOperationTimeoutMs: 25 })
+
+    await start(engine)
+    const timedOut = engine.snapshot()
+    assert.equal(timedOut.status, 'paused')
+    assert.equal(timedOut.stages.late.status, 'running')
+    assert.equal(timedOut.stages.late.session_id, null)
+    assert.match(timedOut.pause_reason!, /creation failed ambiguously/)
+
+    releaseCreate()
+    await waitFor(() => adapter.calls.some(call => call.name === 'abort'), 'late-created child was not supervised')
+    await engine.disposeAsync()
+    assert.equal(engine.snapshot().stages.late.session_id, null)
+  })
+
+  it('bounds an unresolved structured prompt and retains the active child identity', async () => {
+    const adapter = new FakeAdapter()
+    const { engine } = createEngine(definition([{ id: 'prompt' }]), adapter, {
+      sessionOperationTimeoutMs: 20,
+    })
+
+    await start(engine)
+    const sessionId = engine.snapshot().stages.prompt.session_id
+    assert.ok(sessionId)
+    await waitFor(() => engine.snapshot().status === 'paused', 'prompt deadline did not pause the workflow')
+
+    const state = engine.snapshot()
+    assert.equal(state.stages.prompt.status, 'running')
+    assert.equal(state.stages.prompt.session_id, sessionId)
+    assert.match(state.pause_reason!, /structured prompt timed out/)
+  })
+
+  it('bounds pause across stalled abort and status operations while retaining child identity', async () => {
+    const abortAdapter = new FakeAdapter()
+    let releaseAbort!: () => void
+    abortAdapter.abortBarrier = new Promise<void>(resolve => { releaseAbort = resolve })
+    const abortEngine = createEngine(definition([{ id: 'active' }]), abortAdapter, { sessionOperationTimeoutMs: 25 }).engine
+    await start(abortEngine)
+    const abortSession = abortEngine.snapshot().stages.active.session_id!
+
+    const abortPaused = await abortEngine.pause('Bound abort')
+    assert.equal(abortPaused.status, 'paused')
+    assert.equal(abortPaused.stages.active.session_id, abortSession)
+    assert.match(abortPaused.stages.active.error!, /abort timed out/)
+    releaseAbort()
+    await abortEngine.pause('Retry abort')
+    assert.equal(abortEngine.snapshot().stages.active.session_id, null)
+
+    const statusAdapter = new FakeAdapter()
+    let releaseStatus!: () => void
+    statusAdapter.statusesBarrier = new Promise<void>(resolve => { releaseStatus = resolve })
+    const statusEngine = createEngine(definition([{ id: 'active' }]), statusAdapter, { sessionOperationTimeoutMs: 25 }).engine
+    await start(statusEngine)
+    const statusSession = statusEngine.snapshot().stages.active.session_id!
+
+    const statusPaused = await statusEngine.pause('Bound status')
+    assert.equal(statusPaused.status, 'paused')
+    assert.equal(statusPaused.stages.active.session_id, statusSession)
+    assert.match(statusPaused.stages.active.error!, /status inspection timed out/)
+    releaseStatus()
+    await statusEngine.pause('Retry status')
+    assert.equal(statusEngine.snapshot().stages.active.session_id, null)
+  })
+
+  it('bounds unresolved child creation and permits a later disposal retry', async () => {
+    const adapter = new FakeAdapter()
+    let releaseCreate!: () => void
+    adapter.createBarrier = new Promise<void>(resolve => { releaseCreate = resolve })
+    const original = createEngine(definition([{ id: 'late' }]), adapter, { sessionOperationTimeoutMs: 25 })
+    const starting = start(original.engine)
+    await waitFor(() => adapter.calls.some(call => call.name === 'create'), 'child creation did not start')
+
+    await assert.rejects(original.engine.disposeAsync(), /timed out while supervising child sessions/)
+    assert.equal(loadAutomaticWorkflowState(original.statePath).stages.late.session_id, null)
+
+    releaseCreate()
+    await starting
+    await waitFor(() => adapter.calls.some(call => call.name === 'abort'), 'late child was not terminated')
+    await assert.doesNotReject(original.engine.disposeAsync())
+    const state = loadAutomaticWorkflowState(original.statePath)
+    assert.equal(state.stages.late.status, 'pending')
+    assert.equal(state.stages.late.session_id, null)
+  })
+
+  it('upgrades an in-flight draining disposal when cancellation is requested', async () => {
+    const adapter = new FakeAdapter()
+    let releaseAbort!: () => void
+    adapter.abortBarrier = new Promise<void>(resolve => { releaseAbort = resolve })
+    const { engine } = createEngine(definition([{ id: 'active' }]), adapter)
+    await start(engine)
+
+    const draining = engine.disposeAsync(false)
+    await waitFor(() => adapter.calls.some(call => call.name === 'abort'), 'draining disposal did not start')
+    const cancelling = engine.disposeAsync(true)
+    assert.equal(cancelling, draining)
+    releaseAbort()
+    await cancelling
+
+    const state = engine.snapshot()
+    assert.equal(state.status, 'cancelled')
+    assert.equal(state.stages.active.status, 'blocked')
+  })
+
+  it('retains the exact late child identity when draining disposal cannot prove termination', async () => {
+    const adapter = new FakeAdapter()
+    let releaseCreate!: () => void
+    adapter.createBarrier = new Promise<void>(resolve => { releaseCreate = resolve })
+    adapter.abort = async (sessionId: string) => {
+      adapter.calls.push({ name: 'abort', sessionId })
+    }
+    const original = createEngine(definition([{ id: 'late' }]), adapter)
+    const starting = start(original.engine)
+    await waitFor(() => adapter.calls.some(call => call.name === 'create'), 'child creation did not start')
+
+    const disposing = original.engine.disposeAsync()
+    releaseCreate()
+    await starting
+    await assert.rejects(disposing, /termination remains uncertain/)
+
+    const state = loadAutomaticWorkflowState(original.statePath)
+    assert.equal(state.status, 'paused')
+    assert.equal(state.stages.late.status, 'running')
+    assert.equal(state.stages.late.session_id, 'child-1')
+
+    adapter.abort = async (sessionId: string) => {
+      adapter.calls.push({ name: 'abort', sessionId })
+      delete adapter.statusBySession[sessionId]
+    }
+    await original.engine.disposeAsync()
+    const retried = loadAutomaticWorkflowState(original.statePath)
+    assert.equal(retried.stages.late.status, 'pending')
+    assert.equal(retried.stages.late.session_id, null)
   })
 
   it('retains an ambiguous child creation across restart without retrying', async () => {
@@ -1447,6 +1679,28 @@ describe('WorkflowEngine scheduling and events', () => {
     assert.equal(restored.engine.snapshot().status, 'paused')
     assert.equal(restored.engine.snapshot().stages.restore.status, 'running')
     assert.equal(restored.engine.snapshot().stages.restore.session_id, sessionId)
+  })
+
+  it('retains a child identity when abort is acknowledged but status remains busy', async () => {
+    const adapter = new FakeAdapter()
+    const { engine } = createEngine(definition([{ id: 'busy' }]), adapter)
+    await start(engine)
+    const sessionId = engine.snapshot().stages.busy.session_id!
+    adapter.abort = async (id: string) => {
+      adapter.calls.push({ name: 'abort', sessionId: id })
+      // Simulate an asynchronous provider that acknowledges abort before the
+      // child has actually terminated.
+    }
+
+    await engine.pause('Owner pause')
+
+    const paused = engine.snapshot()
+    assert.equal(paused.status, 'paused')
+    assert.equal(paused.stages.busy.status, 'running')
+    assert.equal(paused.stages.busy.session_id, sessionId)
+    assert.match(paused.stages.busy.error!, /termination could not be verified/)
+    await engine.resume()
+    assert.equal(adapter.calls.filter(call => call.name === 'create').length, 1)
   })
 
   it('pauses restored idle sessions that have no definitive assistant result', async () => {
@@ -1807,6 +2061,7 @@ describe('AutoWorkflow production plugin integration', () => {
         max_parallel_sessions: 1,
         max_sessions: 3,
         max_attempts_per_stage: 2,
+        session_operation_timeout_ms: 1_000,
         max_calendar_age_ms: 60_000,
         max_input_tokens: 1_000,
         max_output_tokens: 1_000,
