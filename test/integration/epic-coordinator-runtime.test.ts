@@ -9,6 +9,7 @@ import {
   EpicCoordinator,
   type EpicChildCreateInput,
   type EpicChildPromptInput,
+  type EpicCoordinatorClock,
   type EpicCoordinatorRuntime,
   type EpicSessionAdapter,
   type EpicSessionInspection,
@@ -26,6 +27,30 @@ import { WorkflowConfigSchema } from '../../lib/workflow-config.ts'
 
 const temporaryDirectories = new Set<string>()
 const originalConfigDir = process.env.OPENCODE_CONFIG_DIR
+
+class ControlledTimeoutClock implements EpicCoordinatorClock {
+  private nextHandle = 0
+  private readonly timeouts = new Map<number, () => void>()
+
+  now(): number { return Date.now() }
+  setInterval(callback: () => void, delay_ms: number): unknown { return setInterval(callback, delay_ms) }
+  clearInterval(handle: unknown): void { clearInterval(handle as ReturnType<typeof setInterval>) }
+  setTimeout(callback: () => void): unknown {
+    const handle = ++this.nextHandle
+    this.timeouts.set(handle, callback)
+    return handle
+  }
+  clearTimeout(handle: unknown): void { this.timeouts.delete(handle as number) }
+
+  get pendingTimeoutCount(): number { return this.timeouts.size }
+
+  fireNextTimeout(): void {
+    const next = this.timeouts.entries().next().value as [number, () => void] | undefined
+    assert.ok(next, 'expected a pending coordinator timeout')
+    this.timeouts.delete(next[0])
+    next[1]()
+  }
+}
 
 const CONFIG = {
   enabled: true,
@@ -228,6 +253,7 @@ function fixture(
     config?: EnabledEpicConfig
     behavior?: FakeSessionBehavior
     budgets?: EpicState['budgets']
+    clock?: EpicCoordinatorClock
   } = {},
 ) {
   const { root } = repository()
@@ -239,7 +265,7 @@ function fixture(
   const adapter = new FakeSessionAdapter(store, config, options.behavior)
   const coordinator = new EpicCoordinator({
     root_session_id: 'root-example', project_root: root, epic_id: 'epic-example', store, session: adapter,
-    config, workflow_config: workflow(config, providerLimit), authorize_agents: async () => {},
+    config, workflow_config: workflow(config, providerLimit), authorize_agents: async () => {}, clock: options.clock,
   })
   return { root, store, adapter, coordinator, genesis: state(root, items, config, options.budgets) }
 }
@@ -680,13 +706,15 @@ describe('EpicCoordinator attended real-Git runtime', { concurrency: false }, ()
   })
 
   it('keeps disposal attached to a creation that resolves after its operation deadline', async () => {
+    const clock = new ControlledTimeoutClock()
     const config = { ...CONFIG, max_attempt_duration_ms: 100, active_time_checkpoint_ms: 50 }
-    const test = fixture([{ item_id: 'item-a' }], 2, { config, behavior: { hang_execution_create: true } })
+    const test = fixture([{ item_id: 'item-a' }], 2, { config, behavior: { hang_execution_create: true }, clock })
     await test.coordinator.start(test.genesis)
     while (test.adapter.createResolvers.length === 0) await new Promise(resolve => setTimeout(resolve, 5))
 
-    const disposing = test.coordinator.dispose()
-    await new Promise(resolve => setTimeout(resolve, 120))
+    const disposing = assert.doesNotReject(test.coordinator.dispose())
+    clock.fireNextTimeout()
+    while (clock.pendingTimeoutCount === 0) await new Promise(resolve => setImmediate(resolve))
     test.adapter.createResolvers.splice(0).forEach(resolve => resolve())
     await disposing
 
