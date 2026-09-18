@@ -1,11 +1,12 @@
-import type { PluginInput, ToolContext } from '@opencode-ai/plugin'
+import { tool, type PluginInput, type ToolContext } from '@opencode-ai/plugin'
+import { createOpencodeClient } from '@opencode-ai/sdk/v2/client'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, it } from 'node:test'
 
-import { createQueueOwnerTools } from '../../plugin/queue-owner-tools.ts'
+import { createQueueOwnerTools } from '../../lib/queue-owner-tools.ts'
 import { sha256Hex } from '../../lib/canonical-json.ts'
 import { QueueStore } from '../../lib/queue-store.ts'
 
@@ -136,7 +137,7 @@ describe('queue owner tools', { concurrency: false }, () => {
   it('isolates equal workflow IDs by queue directory', async () => {
     const test = setup()
     const abortedDirectories: string[] = []
-    const tools = await createQueueOwnerTools(input(test.projects[0]!, abortedDirectories))
+    const tools = await createQueueOwnerTools(input(test.projects[0]!, abortedDirectories), { tool, createOpencodeClient })
     const firstContext = context(test.projects[0]!)
     const secondContext = context(test.projects[1]!)
 
@@ -161,7 +162,7 @@ describe('queue owner tools', { concurrency: false }, () => {
   it('releases capacity after a definitive pre-launch dispatch failure', async () => {
     const test = setup()
     const abortedDirectories: string[] = []
-    const tools = await createQueueOwnerTools(input(test.projects[0]!, abortedDirectories))
+    const tools = await createQueueOwnerTools(input(test.projects[0]!, abortedDirectories), { tool, createOpencodeClient })
     const toolContext = context(test.projects[0]!)
 
     await enqueue(tools, toolContext, 'running-workflow')
@@ -197,7 +198,7 @@ describe('queue owner tools', { concurrency: false }, () => {
       return originalUpdate.apply(this, args)
     }
     try {
-      const tools = await createQueueOwnerTools(input(test.projects[0]!, []))
+      const tools = await createQueueOwnerTools(input(test.projects[0]!, []), { tool, createOpencodeClient })
       const toolContext = context(test.projects[0]!)
 
       await enqueue(tools, toolContext, 'created-write-failure')
@@ -218,7 +219,7 @@ describe('queue owner tools', { concurrency: false }, () => {
     const abortedDirectories: string[] = []
     let releaseAbort!: () => void
     const abortGate = new Promise<void>(resolve => { releaseAbort = resolve })
-    const tools = await createQueueOwnerTools(input(test.projects[0]!, abortedDirectories, { statusBusy: false, abortGate }))
+    const tools = await createQueueOwnerTools(input(test.projects[0]!, abortedDirectories, { statusBusy: false, abortGate }), { tool, createOpencodeClient })
     const toolContext = context(test.projects[0]!)
 
     await enqueue(tools, toolContext, 'running-workflow')
@@ -244,7 +245,7 @@ describe('queue owner tools', { concurrency: false }, () => {
     const test = setup()
     let releaseAbort!: () => void
     const abortGate = new Promise<void>(resolve => { releaseAbort = resolve })
-    const tools = await createQueueOwnerTools(input(test.projects[0]!, [], { statusBusy: false, abortGate }))
+    const tools = await createQueueOwnerTools(input(test.projects[0]!, [], { statusBusy: false, abortGate }), { tool, createOpencodeClient })
     const toolContext = context(test.projects[0]!)
 
     await enqueue(tools, toolContext, 'controlled-workflow')
@@ -280,7 +281,7 @@ describe('queue owner tools', { concurrency: false }, () => {
 
   it('projects an internal prompt timeout as capacity-retaining queue recovery', async () => {
     const test = setup()
-    const tools = await createQueueOwnerTools(input(test.projects[0]!, []))
+    const tools = await createQueueOwnerTools(input(test.projects[0]!, []), { tool, createOpencodeClient })
     const toolContext = context(test.projects[0]!)
 
     await enqueue(tools, toolContext, 'prompt-timeout')
@@ -304,7 +305,7 @@ describe('queue owner tools', { concurrency: false }, () => {
     const test = setup()
     const abortedDirectories: string[] = []
     const createdSessions: string[] = []
-    const tools = await createQueueOwnerTools(input(test.projects[0]!, abortedDirectories, { statusBusy: false, createdSessions }))
+    const tools = await createQueueOwnerTools(input(test.projects[0]!, abortedDirectories, { statusBusy: false, createdSessions }), { tool, createOpencodeClient })
     const toolContext = context(test.projects[0]!)
 
     await enqueue(tools, toolContext, 'resumed-workflow')
@@ -343,7 +344,7 @@ describe('queue owner tools', { concurrency: false }, () => {
   it('classifies a terminal workflow failure and retries it without resetting usage', async () => {
     const test = setup()
     const createdSessions: string[] = []
-    const tools = await createQueueOwnerTools(input(test.projects[0]!, [], { statusBusy: false, createdSessions }))
+    const tools = await createQueueOwnerTools(input(test.projects[0]!, [], { statusBusy: false, createdSessions }), { tool, createOpencodeClient })
     const toolContext = context(test.projects[0]!)
 
     await enqueue(tools, toolContext, 'retry-workflow')
@@ -403,7 +404,7 @@ describe('queue owner tools', { concurrency: false }, () => {
 
   it('deletes terminal queue records and retained engine state', async () => {
     const test = setup()
-    const tools = await createQueueOwnerTools(input(test.projects[0]!, []))
+    const tools = await createQueueOwnerTools(input(test.projects[0]!, []), { tool, createOpencodeClient })
     const toolContext = context(test.projects[0]!)
 
     await enqueue(tools, toolContext, 'deleted-workflow')
@@ -451,7 +452,7 @@ describe('queue owner tools', { concurrency: false }, () => {
     const test = setup()
     const abortedDirectories: string[] = []
     const behavior = { statusBusy: true }
-    const tools = await createQueueOwnerTools(input(test.projects[0]!, abortedDirectories, behavior))
+    const tools = await createQueueOwnerTools(input(test.projects[0]!, abortedDirectories, behavior), { tool, createOpencodeClient })
     const toolContext = context(test.projects[0]!)
     await enqueue(tools, toolContext, 'retained-workflow')
     const running = await waitForStatus(tools, toolContext, 'retained-workflow', 'running')
@@ -609,7 +610,7 @@ describe('queue owner tools', { concurrency: false }, () => {
     fs.writeFileSync(leasePath, `${JSON.stringify(leaseRecord, null, 2)}\n`)
 
     const abortedDirectories: string[] = []
-    const tools = await createQueueOwnerTools(input(project, abortedDirectories))
+    const tools = await createQueueOwnerTools(input(project, abortedDirectories), { tool, createOpencodeClient })
     const recovered = JSON.parse(await tools.tool.queue_recover.execute({ former_runtime_terminated: true }, context(project)) as string)
     assert.equal(recovered.recovered, true)
     const record = JSON.parse(fs.readFileSync(path.join(queueDirectory, 'workflows', 'crash-window.json'), 'utf8'))
@@ -623,7 +624,7 @@ describe('queue owner tools', { concurrency: false }, () => {
   it('releases the scheduler lease even when engine disposal fails', async () => {
     const test = setup()
     const abortedDirectories: string[] = []
-    const tools = await createQueueOwnerTools(input(test.projects[0]!, abortedDirectories, { statusBusy: true }))
+    const tools = await createQueueOwnerTools(input(test.projects[0]!, abortedDirectories, { statusBusy: true }), { tool, createOpencodeClient })
     const toolContext = context(test.projects[0]!)
     await enqueue(tools, toolContext, 'uncertain-disposal')
     await waitForStatus(tools, toolContext, 'uncertain-disposal', 'running')
@@ -645,7 +646,7 @@ describe('queue owner tools', { concurrency: false }, () => {
     const abortedDirectories: string[] = []
     let releaseAbort!: () => void
     const abortGate = new Promise<void>(resolve => { releaseAbort = resolve })
-    const tools = await createQueueOwnerTools(input(test.projects[0]!, abortedDirectories, { statusBusy: false, abortGate }))
+    const tools = await createQueueOwnerTools(input(test.projects[0]!, abortedDirectories, { statusBusy: false, abortGate }), { tool, createOpencodeClient })
     const firstContext = context(test.projects[0]!)
     const secondContext = context(test.projects[1]!)
     await enqueue(tools, firstContext, 'first-disposal')

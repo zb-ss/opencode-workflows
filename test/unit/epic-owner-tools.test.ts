@@ -1,4 +1,4 @@
-import type { PluginInput, ToolContext } from '@opencode-ai/plugin'
+import { tool, type PluginInput, type ToolContext } from '@opencode-ai/plugin'
 import { execFileSync } from 'node:child_process'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
@@ -19,7 +19,7 @@ import {
   openEpicStore,
 } from '../../lib/epic-persistence.ts'
 import { getRuntimeDir } from '../../lib/paths.ts'
-import { createEpicOwnerTools } from '../../plugin/epic-owner-tools.ts'
+import { createEpicOwnerTools } from '../../lib/epic-owner-tools.ts'
 
 const CONFIG = {
   enabled: true,
@@ -219,7 +219,7 @@ describe('epic owner tools', () => {
     git(project, ['branch', 'base'])
     const requests: Parameters<ToolContext['ask']>[0][] = []
     const context = toolContext(project, 'session-1', async request => { requests.push(request) })
-    const hooks = await createEpicOwnerTools(coordinatorPluginInput(project, true, true), RUNTIME)
+    const hooks = await createEpicOwnerTools(coordinatorPluginInput(project, true, true), { tool }, RUNTIME)
 
     const started = JSON.parse(await hooks.tool.epic_start.execute({
       epic_id: 'epic-runtime', expected_revision: 0, expected_state_sha256: null, expected_generation: 1,
@@ -270,7 +270,7 @@ describe('epic owner tools', () => {
     temporaryDirectories.push(configDir)
     process.env.OPENCODE_CONFIG_DIR = configDir
     fs.writeFileSync(path.join(configDir, 'workflows.json'), JSON.stringify({ epic: { enabled: false } }))
-    const hooks = await createEpicOwnerTools({ client: {} } as PluginInput, RUNTIME)
+    const hooks = await createEpicOwnerTools({ client: {} } as PluginInput, { tool }, RUNTIME)
     const context = toolContext('/definitely/missing')
 
     const result = JSON.parse(await hooks.tool.epic_budget_update.execute(
@@ -290,7 +290,7 @@ describe('epic owner tools', () => {
     const test = fixture()
     const requests: Parameters<ToolContext['ask']>[0][] = []
     const context = toolContext(test.project, 'session-1', async request => { requests.push(request) })
-    const hooks = await createEpicOwnerTools(test.input, RUNTIME)
+    const hooks = await createEpicOwnerTools(test.input, { tool }, RUNTIME)
     const args = updateArgs(test.initial.revision, test.initial.state_sha256)
 
     const first = JSON.parse(await hooks.tool.epic_budget_update.execute(args, context) as string)
@@ -351,7 +351,7 @@ describe('epic owner tools', () => {
     }, test.initial.revision, test.initial.state_sha256, 1)!
     const requests: Parameters<ToolContext['ask']>[0][] = []
     const context = toolContext(test.project, 'session-1', async request => { requests.push(request) })
-    const hooks = await createEpicOwnerTools(test.input, RUNTIME)
+    const hooks = await createEpicOwnerTools(test.input, { tool }, RUNTIME)
 
     await hooks.tool.epic_budget_update.execute(updateArgs(running.revision, running.state_sha256), context)
     const afterUpdate = test.store.load()!
@@ -373,7 +373,7 @@ describe('epic owner tools', () => {
     const test = fixture()
     const requests: Parameters<ToolContext['ask']>[0][] = []
     const context = toolContext(test.project, 'session-1', async request => { requests.push(request) })
-    const hooks = await createEpicOwnerTools(test.input, RUNTIME)
+    const hooks = await createEpicOwnerTools(test.input, { tool }, RUNTIME)
     let current = test.initial
 
     const extend = async (updateId: string, extensionId: string, newLimit: number) => {
@@ -414,7 +414,7 @@ describe('epic owner tools', () => {
     const test = fixture()
     const requests: Parameters<ToolContext['ask']>[0][] = []
     const context = toolContext(test.project, 'session-1', async request => { requests.push(request) })
-    const hooks = await createEpicOwnerTools(test.input, RUNTIME)
+    const hooks = await createEpicOwnerTools(test.input, { tool }, RUNTIME)
 
     await assert.rejects(
       hooks.tool.epic_budget_update.execute(updateArgs(test.initial.revision, test.initial.state_sha256, {
@@ -438,7 +438,7 @@ describe('epic owner tools', () => {
   it('applies item-scoped policy only with matching telemetry', async () => {
     const test = fixture()
     const requests: Parameters<ToolContext['ask']>[0][] = []
-    const hooks = await createEpicOwnerTools(test.input, RUNTIME)
+    const hooks = await createEpicOwnerTools(test.input, { tool }, RUNTIME)
     const context = toolContext(test.project, 'session-1', async request => { requests.push(request) })
 
     await hooks.tool.epic_budget_update.execute(updateArgs(test.initial.revision, test.initial.state_sha256, {
@@ -458,7 +458,7 @@ describe('epic owner tools', () => {
     const test = fixture()
     const requests: Parameters<ToolContext['ask']>[0][] = []
     const context = toolContext(test.project, 'session-1', async request => { requests.push(request) })
-    const restarted = await createEpicOwnerTools(test.input, 'different-runtime-incarnation')
+    const restarted = await createEpicOwnerTools(test.input, { tool }, 'different-runtime-incarnation')
 
     await assert.rejects(
       restarted.tool.epic_budget_update.execute(
@@ -469,7 +469,7 @@ describe('epic owner tools', () => {
     )
     const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'epic-owner-outside-'))
     temporaryDirectories.push(outside)
-    const hooks = await createEpicOwnerTools(test.input, RUNTIME)
+    const hooks = await createEpicOwnerTools(test.input, { tool }, RUNTIME)
     await assert.rejects(
       hooks.tool.epic_budget_update.execute(
         updateArgs(test.initial.revision, test.initial.state_sha256),
@@ -483,7 +483,7 @@ describe('epic owner tools', () => {
 
   it('rejects child, foreign-owner, unverifiable, and denied invocations without mutation', async () => {
     const test = fixture({ 'session-child': 'session-1' })
-    const hooks = await createEpicOwnerTools(test.input, RUNTIME)
+    const hooks = await createEpicOwnerTools(test.input, { tool }, RUNTIME)
     const args = updateArgs(test.initial.revision, test.initial.state_sha256)
 
     await assert.rejects(
@@ -494,7 +494,7 @@ describe('epic owner tools', () => {
       hooks.tool.epic_budget_update.execute(args, toolContext(test.project, 'session-2')),
       EpicMissingError,
     )
-    const unverifiable = await createEpicOwnerTools({ client: {} } as PluginInput, RUNTIME)
+    const unverifiable = await createEpicOwnerTools({ client: {} } as PluginInput, { tool }, RUNTIME)
     await assert.rejects(
       unverifiable.tool.epic_budget_update.execute(args, toolContext(test.project)),
       /unable to verify/,

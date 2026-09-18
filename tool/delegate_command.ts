@@ -6,7 +6,7 @@
 
 import { tool, type ToolContext } from '@opencode-ai/plugin'
 
-import { executeDelegateCommand } from '../plugin/external-cli-delegation.ts'
+import { executeDelegateCommand } from '../lib/external-cli-delegation.ts'
 
 export default tool({
   description: 'Execute a /delegate subcommand. Pass the full command string in "input".',
