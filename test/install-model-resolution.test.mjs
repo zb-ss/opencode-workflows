@@ -461,9 +461,14 @@ describe('installer subprocess', () => {
     assert.notEqual(oldResult.status, 0)
     assert.match(oldResult.stderr, /1\.17\.20 or newer is required/)
 
-    const newFixture = createFixture('1.18.0')
+    const testedFixture = createFixture('1.18.31')
+    const testedResult = runInstaller(testedFixture, ['--dry-run'])
+    assert.equal(testedResult.status, 0, testedResult.stderr || testedResult.stdout)
+    assert.doesNotMatch(testedResult.stderr, /newer than the tested version/)
+
+    const newFixture = createFixture('1.19.0')
     const newResult = runInstaller(newFixture, ['--dry-run'])
     assert.equal(newResult.status, 0, newResult.stderr || newResult.stdout)
-    assert.match(newResult.stderr, /newer than the tested version 1\.17\.20/)
+    assert.match(newResult.stderr, /newer than the tested version 1\.18\.31/)
   })
 })
