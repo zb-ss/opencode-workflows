@@ -3,6 +3,7 @@
  * All plugins and lib modules import from here.
  */
 
+import type { tool } from '@opencode-ai/plugin'
 import type { PermissionRule } from './autonomy-policy.ts'
 
 // Gate status lifecycle: pending -> in_progress -> passed|failed|skipped
@@ -183,6 +184,15 @@ export interface PluginInput {
   worktree: string;
   serverUrl: string;
   $: any; // BunShell
+}
+
+/**
+ * Plugin API runtime values handed from a plugin/ entry point to its lib/
+ * implementation. Installed lib/ modules resolve packages from the OpenCode
+ * config directory, not from the plugin directory's pinned dependencies.
+ */
+export interface PluginToolkit {
+  tool: typeof tool;
 }
 
 /**
