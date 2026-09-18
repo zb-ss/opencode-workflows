@@ -15,6 +15,7 @@ const PACKAGE_DATA = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.js
 const MANIFEST_NAME = '.opencode-workflows-manifest.json'
 const MANIFEST_VERSION = 2
 const MIN_OPENCODE_VERSION = '1.17.20'
+const TESTED_OPENCODE_VERSION = '1.18.31'
 const ENV_FILE_NAME = 'opencode-workflows.env'
 const MODEL_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*\/\S+$/
 const VARIANT_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
@@ -402,10 +403,8 @@ export function checkOpenCodeVersion() {
   const version = parseVersion(`${result.stdout}\n${result.stderr}`)
   if (!version) return { ok: false, version: null, error: 'Could not parse the OpenCode version.' }
 
-  const minimum = parseVersion(MIN_OPENCODE_VERSION)
-  const comparison = compareVersions(version, minimum)
   const versionText = version.join('.')
-  if (comparison < 0) {
+  if (compareVersions(version, parseVersion(MIN_OPENCODE_VERSION)) < 0) {
     return {
       ok: false,
       version: versionText,
@@ -415,8 +414,8 @@ export function checkOpenCodeVersion() {
   return {
     ok: true,
     version: versionText,
-    warning: comparison > 0
-      ? `OpenCode ${versionText} is newer than the tested version ${MIN_OPENCODE_VERSION}. Run --doctor after upgrades.`
+    warning: compareVersions(version, parseVersion(TESTED_OPENCODE_VERSION)) > 0
+      ? `OpenCode ${versionText} is newer than the tested version ${TESTED_OPENCODE_VERSION}. Run --doctor after upgrades.`
       : null,
   }
 }
