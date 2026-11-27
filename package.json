@@ -18,7 +18,11 @@
     "@opencode-ai/plugin": "1.17.20",
     "@opencode-ai/sdk": "1.17.20",
     "ajv": "8.20.0",
-    "zod": "4.4.3"
+    "zod": "4.6.7"
+  },
+  "overrides": {
+    "effect": "4.1.7",
+    "zod": "$zod"
   },
   "devDependencies": {
     "@types/node": "26.1.1",
