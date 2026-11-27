@@ -30,6 +30,8 @@ import { OpenCodeSessionAdapter } from '../lib/opencode-session.ts'
 import { getConfigDir, hashIdentifier, isPathInside } from '../lib/paths.ts'
 import { throwIfAborted } from '../lib/tool-context.ts'
 import { log } from '../lib/logger.ts'
+import { FifoProcessQueue } from '../lib/fifo-process-queue.ts'
+import { delegationMergeError } from '../lib/delegation-merge-policy.ts'
 
 const DEFAULT_TIMEOUT_MS = 300_000
 const DEFAULT_AWAIT_TIMEOUT_MS = 600_000
@@ -124,56 +126,6 @@ interface BatchState {
   tasks: Map<string, DelegationTask>
   history: Map<string, TrackedExecution[]>
   abortController: AbortController
-}
-
-interface QueueEntry<T> {
-  definition: T
-  run: (definition: T) => Promise<void>
-  resolve: () => void
-  reject: (error: unknown) => void
-}
-
-/** A strict FIFO queue which retains each full definition until it starts. */
-export class FifoProcessQueue<T> {
-  private readonly pending: Array<QueueEntry<T>> = []
-  private active = 0
-
-  constructor(private readonly concurrency: number) {
-    if (!Number.isInteger(concurrency) || concurrency < 1) {
-      throw new Error('process queue concurrency must be a positive integer')
-    }
-  }
-
-  enqueue(definition: T, run: (definition: T) => Promise<void>): Promise<void> {
-    return new Promise<void>((resolve, reject) => {
-      this.pending.push({ definition, run, resolve, reject })
-      this.drain()
-    })
-  }
-
-  snapshot(): { pending: number; running: number } {
-    return { pending: this.pending.length, running: this.active }
-  }
-
-  private drain(): void {
-    while (this.active < this.concurrency && this.pending.length > 0) {
-      const entry = this.pending.shift()
-      if (!entry) return
-
-      this.active++
-      let completion: Promise<void>
-      try {
-        completion = entry.run(entry.definition)
-      } catch (error) {
-        completion = Promise.reject(error)
-      }
-
-      void completion.then(entry.resolve, entry.reject).finally(() => {
-        this.active--
-        this.drain()
-      })
-    }
-  }
 }
 
 function workflowsJsonPath(): string {
@@ -714,25 +666,6 @@ function executionStatus(tracked: TrackedExecution): string {
   if (tracked.aborted) return 'aborted'
   if (tracked.timedOut) return 'timed_out'
   return tracked.exitCode === 0 ? 'success' : 'failed'
-}
-
-export function delegationMergeError(input: {
-  completed: boolean
-  exitCode: number | null
-  aborted: boolean
-  timedOut: boolean
-  executionError: string | null
-  taskStatus: string | null
-  targetBranch: string
-  featureBranch: string
-}): string | null {
-  if (!input.completed) return 'Task is still running'
-  if (input.exitCode !== 0 || input.aborted || input.timedOut || input.executionError) {
-    return 'Task did not complete successfully'
-  }
-  if (input.taskStatus !== 'passed') return 'Task requires a recorded passing review before merge'
-  if (input.targetBranch !== input.featureBranch) return `Merge target must be the authorized feature branch ${input.featureBranch}`
-  return null
 }
 
 function executionDuration(tracked: TrackedExecution): number {

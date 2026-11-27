@@ -7,10 +7,10 @@ import path from 'node:path'
 import { describe, it, type TestContext } from 'node:test'
 
 import {
-  ExternalCliDelegation,
   getSessionDelegationDirectory,
   getSessionRunsDirectory,
-} from '../../plugin/external-cli-delegation.ts'
+} from '../../lib/external-cli-delegation.ts'
+import { ExternalCliDelegation } from '../../plugin/external-cli-delegation.ts'
 
 interface LoggedInvocation {
   provider: 'claude' | 'agy'

@@ -2,7 +2,8 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { describe, it } from 'node:test'
-import { delegationMergeError, FifoProcessQueue } from '../../plugin/delegation-orchestrator.ts'
+import { delegationMergeError } from '../../lib/delegation-merge-policy.ts'
+import { FifoProcessQueue } from '../../lib/fifo-process-queue.ts'
 
 interface TaskDefinition {
   id: string
