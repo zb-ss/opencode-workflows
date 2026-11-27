@@ -20,8 +20,14 @@ import {
 
 const SHA256SUM = ['/usr/bin/sha256sum', '/bin/sha256sum'].find(candidate => fs.existsSync(candidate))
   ?? '/usr/bin/sha256sum'
-const YES = ['/usr/bin/yes', '/bin/yes'].find(candidate => fs.existsSync(candidate)) ?? '/usr/bin/yes'
-const ECHO = ['/usr/bin/echo', '/bin/echo'].find(candidate => fs.existsSync(candidate)) ?? '/bin/echo'
+// These two utilities are really spawned. The executor runs a publisher through a
+// descriptor path (/dev/fd/4), and the uutils multicall coreutils that Ubuntu 26.04
+// installs by default refuse that ("Requested utility `4` does not match executable
+// name"). The required gnu-coreutils package keeps GNU builds under a gnu prefix.
+const YES = ['/usr/bin/gnuyes', '/usr/bin/yes', '/bin/yes'].find(candidate => fs.existsSync(candidate))
+  ?? '/usr/bin/yes'
+const ECHO = ['/usr/bin/gnuecho', '/usr/bin/echo', '/bin/echo'].find(candidate => fs.existsSync(candidate))
+  ?? '/bin/echo'
 const ROOT_SCRIPT = ['/usr/bin/ldd', '/bin/ldd'].find(candidate => fs.existsSync(candidate))
 const HAS_TRUSTED_UTILITIES = fs.existsSync(SHA256SUM) && fs.existsSync(YES)
   && fs.existsSync(ECHO) && process.platform !== 'win32'
